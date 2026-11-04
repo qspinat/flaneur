@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
+  <!-- a Paris street plate: enamel blue, green rim, white fillet, the F of Flâneur -->
+  <rect x="1" y="5" width="30" height="22" rx="4" fill="#2f6b4f"/>
+  <rect x="3" y="7" width="26" height="18" rx="2.5" fill="#1b3a6b"/>
+  <rect x="4.5" y="8.5" width="23" height="15" rx="1.5" fill="none" stroke="#ede4d3" stroke-width="1"/>
+  <path d="M12 11.5h8.5v2.6H15v2.2h4.6v2.5H15v3.7h-3z" fill="#ede4d3"/>
+</svg>

@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="fr">
+  <head>
+    <meta charset="UTF-8" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https://panoramax-storage-public-fast.s3.gra.perf.cloud.ovh.net https://panoramax.openstreetmap.fr https://panoramax.ign.fr; connect-src 'self' https://data.geopf.fr https://panoramax-storage-public-fast.s3.gra.perf.cloud.ovh.net https://panoramax.openstreetmap.fr https://panoramax.ign.fr; worker-src blob:; font-src 'self'; object-src 'none'; base-uri 'self'; form-action 'none'" />
+    <link rel="preconnect" href="https://data.geopf.fr" crossorigin />
+    <link rel="icon" type="image/svg+xml" href="favicon.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Flâneur en 3D, le vieux Paris sur la rue d'aujourd'hui</title>
+    <meta name="description" content="Se promener dans la rue d'aujourd'hui, les photographies d'archive à leur place dans la vue." />
+    <script type="module" crossorigin src="./assets/three-BYwBjsbS.js"></script>
+    <link rel="modulepreload" crossorigin href="./assets/preload-helper-CixkRvpr.js">
+    <link rel="stylesheet" crossorigin href="./assets/preload-helper-C1MaKOOe.css">
+    <link rel="stylesheet" crossorigin href="./assets/three-DMx7gAZk.css">
+  </head>
+  <body class="three">
+    <div id="view" aria-label="Vue de la rue : faites glisser pour regarder autour de vous"></div>
+    <div id="ways"></div>
+    <div id="pointers"></div>
+
+    <a id="plate" class="plate" href="#" aria-label="Rue" hidden>
+      <span id="plate-arrt" class="plate-arrt"></span>
+      <span id="plate-kind" class="plate-kind"></span>
+      <span id="plate-name" class="plate-name"></span>
+    </a>
+
+    <a id="back" class="pill" href="./">Retour aux photos</a>
+
+    <p id="notice" role="status" hidden></p>
+
+    <section id="card" hidden aria-live="polite">
+      <button id="card-close" type="button" aria-label="Fermer">×</button>
+      <p id="card-when"></p>
+      <h1 id="card-title"></h1>
+      <p id="card-credit"></p>
+      <p id="card-links"></p>
+    </section>
+
+    <div id="minimap" role="button" tabindex="0" aria-label="Ouvrir le plan"></div>
+
+    <form id="range" class="years" aria-label="Années montrées"></form>
+
+    <label id="fade-control">aujourd'hui <input id="fade" type="range" min="0" max="100" value="85" aria-label="Autrefois ou aujourd'hui" /> autrefois</label>
+
+    <details id="credits">
+      <summary>Crédits</summary>
+      <div id="credits-list"></div>
+    </details>
+
+    <div id="plan" hidden>
+      <div id="plan-map"></div>
+      <button id="plan-close" class="pill" type="button">Revenir à la rue</button>
+      <p id="plan-hint">Touchez un point pour vous y rendre.</p>
+    </div>
+
+  </body>
+</html>
