@@ -15,6 +15,7 @@ import {
   hashOf,
   json,
   parse3d,
+  parsePhoto3d,
   shownIn,
   whenLabel,
   yearsLabel,
@@ -98,11 +99,25 @@ class Walk3d {
     return DATA + (sizes ? fitting(sizes, this.viewer.container.clientWidth * density()) : photo.image);
   }
 
-  /** Where the link says, else the first panorama. */
+  /** Where the link says (a place, or a photo: where it was placed), else the first panorama. */
   async start(): Promise<void> {
+    if (!(await this.followLink())) await this.go(this.scene.panoramas[0], 0);
+  }
+
+  /** Go where the link says; false when it says nowhere this walk knows. */
+  private async followLink(): Promise<boolean> {
     const place = parse3d(location.hash);
-    if (place) await this.goToPlace(place);
-    else await this.go(this.scene.panoramas[0], 0);
+    if (place) {
+      await this.goToPlace(place);
+      return true;
+    }
+    const asked = parsePhoto3d(location.hash);
+    const photo = asked && this.scene.photos.find((p) => p.id === asked.id);
+    const home = photo && this.scene.panoramas.find((p) => p.id === photo.shown[0].panorama);
+    if (!asked || !photo || !home) return false;
+    this.years.set(asked.range);
+    await this.go(home, photo.shown[0].registration.view.heading);
+    return true;
   }
 
   private async goToPlace({ lon, lat, heading, range }: Place3d): Promise<void> {
@@ -168,8 +183,7 @@ class Walk3d {
     $<HTMLInputElement>('fade').addEventListener('input', () => this.layer.setFade(fadeOf()));
     $('card-close').addEventListener('click', () => this.showCard(null));
     window.addEventListener('hashchange', () => {
-      const place = parse3d(location.hash);
-      if (place && location.hash !== this.hash()) void this.goToPlace(place);
+      if (location.hash !== this.hash()) void this.followLink();
     });
   }
 
@@ -287,8 +301,11 @@ class Walk3d {
     $('plan').hidden = false;
     this.maps.openPlan($('plan-map'), this.spot, (id) => {
       this.closePlan();
+      const placed = this.scene.photos.find((p) => p.id === id);
+      const home = placed && this.scene.panoramas.find((p) => p.id === placed.shown[0].panorama);
       const spot = this.walk.find((p) => p.id === id);
-      if (spot) void this.go(nearestTo(this.scene, spot.lon, spot.lat), spot.heading ?? this.heading);
+      if (home) void this.go(home, placed.shown[0].registration.view.heading); // where it shows
+      else if (spot) void this.go(nearestTo(this.scene, spot.lon, spot.lat), spot.heading ?? this.heading);
     });
     $('plan-close').focus();
   }

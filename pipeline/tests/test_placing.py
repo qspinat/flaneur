@@ -402,3 +402,24 @@ def test_carried_proposals_that_fail_leave_the_queue_going(page, one):
     status, queue = one(sources, "GET", "/api/queue")
 
     assert status == 200 and json.loads(queue)["photo"]["id"] == "pm:1"
+
+
+def test_a_photo_placed_on_an_image_it_no_longer_has_comes_back_to_be_seen_again(page, one):
+    sources, proposal = page
+    sources.photos["pm:1"]["inputs"] = "recropped"
+    placings.record(
+        sources.placings,
+        "pm:1",
+        "fits",
+        3.0,
+        lon=2.3467,
+        lat=48.8521,
+        heading=50.0,
+        registration=proposal,
+        inputs="before",
+    )
+
+    _, queue = one(sources, "GET", "/api/queue")
+
+    head = json.loads(queue)["photo"]
+    assert (head["id"], head["why"]) == ("pm:1", "revoir")

@@ -33,6 +33,7 @@ export interface Photo {
   eras: string[]; // the same view at other dates, one per date, oldest first
   in_3d: boolean; // shown in the 3D walk (placed in its panorama)
   no_3d: boolean; // no panorama sees it: no 3D walk from it
+  flipped?: boolean; // the print turned the right way round: shown mirrored (not in an older export)
   aspect: number | null; // height over width (null in an older export)
 }
 
@@ -186,4 +187,16 @@ export async function json<T>(name: string): Promise<T> {
  *  today is near enough (a photo no panorama sees), or nothing (not placed yet). */
 export function offerOf3d(photo: Photo): 'link' | 'far' | null {
   return photo.in_3d ? 'link' : photo.no_3d ? 'far' : null;
+}
+
+/** The 3D walk's link opening on a photo, where it was placed: `#photo=<id>,<min>-<max>`. */
+export function photo3d(id: string, [min, max]: [number, number]): string {
+  return `#photo=${encodeURIComponent(id)},${min}-${max}`;
+}
+
+export function parsePhoto3d(hash: string): { id: string; range: [number, number] } | null {
+  const found = /^#photo=([^,]+),(\d{4})-(\d{4})$/.exec(hash);
+  if (!found) return null;
+  const [min, max] = [Number(found[2]), Number(found[3])];
+  return min > max ? null : { id: decodeURIComponent(found[1]), range: [min, max] };
 }

@@ -91,6 +91,14 @@ def next_photo(sources: Sources, nearest: dict[str, float], where: dict) -> dict
     nearest panorama, `where`: x, y, by photo), how many are left, and the photos placed (to
     reopen from the map)."""
     held, skipped, answers = placings.state(sources.placings)
+    # placed on an image the photo no longer has (cropped again): to see again, first
+    stale = {
+        i
+        for i, r in held.items()
+        if r["answer"] in placings.PLACED
+        and r["inputs"] != sources.photos.get(i, {}).get("inputs", "")
+    }
+    held = {i: r for i, r in held.items() if i not in stale}
     found = queueing.order(
         list(sources.photos),
         where=where,
@@ -99,7 +107,7 @@ def next_photo(sources: Sources, nearest: dict[str, float], where: dict) -> dict
             for i, r in held.items()
         },
         skipped=skipped,
-        ahead=sources.ahead(),
+        ahead={**{i: "revoir" for i in sorted(stale)}, **sources.ahead()},
         graph=sources.graph,
         nearest_m=nearest,
         answered=sum(i in sources.photos for i in answers),

@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest';
 import {
   arrondissementLabel,
   offerOf3d,
+  parsePhoto3d,
+  photo3d,
   distanceLabel,
   erasOf,
   fitting,
@@ -131,5 +133,15 @@ describe('the 3D walk, from a photo', () => {
 
   it('is offered when a photo is placed in it, whatever else was answered', () => {
     expect(offerOf3d(photo('d', { in_3d: true, no_3d: true }))).toBe('link');
+  });
+});
+
+
+describe('the 3D walk, opened on a photo', () => {
+  it('names the photo and the years in its link, and reads them back', () => {
+    const link = photo3d('paris_musees:171285', [1855, 1878]);
+
+    expect(parsePhoto3d(link)).toEqual({ id: 'paris_musees:171285', range: [1855, 1878] });
+    expect(parsePhoto3d('#2.3466,48.852,40,1850-2026')).toBeNull();
   });
 });

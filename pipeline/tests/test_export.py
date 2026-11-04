@@ -293,3 +293,13 @@ def test_a_photo_moved_on_the_placing_page_loses_the_view_of_today_of_its_old_pl
     walk = export.photos(conn, tmp_path / "pilot", tmp_path / "none.jsonl", {}, far)
 
     assert next(p for p in walk if p.id == "pm:1").moved_by_review
+
+
+def test_a_print_placed_flipped_is_shown_the_right_way_round_and_says_so(tmp_path):
+    conn = two_photos(tmp_path)
+    placed = {"pm:1": {**PLACED["pm:1"], "flipped": True}}
+
+    walk = export.photos(conn, tmp_path / "pilot", tmp_path / "none.jsonl", {}, placed)
+
+    me = next(p for p in walk if p.id == "pm:1")
+    assert me.for_site()["flipped"] is True and "image retournée" in me.for_site()["credit"]

@@ -184,7 +184,9 @@ def _placing_answers(
     the answers placing a photo in its panorama (on the image it had then), and the photos no
     panorama sees."""
     held = placings.holding(path)
-    places = {i: {k: r[k] for k in ("lon", "lat", "heading", "at")} for i, r in held.items()}
+    places = {
+        i: {k: r[k] for k in ("lon", "lat", "heading", "at", "flipped")} for i, r in held.items()
+    }
     in_3d = {i: r for i, r in held.items() if r["answer"] in placings.PLACED}
     return places, in_3d, {i for i, r in held.items() if r["answer"] == "far"}
 
@@ -214,6 +216,9 @@ def export_walk(images: bool = True) -> None:
     places, in_3d, no_3d = _placing_answers()
     with closing(db.connect(DB_PATH)) as conn:
         walk = export.build(conn, DATA / "pilot", _walk(conn, places))
+    elsewhere = len(in_3d) - len(_on_image_now(in_3d))
+    if elsewhere:  # their image changed since: the placing page asks for them again
+        typer.echo(f"{elsewhere} photos placées sur une image qu'elles n'ont plus : à revoir")
     if images:
         placed_on = {i: r["inputs"] for i, r in in_3d.items()}
         with httpx.Client(timeout=120, follow_redirects=True) as client:

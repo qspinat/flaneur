@@ -35,7 +35,7 @@ const check = (ok, what) => {
   if (!ok) failed++;
 };
 
-await page.goto(`${base}3d.html#${fixture.lon},${fixture.lat},${fixture.heading},1850-2026`);
+await page.goto(`${base}3d.html#photo=test%3Aboard,1850-2026`); // as the photo walk's "En 3D" opens it
 // the policy blocks waitForFunction's evaluation: evaluate is not, polled
 const ready = async () => {
   for (let i = 0; i < 100 && !(await page.evaluate(() => window.ready)); i++) await page.waitForTimeout(100);
@@ -75,9 +75,10 @@ check((await page.evaluate(() => location.hash)) !== before, 'a step forward goe
 await page.route(/panoramax|\/data\/panoramas\//, (route) => route.abort());
 await page.evaluate(() => (window.ready = false));
 const stood = await page.evaluate(() => location.hash);
-await page.keyboard.press('ArrowUp');
+await page.evaluate((f) => (location.hash = `#${(f.lon + 0.002).toFixed(5)},${f.lat.toFixed(5)},0,1850-2026`), fixture); // a panorama 150 m east
 await ready();
 await page.waitForTimeout(500);
+await page.waitForTimeout(500); // the link written again where one stood
 check((await page.locator('#notice').isVisible()) && (await page.evaluate(() => location.hash)) === stood, 'a view that cannot be loaded leaves one where one stood, told so');
 check(!(await page.evaluate(() => window.__refused)).length, `nothing refused by the policy ${JSON.stringify(await page.evaluate(() => window.__refused))}`);
 check(!errors.length, `no script error ${errors.join(' | ')}`);

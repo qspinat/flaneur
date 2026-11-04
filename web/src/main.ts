@@ -8,9 +8,9 @@ import {
   distanceLabel,
   erasOf,
   fitting,
-  format3d,
   hashOf,
   offerOf3d,
+  photo3d,
   json,
   largest,
   photoIdFrom,
@@ -31,10 +31,11 @@ const AROUND_YEARS = 5; // the 3D walk opens on the photo's years, and this many
 const PLAN_LAST = 1950; // the plan's years end here, or at the last year a photograph has
 
 /** The 3D walk at a photo's place, looking its way, around its years. */
+/** The 3D walk opened on a photo: on the panorama it was placed in, facing it. */
 function in3d(photo: Photo): string {
   const years = span(photo.years);
   const range: [number, number] = years ? [years[0] - AROUND_YEARS, years[1] + AROUND_YEARS] : [FIRST_YEAR, LAST_YEAR];
-  return format3d({ lon: photo.lon, lat: photo.lat, heading: photo.heading ?? 0, range });
+  return photo3d(photo.id, range);
 }
 
 const WAYS: { way: Direction; label: string; key: string; arrow: string }[] = [
@@ -262,6 +263,7 @@ class Walker {
     img.srcset = srcsetOf(photo.images);
     img.src = DATA + largest(photo.images);
     img.alt = photo.title;
+    img.classList.toggle('mirrored', !!photo.flipped);
     $('print-when').textContent = whenLabel(photo.years);
     $('print-title').textContent = photo.title;
     if (reveal) {
@@ -418,6 +420,7 @@ class Walker {
           srcset: srcsetOf(there.images),
           src: DATA + largest(there.images),
         });
+        img.classList.toggle('mirrored', !!there.flipped);
         const words = document.createElement('span');
         words.className = 'onward-words';
         words.append(
@@ -441,6 +444,7 @@ class Walker {
     const img = $<HTMLImageElement>('photo');
     img.src = DATA + (today ? today.image : this.sizeFor(photo));
     img.alt = today ? "Le même endroit aujourd'hui" : photo.title;
+    img.classList.toggle('mirrored', !today && !!photo.flipped); // a print turned the right way
     $('when').textContent = today ? today.taken.slice(0, 4) : whenLabel(photo.years);
     $('title').textContent = photo.title;
     $('caption').textContent = photo.caption ?? '';

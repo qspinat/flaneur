@@ -34,7 +34,7 @@ r, _ = registration.fit(
     spread * [800, 600], cv2.perspectiveTransform(spread[None], h)[0] * side, (600, 800), side,
     p.id, registration.ViewOf(heading=140.0), axes,
 )
-seen = registration.ViewOf(heading=150.0, pitch=0.0, fov=fov)  # as the page opens on it
+seen = registration.ViewOf(heading=r.view.heading, pitch=0.0, fov=fov)  # as "En 3D" opens it
 view = match.perspective(equirect, axes, seen.heading, seen.fov, side, seen.pitch)
 cv2.imwrite(str(out / "expected.png"), registration.composite(view, board, r, seen, axes))
 json.dump(

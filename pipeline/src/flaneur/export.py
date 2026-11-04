@@ -95,6 +95,7 @@ class WalkPhoto:
     reviewed: bool = False  # its place was confirmed or fixed by hand (not exported)
     moved_by_review: bool = False  # fixed by hand far from the proposed place or direction
     in_3d: bool = False  # shown in the 3D walk (placed in its panorama by the user)
+    flipped: bool = False  # the print turned the right way round (it was mirrored)
     no_3d: bool = False  # no panorama sees it (answered so on the placing page)
     image: str | None = None  # path of the exported image, relative to the data folder
     # each size's width as written, by its side
@@ -140,6 +141,7 @@ class WalkPhoto:
             "eras": self.eras,
             "in_3d": self.in_3d,
             "no_3d": self.no_3d,
+            "flipped": self.flipped,
         }
 
 
@@ -205,6 +207,7 @@ def photos(
             by_hand = decided if reviewed else None
         found = None if by_hand else situated.get(r["photo_id"])
         place = by_hand or found or r
+        flipped = bool(set_here and by_hand is set_here and set_here.get("flipped"))
         # the crop drawn or accepted by hand on this very print, else the one proposed
         own = decided if decided and decided["id"] == f"photo:{r['photo_id']}" else {}
         frame = own.get("crop") or info.get("suggested_crop")
@@ -215,7 +218,8 @@ def photos(
                 caption=r["caption"],
                 years=info["years"],
                 photographer=display_name(r["photographer"]),
-                credit=f"{r['credit']}, {LICENSES.get(r['license'], r['license'])}",
+                credit=f"{r['credit']}, {LICENSES.get(r['license'], r['license'])}"
+                + ("; image retournée" if flipped else ""),
                 record_url=https_or_none(r["record_url"]),
                 lon=place["lon"],
                 lat=place["lat"],
@@ -226,6 +230,7 @@ def photos(
                 crop=None if frame == [0, 0, 1, 1] else frame,
                 reviewed=by_hand is not None,
                 moved_by_review=bool(by_hand) and _moved(r, by_hand),
+                flipped=flipped,
             )
         )
     return walk

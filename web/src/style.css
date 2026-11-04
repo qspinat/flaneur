@@ -424,3 +424,6 @@ a.era { text-decoration: none; }
 
 /* No 3D walk from this photo: said plainly, under the dates. */
 #no-3d { margin: 8px 0 0; color: var(--sepia); font: italic 14px var(--serif); }
+
+/* A print that was mirrored, shown the right way round (its credit says so). */
+.mirrored { scale: -1 1; }
