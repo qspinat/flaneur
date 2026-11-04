@@ -1,0 +1,212 @@
+"""Place each photo from its reading: the street it names, or the corner where the camera
+stood when the caption says "vue prise de <another street>".
+
+A photo of a street that has since been removed gets the status "removed": its place will
+come from the old maps (Jacoubet), not from today's streets.
+"""
+
+import json
+import sqlite3
+import statistics
+from collections import Counter
+from dataclasses import dataclass
+
+from shapely.geometry import Point
+from shapely.geometry.base import BaseGeometry
+
+from flaneur import db, dedup
+from flaneur.gazetteer import Gazetteer, Street, from_geojson, long_axis, to_geojson, to_metres
+from flaneur.read import NOT_A_STREET_VIEW, StreetMention, find_streets
+
+# Two streets closer than this are taken to meet: the camera stood where they meet.
+CORNER_TOLERANCE_M = 15
+
+
+@dataclass(frozen=True)
+class Location:
+    # "corner": the camera stood where the photo's street meets the "vue prise de" street;
+    # "viewpoint_street": on the "vue prise de" street, which does not meet the photo's;
+    # "street": somewhere along the photo's street; "ambiguous": the name fits several
+    # streets and nothing tells which; "removed": the street is gone (old maps will place
+    # it); "not_found": no street of the caption is known.
+    status: str
+    label: str | None = None
+    street: Street | None = None
+    point: Point | None = None  # Lambert-93, when the camera point is known
+    precision_m: float | None = None  # None when unknown
+
+
+def _first_found(labels: list[str], arrondissements: list[int], gazetteer: Gazetteer):
+    """The first named street the gazetteer knows, with its candidates."""
+    for label in labels:
+        if found := gazetteer.lookup(label, arrondissements):
+            return label, found
+    return None, []
+
+
+def _half_length(geometry: BaseGeometry) -> float:
+    """Half the long side of the street's footprint: how far along it the camera may be."""
+    start, end = long_axis(geometry)
+    return Point(start).distance(Point(end)) / 2
+
+
+def _along(street: Street) -> float | None:
+    """Precision of "somewhere along this street": unknown when the old street was only part
+    of today's (its geometry is the whole of today's street)."""
+    return None if street.partial else _half_length(street.geometry)
+
+
+def choose(found: list[Street]) -> Street | None:
+    """The street a name designates among the gazetteer's candidates, or None when several
+    places fit. A name shared by today's street and an old name of another street ("pont
+    Neuf" was also an old name of the pont Saint-Michel) is taken as today's street.
+    TODO: compare the photo's date with the renaming date in the City's note."""
+    placed = [s for s in found if s.geometry is not None]
+    candidates = [s for s in placed if s.status == "current"] or placed
+    return candidates[0] if len({id(s.geometry) for s in candidates}) == 1 else None
+
+
+def locate(reading: dict, gazetteer: Gazetteer) -> Location:
+    streets = [StreetMention(**s).label for s in json.loads(reading["streets"])]
+    arrondissements = json.loads(reading["arrondissements"])
+    label, found = _first_found(streets, arrondissements, gazetteer)
+    if not found:
+        return Location("not_found")
+    if all(s.geometry is None for s in found):
+        return Location("removed", label, found[0])
+    street = choose(found)
+    if street is None:
+        return Location("ambiguous", label)
+    if reading["viewpoint"]:
+        # Every street named in the viewpoint, except the photo's own street.
+        others = [
+            (mention.label, other)
+            for mention in find_streets(reading["viewpoint"])
+            if (other := choose(gazetteer.lookup(mention.label, arrondissements)))
+            and other.geometry is not street.geometry
+        ]
+        for other_label, other in others:
+            if street.geometry.distance(other.geometry) <= CORNER_TOLERANCE_M:
+                meeting = street.geometry.buffer(CORNER_TOLERANCE_M).intersection(
+                    other.geometry.buffer(CORNER_TOLERANCE_M)
+                )
+                return Location(
+                    "corner",
+                    f"{label} × {other_label}",
+                    street,
+                    meeting.centroid,
+                    precision_m=2 * CORNER_TOLERANCE_M,
+                )
+        if others:
+            other_label, other = others[0]
+            return Location("viewpoint_street", other_label, other, precision_m=_along(other))
+    return Location("street", label, street, precision_m=_along(street))
+
+
+# From the most precise kind of place to the least.
+STATUS_RANK = ("corner", "viewpoint_street", "street", "removed", "ambiguous", "not_found")
+
+
+def _rank(location: Location) -> tuple[int, float]:
+    precision = location.precision_m if location.precision_m is not None else float("inf")
+    return STATUS_RANK.index(location.status), precision
+
+
+def locate_negative(readings: list[dict], gazetteer: Gazetteer) -> Location:
+    """Where a negative printed several times was taken, from all its prints' captions read
+    together: one print may name the street, another where the camera stood ("vue prise de
+    la rue Galande"), so each print's streets are tried with every print's viewpoint."""
+    viewpoints = {r["viewpoint"] for r in readings}
+    return min(
+        (locate({**r, "viewpoint": v}, gazetteer) for r in readings for v in viewpoints),
+        key=_rank,
+    )
+
+
+def _street_row(street: Street) -> dict:
+    return {
+        "id": street.id,
+        "label": street.label,
+        "status": street.status,
+        "current_label": street.current_label,
+        "arrondissements": json.dumps(list(street.arrondissements)),
+        "note": street.note,
+        "geometry": to_geojson(street.geometry) if street.geometry is not None else None,
+    }
+
+
+def locate_all(conn: sqlite3.Connection, gazetteer: Gazetteer) -> Counter[str]:
+    """Locate every photo that may be a street view. Returns how many got each status."""
+    excluded = ", ".join("?" * len(NOT_A_STREET_VIEW))
+    readings = conn.execute(
+        f"SELECT * FROM readings WHERE kind NOT IN ({excluded})", sorted(NOT_A_STREET_VIEW)
+    ).fetchall()
+    locations = {r["photo_id"]: locate(r, gazetteer) for r in readings}
+    # A print of a negative printed several times (see flaneur.dedup) takes the place all
+    # its prints' captions give together when it is of a more precise kind than its own (a
+    # corner rather than a street). Two streets of the same kind are not compared: a shorter
+    # street is not a truer one.
+    read = {
+        r["photo_id"]: dict(r)
+        for r in conn.execute(
+            "SELECT * FROM readings WHERE photo_id IN (SELECT photo_id FROM copies)"
+        )
+    }
+    for negative in {tuple(p) for p in dedup.negatives(conn).values()}:
+        prints = [read[i] for i in negative if i in read]
+        if not prints:
+            continue
+        best = locate_negative(prints, gazetteer)
+        for r in prints:
+            own = locations.get(r["photo_id"])
+            if own and _rank(best)[0] < _rank(own)[0]:
+                locations[r["photo_id"]] = best
+    # Each street is stored once, however many photos show it.
+    streets = {loc.street.id: loc.street for loc in locations.values() if loc.street}
+    db.save_streets(conn, (_street_row(s) for s in streets.values()))
+    with conn:  # photos no longer read as street views lose their position
+        conn.execute(
+            f"DELETE FROM locations WHERE photo_id NOT IN "
+            f"(SELECT photo_id FROM readings WHERE kind NOT IN ({excluded}))",
+            sorted(NOT_A_STREET_VIEW),
+        )
+    db.save_locations(
+        conn,
+        (
+            {
+                "photo_id": photo_id,
+                "status": loc.status,
+                "label": loc.label,
+                "street_id": loc.street.id if loc.street else None,
+                "point": to_geojson(loc.point) if loc.point else None,
+                "precision_m": loc.precision_m,
+            }
+            for photo_id, loc in locations.items()
+        ),
+    )
+    return Counter(loc.status for loc in locations.values())
+
+
+def distances_to_truth(conn: sqlite3.Connection) -> dict[str, list[float]]:
+    """For photos whose camera position is known, by status: the distance in metres from
+    that position to where we placed them (the point, else the street; 0 on the street)."""
+    rows = conn.execute(
+        "SELECT p.camera_lon, p.camera_lat, l.status, COALESCE(l.point, s.geometry) AS placed "
+        "FROM photos p JOIN locations l ON l.photo_id = p.id "
+        "LEFT JOIN streets s ON s.id = l.street_id "
+        "WHERE p.camera_lat IS NOT NULL AND COALESCE(l.point, s.geometry) IS NOT NULL"
+    ).fetchall()
+    distances: dict[str, list[float]] = {}
+    for r in rows:
+        truth = to_metres(Point(r["camera_lon"], r["camera_lat"]))
+        placed = from_geojson(r["placed"])
+        distances.setdefault(r["status"], []).append(placed.distance(truth))
+    return distances
+
+
+def summary(distances: list[float]) -> dict[str, float]:
+    return {
+        "n": len(distances),
+        "within_50m": sum(d <= 50 for d in distances) / len(distances),
+        "median_m": statistics.median(distances),
+    }

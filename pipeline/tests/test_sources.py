@@ -1,0 +1,100 @@
+import re
+
+import httpx
+import pytest
+
+from flaneur.sources import albert_kahn, paris_musees
+
+
+def test_paris_musees_record_becomes_a_cc0_photo(load_fixture):
+    photo = paris_musees.parse(load_fixture("paris_musees_menilmontant.json"))
+
+    assert photo.id == "paris_musees:88259"
+    assert photo.license == "CC0"
+    assert photo.credit == "Paris Musées / Musée Carnavalet, Histoire de Paris"
+    assert photo.photographer == "Anonyme"
+    assert (photo.year_start, photo.year_end) == (1916, 1916)
+    assert "rue de Ménilmontant, 20ème arrondissement" in photo.caption
+    assert photo.image_url.endswith(".jpg")
+
+
+def test_paris_musees_record_without_a_free_image_is_skipped(load_fixture):
+    record = load_fixture("paris_musees_menilmontant.json")
+    for visual in record["fieldVisuels"]:
+        visual["entity"]["fieldImageLibre"] = False
+
+    assert paris_musees.parse(record) is None
+
+
+def test_paris_musees_null_entities_from_the_api_are_dropped(tmp_path):
+    def server(request: httpx.Request) -> httpx.Response:
+        if "offset" not in request.read().decode():
+            return httpx.Response(200, json={"data": {"nodeQuery": {"count": 3}}})
+        entities = [{"nid": 1}, None, {"nid": 3}]
+        return httpx.Response(200, json={"data": {"nodeQuery": {"entities": entities}}})
+
+    client = httpx.Client(transport=httpx.MockTransport(server))
+
+    records = list(paris_musees.fetch(client, "token", tmp_path))
+
+    assert [r["nid"] for r in records] == [1, 3]
+
+
+def test_albert_kahn_record_keeps_its_camera_position_and_unverified_image(load_fixture):
+    photo = albert_kahn.parse(load_fixture("albert_kahn_passage_du_caire.json"))
+
+    assert photo.id == "albert_kahn:IF36953"
+    assert (photo.camera_lat, photo.camera_lon) == (48.868362, 2.349735)
+    assert (photo.year_start, photo.year_end) == (1914, 1914)
+    assert photo.caption == "L' entrée du passage du Caire au n°33 de la rue d'Alexandrie"
+    assert photo.license == "unverified"
+
+
+def _fake_api(total: int, broken: set[int] = frozenset()) -> httpx.Client:
+    """A Paris Musées API with `total` records numbered from 0; `broken` ones answer 500."""
+
+    def server(request: httpx.Request) -> httpx.Response:
+        query = request.read().decode()
+        if "offset" not in query:
+            return httpx.Response(200, json={"data": {"nodeQuery": {"count": total}}})
+        offset, limit = (int(x) for x in re.search(r"offset: (\d+), limit: (\d+)", query).groups())
+        if any(offset <= b < offset + limit for b in broken):
+            return httpx.Response(500)
+        entities = [{"nid": n} for n in range(offset, min(offset + limit, total))]
+        return httpx.Response(200, json={"data": {"nodeQuery": {"entities": entities}}})
+
+    return httpx.Client(transport=httpx.MockTransport(server))
+
+
+def test_paris_musees_page_with_a_broken_record_loses_only_that_record():
+    records, skipped = paris_musees._fetch_range(_fake_api(8, broken={5}), "token", 0, 8)
+
+    assert [r["nid"] for r in records] == [0, 1, 2, 3, 4, 6, 7]
+    assert skipped == 1
+
+
+def test_paris_musees_pages_are_cached_only_when_complete(tmp_path, monkeypatch):
+    monkeypatch.setattr(paris_musees, "PAGE_SIZE", 4)
+    client = _fake_api(10, broken={5})
+
+    nids = [r["nid"] for r in paris_musees.fetch(client, "token", tmp_path)]
+
+    assert nids == [0, 1, 2, 3, 4, 6, 7, 8, 9]
+    # page 0 is complete; page 4 lost a record; page 8 is the short last page
+    assert sorted(f.name for f in tmp_path.iterdir()) == ["000000.json"]
+
+
+def test_paris_musees_harvest_fails_when_the_server_is_down(tmp_path):
+    client = _fake_api(4, broken={0, 1, 2, 3})
+
+    with pytest.raises(RuntimeError, match="every record"):
+        list(paris_musees.fetch(client, "token", tmp_path))
+
+
+def test_paris_musees_record_with_null_lists_is_skipped_not_fatal(load_fixture):
+    record = load_fixture("paris_musees_menilmontant.json")
+    record["fieldOeuvreAuteurs"] = None
+    assert paris_musees.parse(record).photographer is None
+
+    record["fieldVisuels"] = None
+    assert paris_musees.parse(record) is None

@@ -1,0 +1,192 @@
+"""The walk's links, on a made-up street running north from 48.85 N, 2.35 E."""
+
+import json
+
+from flaneur import export
+from flaneur.export import WalkPhoto
+
+NORTH_PER_M = 1 / 111_200  # degrees of latitude per metre
+EAST_PER_M = 1 / 73_200  # degrees of longitude per metre, in Paris
+
+
+def photo(id, north_m=0.0, east_m=0.0, heading=0.0, years=(1900, 1900)):
+    return WalkPhoto(
+        id=id,
+        title=id,
+        caption=None,
+        years=list(years),
+        photographer="x",
+        credit="x",
+        record_url=None,
+        lon=2.35 + east_m * EAST_PER_M,
+        lat=48.85 + north_m * NORTH_PER_M,
+        heading=heading,
+        street=None,
+        arrondissement=None,
+        image_url="",
+        crop=None,
+    )
+
+
+def links(walk):
+    export.link(walk)
+    return {p.id: {k: v.id if v else None for k, v in p.links.items()} for p in walk}
+
+
+def test_forward_is_the_nearest_photo_ahead_facing_the_same_way():
+    walk = [
+        photo("me"),
+        photo("near ahead", north_m=40),
+        photo("far ahead", north_m=120),
+        photo("too close", north_m=4),
+        photo("ahead but facing back", north_m=20, heading=180),
+        photo("aside", north_m=30, east_m=40),
+    ]
+
+    assert links(walk)["me"]["forward"] == "near ahead"
+    assert links(walk)["far ahead"]["back"] == "near ahead"
+
+
+def test_turning_finds_a_photo_from_about_here_facing_sideways():
+    walk = [photo("me"), photo("east", east_m=5, heading=90), photo("west", heading=270)]
+
+    found = links(walk)["me"]
+
+    assert (found["right"], found["left"]) == ("east", "west")
+
+
+def test_eras_are_the_same_view_in_other_years_oldest_first():
+    walk = [
+        photo("1900"),
+        photo("1910", north_m=5, heading=10, years=(1910, 1910)),
+        photo("1865", east_m=3, years=(1865, 1868)),
+        photo("same year", north_m=2),
+        photo("1910 further", north_m=12, years=(1910, 1910)),
+    ]
+    export.link(walk)
+
+    assert walk[0].eras == ["1865", "1910"]  # one per date: the nearest
+
+
+def test_angles_wrap_around_north():
+    from flaneur.gazetteer import angle
+
+    assert angle(350, 10) == 20
+    assert angle(10, 350) == -20
+
+
+def two_photos(tmp_path):
+    """Two placed photos of the pilot, pm:1 and pm:2."""
+    from flaneur import db
+
+    conn = db.connect(tmp_path / "f.sqlite")
+    for n in (1, 2):
+        conn.execute(
+            "INSERT INTO photos (id, source, source_id, title, license, credit, image_url, raw) "
+            f"VALUES ('pm:{n}', 'pm', '{n}', 'Rue', 'CC0', 'x', 'http://img/{n}', '{{}}')"
+        )
+        conn.execute(
+            "INSERT INTO placements (photo_id, is_street_view, lon, lat, heading, confidence) "
+            f"VALUES ('pm:{n}', 1, 2.346, 48.852, 90, 'low')"
+        )
+        folder = tmp_path / "pilot" / "photos" / f"pm_{n}"
+        folder.mkdir(parents=True)
+        (folder / "info.json").write_text(
+            json.dumps({"years": [1900, 1900], "suggested_crop": [0.1, 0.1, 0.9, 0.9]})
+        )
+    return conn
+
+
+def test_a_reviewed_place_and_crop_replace_the_proposed_ones(tmp_path):
+    conn = two_photos(tmp_path)
+    reviews = tmp_path / "reviews.jsonl"
+    reviews.write_text(
+        json.dumps(
+            {
+                "id": "photo:pm:1",
+                "decision": "fix",
+                "lon": 2.347,
+                "lat": 48.853,
+                "heading": 100,
+                "crop": [0, 0, 1, 1],
+                "at": "2026-10-29T10:00:00",
+            }
+        )
+        + "\n"
+        + json.dumps(
+            {"id": "photo:pm:2", "decision": "not_a_street_view", "at": "2026-10-29T10:01:00"}
+        )
+        + "\n"
+    )
+
+    (walk,) = export.photos(conn, tmp_path / "pilot", reviews)
+
+    assert (walk.id, walk.lon, walk.heading, walk.reviewed) == ("pm:1", 2.347, 100, True)
+    assert walk.crop is None  # the whole photo, kept on purpose
+
+
+def test_street_names_are_written_as_on_their_plates():
+    assert export.plate_name("rue Saint-Julien le Pauvre") == ("Rue", "Saint-Julien-le-Pauvre")
+    assert export.plate_name("place Saint-André des Arts") == ("Place", "Saint-André-des-Arts")
+    assert export.plate_name("rue des Prêtres Saint-Séverin") == (
+        "Rue",
+        "des Prêtres-Saint-Séverin",
+    )
+    assert export.plate_name("rue de la Parcheminerie") == ("Rue", "de la Parcheminerie")
+    assert export.plate_name("rue Du Sommerard") == ("Rue", "Du Sommerard")
+    assert export.plate_name("place Paul Painlevé") == ("Place", "Paul-Painlevé")
+
+
+def test_a_photographer_is_named_as_one_writes_a_name():
+    assert export.display_name("Atget, Eugène (Jean Eugène Auguste Atget, dit)") == "Eugène Atget"
+    assert export.display_name(None) == "Photographe inconnu"
+
+
+def test_a_place_fixed_far_from_the_proposal_is_a_different_view():
+    proposed = {"lon": 2.35, "lat": 48.85, "heading": 0}
+    near = {"decision": "fix", "lon": 2.35, "lat": 48.85 + 5 * NORTH_PER_M, "heading": 10}
+    far = {"decision": "fix", "lon": 2.35, "lat": 48.85 + 40 * NORTH_PER_M, "heading": 0}
+    turned = {"decision": "fix", "lon": 2.35, "lat": 48.85, "heading": 90}
+
+    assert not export._moved(proposed, near)
+    assert export._moved(proposed, far)
+    assert export._moved(proposed, turned)
+
+
+def test_a_broken_image_in_the_cache_leaves_the_photo_out_and_is_dropped(tmp_path):
+    broken = tmp_path / "cache" / "archive" / "a.jpg"
+    broken.parent.mkdir(parents=True)
+    broken.write_bytes(b"<html>not an image</html>")
+
+    written = export._write_one(
+        photo("a"), client=None, cache_dir=tmp_path / "cache", out_dir=tmp_path
+    )
+
+    assert written is False
+    assert not broken.exists()
+
+
+def test_a_photo_situated_against_today_takes_its_found_place_unless_reviewed(tmp_path):
+    conn = two_photos(tmp_path)
+    reviews = tmp_path / "reviews.jsonl"
+    reviews.write_text(
+        json.dumps(
+            {
+                "id": "photo:pm:1",
+                "decision": "confirm",
+                "lon": 2.346,
+                "lat": 48.852,
+                "heading": 90,
+                "at": "2026-10-29T10:00:00",
+            }
+        )
+        + "\n"
+    )
+    found = {"lon": 2.3465, "lat": 48.8525, "heading": 120.0}
+
+    walk = export.photos(conn, tmp_path / "pilot", reviews, {"pm:1": found, "pm:2": found})
+
+    reviewed, situated = sorted(walk, key=lambda p: p.id)
+    assert (reviewed.lon, reviewed.heading, reviewed.situated) == (2.346, 90, False)
+    assert (situated.lon, situated.lat, situated.heading) == (2.3465, 48.8525, 120.0)
+    assert situated.situated and not situated.reviewed

@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="fr">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Flâneur, le vieux Paris pas à pas</title>
+    <meta name="description" content="Marcher dans le Paris d'avant 1950, de photographie d'archive en photographie d'archive." />
+    <link rel="preload" href="/data/walk.json" as="fetch" crossorigin />
+  </head>
+  <body>
+    <main id="walk" aria-live="polite">
+      <div id="stage">
+        <img id="photo" alt="" fetchpriority="high" />
+        <nav id="steps" aria-label="Avancer"></nav>
+      </div>
+
+      <a id="plate" href="#" aria-label="Rue">
+        <span id="plate-arrt"></span>
+        <span id="plate-kind"></span>
+        <span id="plate-name"></span>
+      </a>
+
+      <section id="about">
+        <p id="when"></p>
+        <h1 id="title"></h1>
+        <div id="eras" role="group" aria-label="Le même endroit à d'autres dates"></div>
+        <details id="notice">
+          <summary>À propos de cette photographie</summary>
+          <p id="caption"></p>
+          <p id="credit"></p>
+        </details>
+      </section>
+
+      <div id="minimap" role="button" tabindex="0" aria-label="Ouvrir le plan"></div>
+    </main>
+
+    <div id="plan" hidden>
+      <div id="plan-map"></div>
+      <button id="plan-close" class="pill" type="button">Revenir à la photo</button>
+      <p id="plan-hint">Touchez un point pour vous y rendre.</p>
+    </div>
+
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

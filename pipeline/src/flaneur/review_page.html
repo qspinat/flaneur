@@ -1,0 +1,362 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Flâneur — relecture</title>
+<link rel="stylesheet" href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css">
+<script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
+<style>
+  :root { --bg: #f4efe6; --ink: #2b2620; --muted: #6d6458; --accent: #8a3b12; --line: #d8cfc2; }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 15px/1.4 Georgia, serif; background: var(--bg); color: var(--ink);
+         height: 100vh; display: grid; grid-template-rows: auto 1fr auto; }
+  header { padding: 8px 16px; display: flex; gap: 16px; align-items: baseline;
+           border-bottom: 1px solid var(--line); }
+  header h1 { font-size: 18px; margin: 0; }
+  #progress { color: var(--muted); }
+  main { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; padding: 8px; min-height: 0; }
+  .pane { min-height: 0; display: flex; flex-direction: column; gap: 6px; }
+  .pane h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .05em; margin: 0;
+             color: var(--muted); }
+  .photo { flex: 1; min-height: 0; background: #e8e1d5; display: flex; align-items: center;
+           justify-content: center; overflow: hidden; position: relative; cursor: zoom-in; }
+  .photo img { max-width: 100%; max-height: 100%; object-fit: contain; transform-origin: 0 0;
+               user-select: none; -webkit-user-drag: none; }
+  .photo.zoomed { cursor: grab; }
+  .photo.cropping { cursor: crosshair; }
+  #crop-box.suggested { border-style: dotted; }
+  #crop-box { position: absolute; border: 2px dashed var(--accent);
+              box-shadow: 0 0 0 9999px rgba(43, 38, 32, .45); display: none; pointer-events: none; }
+  .zoom-hint { position: absolute; right: 6px; bottom: 4px; font-size: 12px; color: var(--muted);
+               background: rgba(244, 239, 230, .8); padding: 0 4px; }
+  #today { flex: 0 0 34%; }
+  #map { flex: 1; min-height: 200px; border: 1px solid var(--line); }
+  footer { padding: 8px 16px; border-top: 1px solid var(--line); display: grid; gap: 4px; }
+  #title { font-weight: bold; }
+  #reason, #caption, #copies { color: var(--muted); }
+  #copies { font-size: 13px; }
+  #copies:empty { display: none; }
+  .keys { display: flex; gap: 12px; flex-wrap: wrap; font-size: 13px; }
+  kbd { border: 1px solid var(--muted); border-radius: 3px; padding: 0 4px; background: #fff; }
+  #status { color: var(--accent); }
+  #crop-doubts { color: var(--accent); }
+  @media (max-width: 800px) { main { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+<header>
+  <h1>Flâneur — relecture</h1>
+  <span id="progress"></span>
+  <span id="status"></span>
+</header>
+<main>
+  <section class="pane">
+    <h2 id="photo-label">Photo d'archive</h2>
+    <div class="photo" id="photo-box"><img id="photo" alt=""><div id="crop-box"></div>
+      <span class="zoom-hint">molette : zoomer · glisser : déplacer · double-clic : revenir</span></div>
+  </section>
+  <section class="pane">
+    <h2>Aujourd'hui (vue correspondante)</h2>
+    <div class="photo" id="today"><img id="today-img" alt=""><span id="no-today">aucune vue
+      actuelle ne correspond</span></div>
+    <div id="map"></div>
+  </section>
+</main>
+<footer>
+  <div id="title"></div>
+  <div id="caption"></div>
+  <div id="copies"></div>
+  <div id="crop-doubts"></div>
+  <div id="reason"></div>
+  <div class="keys">
+    <span><kbd>Entrée</kbd> valider</span>
+    <span>glisser le point : déplacer</span>
+    <span><kbd>←</kbd> <kbd>→</kbd> tourner de 5° (<kbd>Maj</kbd> : 30°)</span>
+    <span id="x-hint"><kbd>X</kbd> pas une vue de rue</span>
+    <span><kbd>S</kbd> passer</span>
+    <span id="c-hint"><kbd>C</kbd> recadrer (glisser un rectangle, <kbd>C</kbd> garder,
+      <kbd>Échap</kbd> annuler) · <kbd>R</kbd> photo entière</span>
+    <span><kbd>A</kbd> photo aérienne 1949</span>
+    <span><kbd>G</kbd> <a id="streetview" target="_blank" rel="noopener">Google Street View</a>
+      à cet endroit</span>
+    <span><a id="panoramax" target="_blank" rel="noopener">Panoramax</a></span>
+  </div>
+</footer>
+<script src="zoom.js"></script>
+<script>
+const CONE_LENGTH_M = 45;
+// Beyond this zoom the archive photo is replaced by the source's full-size image.
+const FULL_SIZE_FROM = 1.5;
+
+const CONE_HALF_ANGLE = 30;
+const IGN = (layer, format, matrixSet = 'PM') =>
+  'https://data.geopf.fr/wmts?SERVICE=WMTS&REQUEST=GetTile&VERSION=1.0.0&STYLE=normal' +
+  `&LAYER=${layer}&TILEMATRIXSET=${matrixSet}&TILEMATRIX={z}&TILEROW={y}&TILECOL={x}` +
+  `&FORMAT=${format}`;
+
+/** Crop: a rectangle drawn on the archive photo, kept as fractions of the image (0–1), so
+ *  that it fits the small and the full-size image alike. */
+const cropBox = document.getElementById('crop-box');
+const photoBox = document.getElementById('photo-box');
+let cropping = null;  // {start: [fx, fy], rect: [x0, y0, x1, y1]} while drawing
+// the whole photo kept on purpose (R): recorded as such, so that a proposal never replaces it
+const WHOLE = [0, 0, 1, 1];
+
+function fractionAt(event) {
+  const r = photo.getBoundingClientRect();
+  const clamp = (v) => Math.min(1, Math.max(0, v));
+  return [clamp((event.clientX - r.left) / r.width), clamp((event.clientY - r.top) / r.height)];
+}
+
+function drawCrop(rect) {
+  if (!rect || rect === WHOLE) { cropBox.style.display = 'none'; return; }
+  // dotted: proposed automatically and not touched; dashed: drawn by hand
+  const item = items[index];
+  cropBox.classList.toggle('suggested', Boolean(item && rect === item.suggested_crop));
+  const img = photo.getBoundingClientRect(), box = photoBox.getBoundingClientRect();
+  Object.assign(cropBox.style, {
+    display: 'block',
+    left: `${img.left - box.left + rect[0] * img.width}px`,
+    top: `${img.top - box.top + rect[1] * img.height}px`,
+    width: `${(rect[2] - rect[0]) * img.width}px`,
+    height: `${(rect[3] - rect[1]) * img.height}px`,
+  });
+}
+
+function startCropping() {
+  resetPhotoZoom();
+  cropping = { start: null, rect: current.crop === WHOLE ? null : current.crop };
+  photoBox.classList.add('cropping');
+}
+
+function stopCropping(keep) {
+  if (keep && cropping.rect) current.crop = cropping.rect;
+  cropping = null;
+  photoBox.classList.remove('cropping');
+  drawCrop(current.crop);
+}
+
+photoBox.addEventListener('mousedown', (event) => {
+  if (!cropping) return;
+  event.stopPropagation();
+  cropping.start = fractionAt(event);
+}, true);
+window.addEventListener('mousemove', (event) => {
+  if (!cropping || !cropping.start) return;
+  const [x, y] = fractionAt(event), [sx, sy] = cropping.start;
+  cropping.rect = [Math.min(x, sx), Math.min(y, sy), Math.max(x, sx), Math.max(y, sy)];
+  drawCrop(cropping.rect);
+});
+window.addEventListener('mouseup', () => { if (cropping) cropping.start = null; });
+
+let items = [];
+const photo = document.getElementById('photo');
+const hint = document.querySelector('.zoom-hint');
+let fullSizeFor = null;  // the item whose full-size image is loading or shown
+const resetPhotoZoom = zoomable(document.getElementById('photo-box'), photo, { onZoom: (scale) => {
+  const item = items[index];
+  if (scale < FULL_SIZE_FROM || !item || !item.full_url || fullSizeFor === item.id) return;
+  fullSizeFor = item.id;
+  hint.textContent = 'HD…';
+  // Loaded aside, then swapped in: same picture, more pixels, the zoom stays where it is.
+  const full = new Image();
+  full.onload = () => {
+    if (items[index] === item) { photo.src = item.full_url; hint.textContent = 'HD'; }
+  };
+  full.onerror = () => { hint.textContent = 'HD indisponible'; };
+  full.src = item.full_url;
+}, onMove: () => drawCrop(cropping ? cropping.rect : current && current.crop) }).reset;
+const resetTodayZoom = zoomable(document.getElementById('today'),
+                                document.getElementById('today-img')).reset;
+let index = 0;
+let current = null;  // {lon, lat, heading, moved}
+let shownAt = 0;
+
+const map = new maplibregl.Map({
+  container: 'map',
+  style: {
+    version: 8,
+    sources: {
+      plan: { type: 'raster', tileSize: 256, maxzoom: 19,
+              tiles: [IGN('GEOGRAPHICALGRIDSYSTEMS.PLANIGNV2', 'image/png')],
+              attribution: 'IGN — Plan IGN' },
+      aerial: { type: 'raster', tileSize: 256, minzoom: 6, maxzoom: 18,
+                tiles: [IGN('ORTHOIMAGERY.EDUGEO.PARIS1949', 'image/png', 'PM_6_18')],
+                attribution: 'IGN — Paris 1949' },
+      cone: { type: 'geojson', data: { type: 'FeatureCollection', features: [] } },
+    },
+    layers: [
+      { id: 'plan', type: 'raster', source: 'plan' },
+      { id: 'aerial', type: 'raster', source: 'aerial', layout: { visibility: 'none' } },
+      { id: 'cone', type: 'fill', source: 'cone',
+        paint: { 'fill-color': '#8a3b12', 'fill-opacity': 0.35 } },
+    ],
+  },
+  center: [2.3459, 48.8518],
+  zoom: 17,
+  keyboard: false,  // the arrow keys turn the cone, they must not pan the map
+});
+const marker = new maplibregl.Marker({ color: '#8a3b12', draggable: true });
+marker.on('dragend', () => {
+  const p = marker.getLngLat();
+  current.lon = p.lng; current.lat = p.lat; current.moved = true;
+  drawCone();
+});
+
+/** A wedge from the camera, `heading` degrees from north, as a GeoJSON polygon. */
+function cone(lon, lat, heading) {
+  const metresPerDegreeLat = 111320;
+  const metresPerDegreeLon = metresPerDegreeLat * Math.cos(lat * Math.PI / 180);
+  const ring = [[lon, lat]];
+  for (let a = heading - CONE_HALF_ANGLE; a <= heading + CONE_HALF_ANGLE; a += 5) {
+    const r = a * Math.PI / 180;
+    ring.push([lon + CONE_LENGTH_M * Math.sin(r) / metresPerDegreeLon,
+               lat + CONE_LENGTH_M * Math.cos(r) / metresPerDegreeLat]);
+  }
+  ring.push([lon, lat]);
+  return { type: 'Feature', geometry: { type: 'Polygon', coordinates: [ring] } };
+}
+
+function drawCone() {
+  const features = current.heading == null ? [] : [cone(current.lon, current.lat, current.heading)];
+  map.getSource('cone').setData({ type: 'FeatureCollection', features });
+  updateLinks();
+}
+
+/** Links to today's street-level views at the current position, facing the current way. */
+function updateLinks() {
+  const { lon, lat, heading } = current;
+  const facing = heading == null ? '' : `&heading=${Math.round(heading)}`;
+  document.getElementById('streetview').href =
+    `https://www.google.com/maps/@?api=1&map_action=pano&viewpoint=${lat},${lon}${facing}&pitch=0&fov=80`;
+  document.getElementById('panoramax').href =
+    `https://api.panoramax.xyz/#focus=map&map=19/${lat}/${lon}`;
+}
+
+function yearsOf(years) {
+  const known = [...new Set((years || []).filter((y) => y != null))];
+  return known.length ? ` (${known.join('–')})` : '';
+}
+
+function show() {
+  if (index >= items.length) {
+    document.getElementById('progress').textContent = 'Terminé.';
+    document.getElementById('title').textContent = 'Plus rien à relire.';
+    return;
+  }
+  const item = items[index];
+  current = { lon: item.lon, lat: item.lat, heading: item.heading, moved: false,
+              crop: item.suggested_crop || null };
+  cropping = null;
+  photoBox.classList.remove('cropping');
+  document.getElementById('c-hint').style.display = item.kind === 'photo' ? '' : 'none';
+  document.getElementById('progress').textContent = `${index + 1} / ${items.length}`;
+  document.getElementById('photo-label').textContent =
+    item.kind === 'entrance' ? "Une photo de l'intérieur" : "Photo d'archive";
+  photo.src = item.photo_url || '';
+  fullSizeFor = null;
+  hint.textContent = 'molette : zoomer · glisser : déplacer · double-clic : revenir';
+  resetPhotoZoom(); resetTodayZoom();
+  // drawn once the photo is laid out (its size sets the frame's)
+  photo.onload = () => drawCrop(current.crop);
+  document.getElementById('x-hint').style.display = item.kind === 'photo' ? '' : 'none';
+  const today = document.getElementById('today-img');
+  const hasToday = Boolean(item.today_url);
+  today.style.display = hasToday ? '' : 'none';
+  document.getElementById('no-today').style.display = hasToday ? 'none' : '';
+  if (hasToday) today.src = item.today_url;
+  document.getElementById('title').textContent = item.title + yearsOf(item.years);
+  document.getElementById('caption').textContent = item.caption || '';
+  // the other prints of the same negative: their captions may say more
+  const copies = document.getElementById('copies');
+  copies.replaceChildren(...(item.copies || []).map((copy) => {
+    const line = document.createElement('div');
+    line.textContent = `Autre tirage : ${copy.title}${yearsOf(copy.years)}. ${copy.caption || ''}`;
+    return line;
+  }));
+  document.getElementById('crop-doubts').textContent = item.crop_doubts
+    ? `Recadrage à vérifier : ${item.crop_doubts.join(' ; ')}. C pour recadrer.` : '';
+  document.getElementById('reason').textContent =
+    (item.confidence ? `Confiance ${item.confidence}. ` : '') + (item.reason || '') +
+    (item.heading == null ? ' Direction inconnue : à régler avec ← →.' : '');
+  document.getElementById('status').textContent = '';
+  marker.setLngLat([item.lon, item.lat]).addTo(map);
+  map.jumpTo({ center: [item.lon, item.lat] });
+  drawCone();
+  shownAt = performance.now();
+}
+
+let busy = false;  // one decision at a time: a held key must not record an item twice
+
+async function decide(decision) {
+  if (busy) return;
+  busy = true;
+  try { await send(decision); } finally { busy = false; }
+}
+
+async function send(decision) {
+  const item = items[index];
+  const seconds = Math.round((performance.now() - shownAt) / 100) / 10;
+  // the whole photo kept (R) changes nothing when no crop was proposed
+  const proposed = item.suggested_crop || WHOLE;
+  const changed = current.moved || current.heading !== item.heading ||
+                  (current.crop || WHOLE) !== proposed;
+  const body = {
+    id: item.id,
+    decision: decision === 'confirm' && changed ? 'fix' : decision,
+    lon: current.lon, lat: current.lat, heading: current.heading, seconds,
+    photos: item.photos,
+    crop: current.crop,
+  };
+  const response = await fetch('/api/decision', { method: 'POST', body: JSON.stringify(body) });
+  if (!response.ok) {
+    document.getElementById('status').textContent = 'Erreur : ' + await response.text();
+    return;
+  }
+  index += 1;
+  show();
+}
+
+function turn(degrees) {
+  current.heading = (((current.heading ?? 0) + degrees) % 360 + 360) % 360;
+  drawCone();
+}
+
+document.addEventListener('keydown', (event) => {
+  if (!current || index >= items.length) return;
+  const step = event.shiftKey ? 30 : 5;
+  if (cropping) {
+    if (event.key === 'c' || event.key === 'C' || event.key === 'Enter') stopCropping(true);
+    else if (event.key === 'Escape') stopCropping(false);
+    event.preventDefault();
+    return;
+  }
+  if ((event.key === 'c' || event.key === 'C') && items[index].kind === 'photo') startCropping();
+  else if ((event.key === 'r' || event.key === 'R') && items[index].kind === 'photo') {
+    current.crop = WHOLE;
+    drawCrop(WHOLE);
+  }
+  else if (event.key === 'Enter') decide('confirm');
+  else if (event.key === 'ArrowLeft') { turn(-step); event.preventDefault(); }
+  else if (event.key === 'ArrowRight') { turn(step); event.preventDefault(); }
+  else if ((event.key === 'x' || event.key === 'X') && items[index].kind === 'photo') {
+    decide('not_a_street_view');
+  }
+  else if (event.key === 's' || event.key === 'S') decide('skip');
+  else if (event.key === 'g' || event.key === 'G') {
+    window.open(document.getElementById('streetview').href, 'streetview');
+  }
+  else if (event.key === 'a' || event.key === 'A') {
+    const visible = map.getLayoutProperty('aerial', 'visibility') === 'visible';
+    map.setLayoutProperty('aerial', 'visibility', visible ? 'none' : 'visible');
+  }
+});
+
+map.on('load', async () => {
+  items = await (await fetch('/api/queue')).json();
+  show();
+});
+</script>
+</body>
+</html>

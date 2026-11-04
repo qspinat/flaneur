@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="fr">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Flâneur en 3D, le vieux Paris sur la rue d'aujourd'hui</title>
+    <meta name="description" content="Se promener dans la rue d'aujourd'hui, les photographies d'archive à leur place sur les façades." />
+  </head>
+  <body class="three">
+    <canvas id="view" aria-label="Vue de la rue : faites glisser pour regarder autour de vous"></canvas>
+    <div id="ways"></div>
+
+    <a id="plate" href="#" aria-label="Rue" hidden>
+      <span id="plate-arrt"></span>
+      <span id="plate-kind"></span>
+      <span id="plate-name"></span>
+    </a>
+
+    <a id="back" class="pill" href="/">Retour aux photos</a>
+
+    <section id="card" hidden aria-live="polite">
+      <button id="card-close" type="button" aria-label="Fermer">×</button>
+      <p id="card-when"></p>
+      <h1 id="card-title"></h1>
+      <p id="card-credit"></p>
+      <p id="card-links"></p>
+    </section>
+
+    <div id="minimap" role="button" tabindex="0" aria-label="Ouvrir le plan"></div>
+
+    <form id="range" aria-label="Années montrées">
+      <output id="range-label"></output>
+      <div id="range-track">
+        <div id="range-marks" aria-hidden="true"></div>
+        <input id="range-min" type="range" aria-label="À partir de" />
+        <input id="range-max" type="range" aria-label="Jusqu'à" />
+      </div>
+    </form>
+
+    <details id="credits">
+      <summary>Crédits</summary>
+      <div id="credits-list"></div>
+    </details>
+
+    <div id="plan" hidden>
+      <div id="plan-map"></div>
+      <button id="plan-close" class="pill" type="button">Revenir à la rue</button>
+      <p id="plan-hint">Touchez un point pour vous y rendre.</p>
+    </div>
+
+    <script type="module" src="/src/three/main3d.ts"></script>
+  </body>
+</html>

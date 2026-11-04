@@ -1,0 +1,15 @@
+{"id": "photo:paris_musees:108561", "decision": "fix", "lon": 2.3467055203189204, "lat": 48.8521084724774, "heading": 40, "seconds": 107.5, "photos": null, "at": "2026-10-29T13:40:39"}
+{"id": "photo:paris_musees:108603", "decision": "fix", "lon": 2.3447115650015746, "lat": 48.85156082491949, "heading": 38, "seconds": 74.7, "photos": null, "at": "2026-10-29T13:41:54"}
+{"id": "photo:paris_musees:108867", "decision": "fix", "lon": 2.3466045748799047, "lat": 48.852056061810174, "heading": 45, "seconds": 32.1, "photos": null, "at": "2026-10-29T13:42:26"}
+{"id": "photo:paris_musees:108870", "decision": "fix", "lon": 2.3477468218641775, "lat": 48.8521322442503, "heading": 285, "seconds": 68.8, "photos": null, "at": "2026-10-29T13:43:35"}
+{"id": "photo:paris_musees:108871", "decision": "fix", "lon": 2.3473080975370237, "lat": 48.85211021822852, "heading": 320, "seconds": 28.8, "photos": null, "at": "2026-10-29T13:44:03"}
+{"id": "photo:paris_musees:108877", "decision": "fix", "lon": 2.344633224250373, "lat": 48.85151685871344, "heading": 43, "seconds": 17, "photos": null, "at": "2026-10-29T13:44:21"}
+{"id": "photo:paris_musees:108878", "decision": "confirm", "lon": 2.34518, "lat": 48.85202, "heading": 210, "seconds": 190.6, "photos": null, "at": "2026-10-29T13:55:39"}
+{"id": "photo:paris_musees:112610", "decision": "fix", "lon": 2.346659160142565, "lat": 48.852111762373596, "heading": 55, "seconds": 40.5, "photos": null, "at": "2026-10-29T13:56:19"}
+{"id": "photo:paris_musees:113037", "decision": "confirm", "lon": 2.345, "lat": 48.8517, "heading": 115, "seconds": 468.7, "photos": null, "at": "2026-10-29T14:43:54"}
+{"id": "photo:paris_musees:130506", "decision": "fix", "lon": 2.346962350139165, "lat": 48.851995076825006, "heading": 280, "seconds": 483.8, "photos": null, "crop": [0.5483870967741935, 0.04793719350339677, 0.9865591397849462, 0.9549421874297026], "at": "2026-10-29T14:54:34"}
+{"id": "photo:paris_musees:171285", "decision": "fix", "lon": 2.3447834627324653, "lat": 48.85166168740338, "heading": 30, "seconds": 166.7, "photos": null, "crop": [0.21318235849458006, 0.20621999521682946, 0.7834165195419643, 0.6824037810506944], "at": "2026-10-29T14:57:35"}
+{"id": "photo:paris_musees:171289", "decision": "fix", "lon": 2.34662, "lat": 48.85205, "heading": 50, "seconds": 21.9, "photos": null, "crop": [0.20287218930811074, 0.19509421086552678, 0.7838235803624017, 0.6981587494155261], "at": "2026-10-29T17:23:37"}
+{"id": "photo:paris_musees:75860", "decision": "confirm", "lon": 2.34664, "lat": 48.85206, "heading": 50, "seconds": 33.3, "photos": null, "crop": null, "at": "2026-10-29T17:24:10"}
+{"id": "photo:paris_musees:77798", "decision": "confirm", "lon": 2.345, "lat": 48.85185, "heading": 200, "seconds": 23.1, "photos": null, "crop": null, "at": "2026-10-29T17:24:33"}
+{"id": "photo:paris_musees:78231", "decision": "fix", "lon": 2.345366093309053, "lat": 48.85238421717503, "heading": 105, "seconds": 122, "photos": null, "crop": null, "at": "2026-10-29T17:26:35"}

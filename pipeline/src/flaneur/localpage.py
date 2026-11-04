@@ -1,0 +1,40 @@
+"""What the local pages (review, landmarks) share: a quiet handler answering in bytes or JSON,
+listening on localhost only."""
+
+import json
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from pathlib import Path
+
+ZOOM = Path(__file__).with_name("zoom.js")
+INCLUDE = '<script src="zoom.js"></script>'  # where a page takes the shared zoom
+
+
+def page(path: Path) -> bytes:
+    """A local page as served: the shared zoom put in where it asks for it."""
+    text = path.read_text(encoding="utf-8")
+    if INCLUDE not in text:
+        raise ValueError(f"{path.name} ne demande pas le zoom partagé ({INCLUDE})")
+    zoom = ZOOM.read_text(encoding="utf-8")
+    return text.replace(INCLUDE, f"<script>\n{zoom}</script>").encode()
+
+
+class Handler(BaseHTTPRequestHandler):
+    def _send(self, status: int, body: bytes, content_type: str) -> None:
+        self.send_response(status)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _json(self, value) -> None:
+        self._send(200, json.dumps(value, ensure_ascii=False).encode(), "application/json")
+
+    def _body(self):
+        return json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))))
+
+    def log_message(self, *args) -> None:  # quiet
+        pass
+
+
+def server(handler: type[Handler], port: int) -> HTTPServer:
+    return HTTPServer(("127.0.0.1", port), handler)

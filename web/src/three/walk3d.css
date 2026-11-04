@@ -1,0 +1,148 @@
+/* The 3D walk: the street fills the screen; the plate, the plan, the years and the credits
+   lie on it, as in the photo walk. */
+
+body.three { background: var(--mount-deep); }
+
+/* a canvas keeps its own size (300 × 150) unless given one: inset alone does not stretch it */
+#view { position: fixed; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; cursor: grab; }
+#view:active { cursor: grabbing; }
+
+/* The ways on: a chalk disc on the pavement, under everything laid on the street. */
+#ways { position: fixed; inset: 0; z-index: 1; pointer-events: none; overflow: hidden; }
+.way {
+  pointer-events: auto;
+  position: absolute;
+  transform: translate(-50%, -50%);
+  width: 46px;
+  height: 46px;
+  border: 0;
+  border-radius: 50%;
+  background: var(--step);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.5);
+  cursor: pointer;
+}
+.way:hover, .way:focus-visible { transform: translate(-50%, -50%) scale(1.1); }
+
+.three #plate { position: fixed; z-index: 2; }
+
+#back { position: fixed; z-index: 2; top: 22px; right: 22px; box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4); }
+
+.three #minimap {
+  position: fixed;
+  z-index: 2;
+  left: 22px;
+  bottom: 22px;
+  width: 240px;
+  height: 170px;
+  margin: 0;
+  box-shadow: 0 6px 16px rgba(0, 0, 0, 0.45);
+}
+
+/* The years: two handles on one bar, marks where photos near here were taken. */
+#range {
+  position: fixed;
+  z-index: 2;
+  left: 50%;
+  bottom: 22px;
+  transform: translateX(-50%);
+  width: min(520px, calc(100vw - 560px));
+  min-width: 280px;
+  padding: 8px 18px 12px;
+  border-radius: 10px;
+  background: var(--veil);
+  text-align: center;
+}
+#range-label { font-family: var(--plate); font-size: 22px; font-weight: 500; font-variant-numeric: lining-nums; }
+#range-track { position: relative; height: 28px; }
+#range-marks { position: absolute; left: 9px; right: 9px; top: 6px; height: 16px; pointer-events: none; }
+#range-marks span { position: absolute; width: 2px; height: 16px; margin-left: -1px; background: var(--sepia); }
+#range input {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  margin: 0;
+  background: none;
+  pointer-events: none;
+  appearance: none;
+}
+#range input::-webkit-slider-runnable-track { height: 4px; margin-top: 12px; border-radius: 2px; background: rgba(237, 228, 211, 0.25); }
+#range-max::-webkit-slider-runnable-track { background: none; }
+#range input::-webkit-slider-thumb {
+  appearance: none;
+  width: 18px;
+  height: 18px;
+  margin-top: -7px;
+  border-radius: 50%;
+  background: var(--albumen);
+  border: 2px solid var(--enamel);
+  pointer-events: auto;
+  cursor: pointer;
+}
+#range input::-moz-range-track { height: 4px; background: rgba(237, 228, 211, 0.25); }
+#range input::-moz-range-thumb {
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: var(--albumen);
+  border: 2px solid var(--enamel);
+  pointer-events: auto;
+  cursor: pointer;
+}
+
+#credits {
+  position: fixed;
+  z-index: 2;
+  right: 22px;
+  bottom: 22px;
+  max-width: 340px;
+  max-height: 50vh;
+  overflow-y: auto;
+  padding: 6px 12px;
+  border-radius: 8px;
+  background: var(--veil);
+  font-size: 13px;
+  color: var(--sepia);
+}
+#credits summary { cursor: pointer; font-style: italic; }
+#credits p { margin: 6px 0; }
+#credits a { color: inherit; }
+
+/* An old photo, chosen in the street. */
+#card {
+  position: fixed;
+  z-index: 3;
+  left: 22px;
+  bottom: 214px;
+  width: 300px;
+  padding: 16px 18px 12px;
+  border-radius: 10px;
+  background: rgba(38, 35, 31, 0.94);
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.5);
+}
+#card-close {
+  position: absolute;
+  top: 6px;
+  right: 8px;
+  border: 0;
+  background: none;
+  color: var(--albumen);
+  font-size: 22px;
+  cursor: pointer;
+}
+#card-when { margin: 0; font-family: var(--plate); font-size: 34px; font-weight: 500; line-height: 1; }
+#card-title { margin: 8px 0; font-size: 16px; font-weight: 500; line-height: 1.4; }
+#card-credit { margin: 0 0 8px; font-size: 13px; color: var(--sepia); }
+#card-links { margin: 0; font-size: 15px; }
+#card-links a { color: var(--albumen); }
+
+#failed { position: fixed; inset: 40% 10% auto; text-align: center; font-size: 19px; }
+
+/* A phone: the street on top of everything, the plan small, the years across the bottom. */
+@media (max-width: 820px) {
+  body.three { overflow: hidden; }
+  #back { top: 12px; right: 12px; padding: 6px 12px; font-size: 14px; }
+  .three #minimap { left: 12px; bottom: 96px; width: 130px; height: 100px; }
+  #range { left: 12px; right: 12px; bottom: 12px; width: auto; min-width: 0; transform: none; }
+  #credits { right: 12px; bottom: 96px; max-width: calc(100vw - 166px); }
+  #card { left: 12px; right: 12px; bottom: 210px; width: auto; }
+}

@@ -1,0 +1,55 @@
+{
+ "identifiant_fakir": "IF36953",
+ "numero_d_inventaire": "A 7 479",
+ "legende_originale_titre": "France, Paris, Passage du Caire",
+ "legende_revisee": "L' entrée du passage du Caire au n°33 de la rue d'Alexandrie",
+ "lieu": "Paris (IIe arr.), France",
+ "date_de_prise_de_vue": "18 juillet 1914",
+ "operateur": [
+  "Georges Chevalier"
+ ],
+ "mission_serie": null,
+ "lieu_actuel": "Sentier (Arrondissement II / Paris / Ile-de-France / France / Europe)",
+ "themes": [
+  "Activite économique > Boutique / magasin",
+  "HD > existe en haute définition",
+  "Inscription / information > Inscription commerciale",
+  "Vie quotidienne > Objet domestique",
+  "Activite économique > Restauration / hôtellerie",
+  "Habitat / Architecture > Rue / Quartier"
+ ],
+ "sujets": "Café / bar, Charrette, Décor peint, Enseigne, Lampadaire / réverbère, Passage couvert, Tonneau, Vin, Vitrine / étalage",
+ "personnes": null,
+ "procede_technique": "Autochrome",
+ "taille": "9 x 12 cm",
+ "appartenance_actuelle": "Département des Hauts-de-Seine, musée Albert-Kahn",
+ "collection": "Archives de la Planète",
+ "droits_cessibles": null,
+ "photo": {
+  "thumbnail": true,
+  "filename": "a007479.jpg",
+  "format": "JPEG",
+  "width": 800,
+  "id": "96fb09c7a7e5acf0fba8a09d556c63ae",
+  "color_summary": [
+   "rgba(152, 145, 135, 1.00)",
+   "rgba(94, 88, 81, 1.00)",
+   "rgba(86, 85, 84, 1.00)"
+  ],
+  "height": 593,
+  "url": "https://opendata.hauts-de-seine.fr/api/explore/v2.1/catalog/datasets/archives-de-la-planete-paris/files/96fb09c7a7e5acf0fba8a09d556c63ae"
+ },
+ "geo_point": {
+  "lon": 2.349735,
+  "lat": 48.868362
+ },
+ "continent": "Europe",
+ "region": null,
+ "pays": "France",
+ "departement": "Paris",
+ "ville": "Paris",
+ "arrondissement": "Arrondissement II",
+ "quartier": "Sentier",
+ "site": null,
+ "lieu_retraite": "Arrondissement II/Sentier"
+}

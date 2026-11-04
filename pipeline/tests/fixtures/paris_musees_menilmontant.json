@@ -1,0 +1,31 @@
+{
+ "nid": 88259,
+ "title": "Dégâts faits par les bombes d'un zeppelin. Le 86 de la rue de Ménilmontant",
+ "absolutePath": "https://www.parismuseescollections.paris.fr/node/88259",
+ "fieldDateProduction": {
+  "startYear": 1916,
+  "endYear": null,
+  "century": "1er quart du 20e siècle"
+ },
+ "fieldOeuvreAuteurs": [
+  {
+   "entity": {
+    "fieldAuteurAuteur": {
+     "entity": {
+      "entityLabel": "Anonyme"
+     }
+    }
+   }
+  }
+ ],
+ "fieldOeuvreGeolocalisation": null,
+ "fieldVisuels": [
+  {
+   "entity": {
+    "publicUrl": "https://www.parismuseescollections.paris.fr/sites/default/files/atoms/images/CAR/lpdp_80738-6.jpg",
+    "fieldImageLibre": true,
+    "fieldLegende": "Anonyme. Dégats faits par les bombes d'un zéppelin. Le 86 de la rue de Ménilmontant. Dégâts faits par les bombes d'un zéppelin au n° 86 de la rue de Ménilmontant, 20ème arrondissement, Paris, dans la nuit du 29 janvier 1916. Tirage au gélatino-bromure d'argent. 29 janvier 1916-29 janvier 1916. Paris, musée Carnavalet."
+   }
+  }
+ ]
+}

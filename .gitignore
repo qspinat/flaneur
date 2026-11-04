@@ -1,0 +1,18 @@
+# Secrets
+.env
+
+# Pipeline: state, caches, downloaded images (rebuilt by `uv run flaneur …`)
+data/*
+!data/overrides/
+.venv/
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+
+# Web
+node_modules/
+dist/
+
+.DS_Store
+web/public/data/
+.vite/
