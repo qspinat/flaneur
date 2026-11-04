@@ -154,7 +154,7 @@ def test_the_queue_leaves_out_photos_answered_and_puts_skipped_ones_last(page, t
 
     _, queue = one(sources, "GET", "/api/queue")
 
-    assert [p["id"] for p in json.loads(queue)["photos"]] == ["pm:3", "pm:2"]
+    assert (json.loads(queue)["photo"]["id"], json.loads(queue)["left"]) == ("pm:3", 2)
 
 
 def test_the_page_is_told_the_rules_it_shows():
@@ -259,3 +259,61 @@ def test_views_are_served_while_a_proposal_is_being_made(page):
     finally:
         server.shutdown()
         server.server_close()
+
+
+def test_the_next_photo_says_why_it_comes_and_photos_asked_ahead_come_first(page, one):
+    sources, _ = page
+    sources.photos["pm:2"] = {**sources.photos["pm:1"]}
+    sources.ahead = lambda: {"pm:2": "revoir"}
+
+    _, queue = one(sources, "GET", "/api/queue")
+
+    assert (json.loads(queue)["photo"]["id"], json.loads(queue)["photo"]["why"]) == (
+        "pm:2",
+        "revoir",
+    )
+
+
+def test_a_photo_placed_can_be_reopened_with_its_answer(page, one):
+    sources, proposal = page
+    placings.record(
+        sources.placings,
+        "pm:1",
+        "fits",
+        3.0,
+        lon=2.3467,
+        lat=48.8521,
+        heading=50.0,
+        registration=proposal,
+    )
+
+    _, queue = one(sources, "GET", "/api/queue")
+    _, again = one(sources, "GET", "/api/reopen/pm:1")
+
+    assert [(p["id"], p["answer"]) for p in json.loads(queue)["placed"]] == [("pm:1", "fits")]
+    reopened = json.loads(again)
+    assert (reopened["lon"], reopened["heading"]) == (2.3467, 50.0)
+    assert registration.from_json(reopened["registration"]) == proposal
+
+
+def test_a_photo_reopened_keeps_how_it_was_placed_and_not_a_registration_on_another_image(
+    page, one
+):
+    sources, proposal = page
+    sources.photos["pm:1"]["inputs"] = "new"
+    placings.record(
+        sources.placings,
+        "pm:1",
+        "points",
+        3.0,
+        lon=2.3467,
+        lat=48.8521,
+        heading=50.0,
+        registration=proposal,
+        inputs="old",
+    )
+
+    _, again = one(sources, "GET", "/api/reopen/pm:1")
+
+    reopened = json.loads(again)
+    assert reopened["answer"] == "points" and reopened["registration"] is None

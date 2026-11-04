@@ -7,7 +7,7 @@ import sys
 import threading
 import traceback
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import lru_cache
 from http.server import HTTPServer
 from pathlib import Path
@@ -17,12 +17,12 @@ import cv2
 import numpy as np
 from shapely.geometry import Point
 
-from flaneur import localpage, match, placings, registration
+from flaneur import localpage, match, placings, queueing, registration
 from flaneur.gazetteer import to_degrees, to_metres
 from flaneur.registration import ViewOf
 
 PAGE = Path(__file__).with_name("placing_page.html")
-NEAR_M = 40  # the panoramas offered around a photo's spot (and where proposals are made)
+NEAR_M = queueing.NEAR_M  # the panoramas offered around a photo's spot (where proposals are made)
 SIDE = match.VIEW_SIDE
 KEPT_PICTURES = 8  # 360° pictures kept decoded (6 MB each)
 
@@ -34,6 +34,9 @@ class Sources:
     placings: Path
     # (photo, panorama): {registration, carried_from} or None
     proposal: Callable[[str, str], dict | None]
+    # the photos to come first, with why, in order (asked after each answer)
+    ahead: Callable[[], dict[str, str]] = dict
+    graph: dict[str, set[str]] = field(default_factory=dict)  # old neighbours, by photo
 
 
 class Around:
@@ -62,16 +65,53 @@ def settings() -> dict:
     }
 
 
-def queue(sources: Sources, nearest: dict[str, float]) -> list[dict]:
-    """The photos not answered yet, those with a panorama nearest first (`nearest`: metres, by
-    photo), then those skipped."""
-    held, skipped = placings.holding(sources.placings), placings.skipped(sources.placings)
-    items = [
-        {"id": photo_id, **{k: v for k, v in photo.items() if k != "image"}}
-        for photo_id, photo in sources.photos.items()
-        if photo_id not in held
+def _metres(lon: float, lat: float) -> tuple[float, float]:
+    here = to_metres(Point(lon, lat))
+    return here.x, here.y
+
+
+def _shown(photo: dict) -> dict:
+    """A photo as the page gets it (not its file nor its image's hash)."""
+    return {k: v for k, v in photo.items() if k not in ("image", "inputs")}
+
+
+def next_photo(sources: Sources, nearest: dict[str, float], where: dict) -> dict:
+    """The next photo to place, in the order of queueing.order (`nearest`: metres to the
+    nearest panorama, `where`: x, y, by photo), how many are left, and the photos placed (to
+    reopen from the map)."""
+    held, skipped, answers = placings.state(sources.placings)
+    found = queueing.order(
+        list(sources.photos),
+        where=where,
+        held={
+            i: {"answer": r["answer"], **dict(zip("xy", _metres(r["lon"], r["lat"]), strict=True))}
+            for i, r in held.items()
+        },
+        skipped=skipped,
+        ahead=sources.ahead(),
+        graph=sources.graph,
+        nearest_m=nearest,
+        answered=sum(i in sources.photos for i in answers),
+    )
+    head = found and {"id": found[0][0], **_shown(sources.photos[found[0][0]]), "why": found[0][1]}
+    placed = [
+        {"id": i, "answer": r["answer"], "lon": r["lon"], "lat": r["lat"]}
+        for i, r in held.items()
+        if i in sources.photos
     ]
-    return sorted(items, key=lambda item: (item["id"] in skipped, nearest[item["id"]]))
+    return {"photo": head or None, "left": len(found), "placed": placed}
+
+
+def reopened(sources: Sources, photo_id: str) -> dict:
+    """A photo answered, as the page shows it again: its answer's place and registration."""
+    row = placings.holding(sources.placings)[photo_id]
+    same_image = row["inputs"] == sources.photos[photo_id].get("inputs", "")
+    return {
+        "id": photo_id,
+        **_shown(sources.photos[photo_id]),
+        **{k: row[k] for k in ("lon", "lat", "heading", "answer", "carried_from", "flipped")},
+        "registration": row["registration"] if same_image else None,  # made on another image
+    }
 
 
 def _jpeg(image: np.ndarray) -> bytes:
@@ -81,10 +121,10 @@ def _jpeg(image: np.ndarray) -> bytes:
 def serve(sources: Sources, port: int) -> HTTPServer:
     spheres = {p.id: p for p in sources.spheres}
     around = Around(sources.spheres)
+    where = {i: _metres(p["lon"], p["lat"]) for i, p in sources.photos.items()}
     nearest = {}
-    for photo_id, photo in sources.photos.items():
-        here = to_metres(Point(photo["lon"], photo["lat"]))
-        found = around.near(here.x, here.y)
+    for photo_id, (x, y) in where.items():
+        found = around.near(x, y)
         nearest[photo_id] = found[0][1] if found else np.inf
     proposals: dict[tuple[str, str], dict | None] = {}  # made once per photo and panorama
     matching = threading.Lock()  # one proposal at a time (the matcher and its caches)
@@ -144,7 +184,9 @@ def serve(sources: Sources, port: int) -> HTTPServer:
                 if route == "/":
                     self._send(200, localpage.page(PAGE), "text/html; charset=utf-8")
                 elif route == "/api/queue":
-                    self._json({"settings": settings(), "photos": queue(sources, nearest)})
+                    self._json({"settings": settings(), **next_photo(sources, nearest, where)})
+                elif parts[:2] == ["api", "reopen"] and len(parts) == 3:
+                    self._json(reopened(sources, parts[2]))
                 elif route == "/api/near":
                     self._json(near(float(ask["lon"][0]), float(ask["lat"][0])))
                 elif parts[:2] == ["api", "proposal"] and len(parts) == 4:

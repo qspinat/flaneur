@@ -199,8 +199,7 @@ class Store:
         a photo's, needed only when they were never matched): rows of indices in a and in
         b, matched once in the matcher's precision and kept."""
         first, second = sorted([a, b])
-        name = f"{safe_name(first[0])}_{first[1]}__{safe_name(second[0])}_{second[1]}.npy"
-        path = self.folder / f"old_pairs_{self.matcher.precision}" / name
+        path = self.folder / f"old_pairs_{self.matcher.precision}" / pair_name(first, second)
         if path.exists():
             found = np.load(path)
         else:
@@ -208,6 +207,42 @@ class Store:
             found = np.column_stack(pair).astype(np.int32)
             write_atomic(path, lambda out: np.save(out, found))
         return found if first == a else found[:, ::-1]
+
+
+def pair_name(a: tuple[str, str], b: tuple[str, str]) -> str:
+    """The file two old photos' shared details are kept in (`a`, `b`: id and image hash,
+    in sorted order), whatever the matcher's precision (its folder)."""
+    return f"{safe_name(a[0])}_{a[1]}__{safe_name(b[0])}_{b[1]}.npy"
+
+
+def _rows_kept(path: Path) -> int:
+    """How many pairs a kept file holds, from its header alone (0 when it is not an array)."""
+    try:
+        with path.open("rb") as kept:
+            version = np.lib.format.read_magic(kept)
+            read = (
+                np.lib.format.read_array_header_1_0
+                if version == (1, 0)
+                else np.lib.format.read_array_header_2_0
+            )
+            shape, _, _ = read(kept)
+    except (ValueError, OSError):
+        return 0
+    return shape[0] if shape else 0
+
+
+def old_neighbours(folder: Path, images: dict[str, str], min_shared: int) -> dict[str, set[str]]:
+    """The old photos each one shares at least `min_shared` details with, from the pairs kept
+    for the images they have now (`images`: hash by photo), in any precision (see Store.pairs)."""
+    named = {f"{safe_name(i)}_{h}": i for i, h in images.items()}
+    found: dict[str, set[str]] = {}
+    for path in folder.glob("old_pairs_*/*__*.npy"):
+        sides = path.stem.split("__")
+        a, b = (named.get(side) for side in sides) if len(sides) == 2 else (None, None)
+        if a and b and _rows_kept(path) >= min_shared:
+            found.setdefault(a, set()).add(b)
+            found.setdefault(b, set()).add(a)
+    return found
 
 
 def _savez(path: Path, **arrays) -> None:

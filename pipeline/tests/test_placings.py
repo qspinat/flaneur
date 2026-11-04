@@ -26,9 +26,9 @@ def test_a_skip_leaves_the_answer_that_held(tmp_path):
     placings.record(path, "pm:1", "skip", 2.0)
     placings.record(path, "pm:2", "skip", 3.0)
 
-    assert placings.holding(path)["pm:1"]["answer"] == "fits"
-    assert "pm:2" not in placings.holding(path)
-    assert placings.skipped(path) == {"pm:2"}
+    given = placings.state(path)
+    assert given.held["pm:1"]["answer"] == "fits" and "pm:2" not in given.held
+    assert given.skipped == {"pm:2"} and given.answers == ["pm:1"]
 
 
 @pytest.mark.parametrize("answer", ["fits", "points"])

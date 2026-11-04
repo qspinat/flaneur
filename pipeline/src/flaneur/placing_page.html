@@ -49,7 +49,8 @@
   <div id="map"></div>
   <div id="keys">
     Plan : glisser le point (où se tenait le photographe), <kbd>←</kbd><kbd>→</kbd> tourner
-    (<kbd>⇧</kbd> : 1°), <kbd>A</kbd> vue aérienne 1949, clic sur un panorama pour s'y rendre.<br>
+    (<kbd>⇧</kbd> : 1°), <kbd>A</kbd> vue aérienne 1949, clic sur un panorama pour s'y rendre,
+    sur une photo déjà placée (point vert, ou gris si trop loin) pour la rouvrir.<br>
     Photo : <kbd>Entrée</kbd> elle tombe juste · <kbd>F</kbd> poser par points · <kbd>X</kbd> trop loin
     · <kbd>S</kbd> passer · <kbd>R</kbd> retourner l'image · <kbd>[</kbd><kbd>]</kbd> tourner la vue ·
     <kbd>,</kbd><kbd>.</kbd> panorama voisin.
@@ -102,13 +103,18 @@ let carried = null;      // the old photo a proposal was carried from, if it was
 let made = 'proposal';   // how it was made: 'proposal' or 'points'
 let flipped = false, pairing = false, pairs = [], waiting = null;
 let answering = false;   // an answer on its way: no other until the next photo shows
+let reopenedWith = null; // a photo reopened: the registration it had, shown first
 let asking = 0;          // the latest proposal asked for (an older one coming back is ignored)
 
 const map = new maplibregl.Map({
   container: 'map',
   style: plainStyle(
-    { near: { type: 'geojson', data: { type: 'FeatureCollection', features: [] } } },
-    [{ id: 'near', type: 'circle', source: 'near', paint: {
+    { near: { type: 'geojson', data: { type: 'FeatureCollection', features: [] } },
+      placed: { type: 'geojson', data: { type: 'FeatureCollection', features: [] } } },
+    [{ id: 'placed', type: 'circle', source: 'placed', paint: {
+        'circle-radius': 6, 'circle-color': ['match', ['get', 'answer'], 'far', '#7a7468', '#2f6b4f'],
+        'circle-stroke-color': '#ede4d3', 'circle-stroke-width': 1.5 } },
+     { id: 'near', type: 'circle', source: 'near', paint: {
         'circle-radius': ['case', ['get', 'shown'], 8, 5],
         'circle-color': ['case', ['get', 'shown'], '#1b3a6b', '#ffffff'],
         'circle-stroke-color': '#1b3a6b', 'circle-stroke-width': 2 } }]),
@@ -117,6 +123,19 @@ const map = new maplibregl.Map({
 const marker = new maplibregl.Marker({ color: '#8a3b12', draggable: true });
 marker.on('dragend', () => { const p = marker.getLngLat(); spot.lon = p.lng; spot.lat = p.lat; drawCone(); findNear(); });
 map.on('click', 'near', (e) => { const id = e.features[0].properties.id; goTo(near.findIndex((p) => p.id === id)); });
+map.on('click', 'placed', async (e) => {  // a photo placed: shown again, with its answer
+  if (answering || map.queryRenderedFeatures(e.point, { layers: ['near'] }).length) return;
+  try {
+    const r = await fetch(`/api/reopen/${encodeURIComponent(e.features[0].properties.id)}`);
+    if (!r.ok) throw new Error(await r.text());
+    show({ ...(await r.json()), why: 'rouverte' });
+  } catch (error) { say(`Impossible de la rouvrir : ${error.message}`); }
+});
+function drawPlaced(placed) {
+  map.getSource('placed').setData({ type: 'FeatureCollection', features: placed.map((p) => ({
+    type: 'Feature', properties: { id: p.id, answer: p.answer },
+    geometry: { type: 'Point', coordinates: [p.lon, p.lat] } })) });
+}
 
 function drawCone() {
   marker.setLngLat([spot.lon, spot.lat]).addTo(map);
@@ -137,7 +156,8 @@ async function findNear() {
     say(`Aucun panorama à moins de ${rules.near_m} m : X si aucun ne voit la photo.`); return;
   }
   const still = near.findIndex((p) => p.id === shown);  // a small move keeps the panorama shown
-  if (still >= 0) { at = still; drawNear(); where(); } else await goTo(0);
+  const home = reopenedWith ? near.findIndex((p) => p.id === reopenedWith.registration.panorama) : -1;
+  if (still >= 0) { at = still; drawNear(); where(); } else await goTo(Math.max(0, home));
 }
 async function goTo(i) {
   if (i < 0 || i >= near.length) return;
@@ -146,12 +166,17 @@ async function goTo(i) {
   const step = rules.view_step;
   view = { heading: Math.round((spot.heading ?? 0) / step) * step % 360 };
   proposal = null; carried = null; made = 'proposal'; showView();
-  say('Proposition en cours…');
   const mine = ++asking;
   let found = null;
-  try { found = await (await fetch(`/api/proposal/${encodeURIComponent(photo.id)}/${sphere.id}`)).json(); }
-  catch { found = null; }
-  if (mine !== asking || near[at]?.id !== sphere.id) return;  // gone elsewhere meanwhile
+  if (reopenedWith && reopenedWith.registration.panorama === sphere.id) {  // as the user left it
+    found = reopenedWith; reopenedWith = null;
+    if (found.answer === 'points') made = 'points';
+  } else {
+    say('Proposition en cours…');
+    try { found = await (await fetch(`/api/proposal/${encodeURIComponent(photo.id)}/${sphere.id}`)).json(); }
+    catch { found = null; }
+    if (mine !== asking || near[at]?.id !== sphere.id) return;  // gone elsewhere meanwhile
+  }
   if (found) { proposal = found.registration; carried = found.carried_from; view = { ...proposal.view }; showView(); say(''); }
   else { say('Pas de proposition : F pour poser par points.'); enterPairing(); }
 }
@@ -191,7 +216,7 @@ function leavePairing() {
 }
 function help() {
   $('points-help').textContent = pairing
-    ? `${pairs.length} paire(s) — cliquer un détail dans la photo puis le même dans la vue ; ⌫ annuler la dernière`
+    ? `${pairs.length} paire(s) — cliquer un détail dans la photo puis le même dans la vue ; cliquer un point pour le déplacer ; ⌫ annuler la dernière`
       + (pairs.length >= rules.min_points ? ' ; Entrée pour garder' : ` ; il en faut ${rules.min_points}`)
     : '';
 }
@@ -212,12 +237,30 @@ function drawDots() {
   pairs.forEach(([a, b], i) => { place($('photo'), a, i + 1); place($('view'), b, i + 1); });
   if (waiting) place($('photo'), waiting, pairs.length + 1, true);
 }
-$('photo').addEventListener('click', (e) => { if (pairing) { waiting = pixelOf($('photo'), e); drawDots(); } });
+/** The pair whose point, in `img` (0: the photo, 1: the view), lies under a click, if any. */
+function pairAt(img, side, e) {
+  const [x, y] = pixelOf(img, e), reach = 12 * img.naturalWidth / img.getBoundingClientRect().width;
+  return pairs.findIndex((pair) => Math.hypot(pair[side][0] - x, pair[side][1] - y) < reach);
+}
+$('photo').addEventListener('click', (e) => {
+  if (!pairing) return;
+  const i = pairAt($('photo'), 0, e);
+  if (i >= 0) { pairs.splice(i, 1); pairsChanged(); }  // its photo point placed again
+  waiting = pixelOf($('photo'), e); drawDots();
+});
 $('view').addEventListener('click', async (e) => {
-  if (!pairing || !waiting) return;
+  if (!pairing) return;
+  const i = pairAt($('view'), 1, e);
+  if (i >= 0 && !waiting) { waiting = pairs[i][0]; pairs.splice(i, 1); pairsChanged(); return; }  // its view point
+  if (!waiting) return;
   pairs.push([waiting, pixelOf($('view'), e)]); waiting = null; drawDots(); help();
   if (pairs.length >= rules.min_points) await fitPairs();
 });
+/** The pairs changed: the warp comes again from those left, or goes. */
+function pairsChanged() {
+  drawDots(); help();
+  if (pairs.length >= rules.min_points) fitPairs(); else { proposal = null; shown($('view-laid'), ''); }
+}
 async function fitPairs() {
   try {
     proposal = await post('/api/fit', { photo_id: photo.id, panorama: near[at].id, view, flipped,
@@ -264,8 +307,7 @@ document.addEventListener('keydown', (e) => {
   } else if (e.key === ',' || e.key === '.') goTo(at + (e.key === ',' ? -1 : 1));
   else if (e.key === 'a' || e.key === 'A') toggleAerial(map); else if (e.key === 'Backspace' && pairing) {
     if (waiting) waiting = null; else pairs.pop();
-    drawDots(); help();
-    if (pairs.length >= rules.min_points) fitPairs(); else { proposal = null; shown($('view-laid'), ''); }
+    pairsChanged();
   }
 });
 $('fade').addEventListener('input', () => {
@@ -275,16 +317,21 @@ $('fade').addEventListener('input', () => {
 /** The next photo to place, as the server orders them now (after each answer, see queue). */
 async function next() {
   const asked = await (await fetch('/api/queue')).json();
-  rules = asked.settings; left = asked.photos.length;
-  show(asked.photos[0] || null);
+  rules = asked.settings; left = asked.left;
+  drawPlaced(asked.placed); show(asked.photo);
 }
 function show(next) {
   leavePairing();
   if (!next) { photo = null; $('title').textContent = 'Plus rien à placer.'; return; }
-  photo = next; flipped = false; proposal = null; carried = null; at = -1;
+  photo = next; flipped = !!next.flipped; proposal = null; carried = null; at = -1;
   spot = { lon: photo.lon, lat: photo.lat, heading: photo.heading };
+  reopenedWith = next.registration ? { registration: next.registration, answer: next.answer,
+                                       carried_from: next.carried_from } : null;
   $('title').textContent = photo.title + yearsOf(photo.years);
-  $('progress').textContent = `encore ${left} à placer`;
+  const why = { revoir: 'déjà jugée, à revoir', voisins: 'porte d\'autres photos', proche: 'un panorama tout près',
+                isolée: 'loin des autres',
+                'sans panorama': 'aucun panorama proche', passée: 'passée une fois', rouverte: 'rouverte' };
+  $('progress').textContent = `encore ${left} à placer · ${why[photo.why] || ''}`;
   $('pinned').src = photoUrl();
   map.jumpTo({ center: [spot.lon, spot.lat] });
   drawCone(); findNear(); shownAt = Date.now();

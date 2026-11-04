@@ -43,6 +43,7 @@ from flaneur import (
     placings,
     proposals,
     proposing,
+    queueing,
     reconstruct,
     register,
     registration,
@@ -1502,7 +1503,11 @@ def place_photos(
             found = None
         return found and {"registration": found, "carried_from": None}
 
-    sources = placing.Sources(photos, spheres, answers, proposal)
+    revisit = {i: "revoir" for i, v in _verdicts().items() if v["verdict"] == "yes"}  # a camera
+    graph = chain.old_neighbours(
+        DATA / "raw", {i: p["inputs"] for i, p in photos.items()}, queueing.MIN_SHARED
+    )
+    sources = placing.Sources(photos, spheres, answers, proposal, lambda: revisit, graph)
     _serve_page(
         lambda: placing.serve(sources, port), f"placer ({len(photos)} photos)", port, open_browser
     )

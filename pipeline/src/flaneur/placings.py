@@ -6,6 +6,7 @@ The last answer on a photo holds, a skip leaving the one before it; the rows bef
 
 from collections import defaultdict
 from pathlib import Path
+from typing import NamedTuple
 
 from flaneur.registration import Registration, from_json, to_json
 from flaneur.sources import append_row, number, rows, seconds_taken
@@ -66,16 +67,23 @@ def record(
     )
 
 
-def holding(path: Path) -> dict[str, dict]:
-    """The answer that holds on each photo answered: its last one but skips."""
-    return {row["photo_id"]: row for row in rows(path) if row["answer"] != "skip"}
+class State(NamedTuple):
+    held: dict[str, dict]  # the answer that holds on each photo answered: its last but skips
+    skipped: set[str]  # the photos only skipped so far (they come back after the others)
+    answers: list[str]  # the photos answered, one per answer given (not skips), in order
 
 
-def skipped(path: Path) -> set[str]:
-    """The photos only skipped so far (they come back after the others)."""
+def state(path: Path) -> State:
+    """The answers given so far, in one reading."""
     written = rows(path)
-    answered = {row["photo_id"] for row in written if row["answer"] != "skip"}
-    return {row["photo_id"] for row in written} - answered
+    held = {row["photo_id"]: row for row in written if row["answer"] != "skip"}
+    answers = [row["photo_id"] for row in written if row["answer"] != "skip"]
+    return State(held, {row["photo_id"] for row in written} - held.keys(), answers)
+
+
+def holding(path: Path) -> dict[str, dict]:
+    """The answer that holds on each photo answered (see state)."""
+    return state(path).held
 
 
 def registration_of(row: dict) -> Registration | None:
