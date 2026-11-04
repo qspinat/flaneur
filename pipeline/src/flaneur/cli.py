@@ -3,6 +3,7 @@
 import functools
 import hashlib
 import json
+import time
 from collections import Counter
 from collections.abc import Callable, Iterable
 from contextlib import closing
@@ -39,8 +40,10 @@ from flaneur import (
     pilot,
     placements,
     proposals,
+    proposing,
     reconstruct,
     register,
+    registration,
     review,
     scene,
     stats,
@@ -549,10 +552,11 @@ def _matching() -> tuple[scene.CameraHeights, list[match.Panorama], Callable[[in
     return heights, _panoramas(pictures, heights), then
 
 
-def _views() -> match.Views:
+def _views(kept: int = 64) -> match.Views:
+    """The panoramas' views' features (`kept` panoramas' in memory, about 13 MB each)."""
     with httpx.Client(timeout=300) as client:
         models = match.fetch_models(client, DATA / "raw" / "models")
-    return match.Views(match.Matcher(models), DATA / "raw" / "view_features")
+    return match.Views(match.Matcher(models), DATA / "raw" / "view_features", kept)
 
 
 def _nearest(
@@ -1358,6 +1362,81 @@ def confirm_placed(port: int = 8768, open_browser: bool = True) -> None:
         f"photos situées ({len(placed)})",
         port,
         open_browser,
+    )
+
+
+PROPOSALS = DATA / "pilot" / "proposals_3d.json"  # each photo proposed in its nearest panorama
+PROPOSING_M = 40  # a panorama farther from the photo's place is not tried
+
+
+def _spheres() -> list[match.Panorama]:
+    """The panoramas where they were taken, levelled, for cutting views (no height needed)."""
+    with closing(db.connect(DB_PATH)) as conn:
+        pictures = _lined_up(panoramas.load(conn))
+    return _panoramas(pictures, lambda x, y: 0.0)
+
+
+@app.command("proposer")
+def propose_in_panoramas(sheets: int = 20) -> None:
+    """Propose chaque photo de la balade dans le panorama le plus proche de sa place (à moins de
+    40 m), et mesure : combien en ont une, en combien de secondes ; des planches (photo, vue
+    d'aujourd'hui, la photo posée dedans) dans data/pilot/proposals_3d/ pour les regarder."""
+    with closing(db.connect(DB_PATH)) as conn:
+        walk = export.photos(conn, DATA / "pilot", REVIEWS)
+    spheres = _spheres()
+    views = _views(kept=4)  # each photo is tried in one panorama, photos near one another in turn
+    store = chain.Store(DATA / "raw", views.matcher)  # the photos' features, as matching reads them
+    out = PROPOSALS.with_suffix("")
+    out.mkdir(parents=True, exist_ok=True)
+    for old in out.glob("*.jpg"):  # a sheet is this run's, or none
+        old.unlink()
+    found, times = {}, []
+    try:
+        for me in walk:
+            here = to_metres(Point(me.lon, me.lat))
+            near = _nearest(spheres, here.x, here.y, PROPOSING_M)
+            image = cv2.imread(str(_exported(me.id)))
+            if not near or image is None:
+                continue
+            home = near[0]
+            photo = store.features(me.id, _image(me.id), lambda image=image: match.shrunk(image))
+            cached = views.of(home)
+            started = time.monotonic()  # the proposal alone, whatever was cached before
+            proposal = proposing.propose(
+                photo, home.id, home.axes, cached, me.heading, views.matcher
+            )
+            times.append(time.monotonic() - started)
+            found[me.id] = {
+                "panorama": home.id,
+                "metres": round(float(np.hypot(home.x - here.x, home.y - here.y)), 1),
+                "registration": proposal and registration.to_json(proposal),
+            }
+            if proposal and sheets > 0:
+                sheets -= 1
+                _proposal_sheet(out / f"{pilot.safe_name(me.id)}.jpg", image, home, proposal)
+    finally:  # what was found is kept, even when a photo stops the run
+        write_json(PROPOSALS, found)
+    made = sum(v["registration"] is not None for v in found.values())
+    timing = f"{np.median(times):.2f} s par photo (médiane)" if times else "rien de mesuré"
+    typer.echo(
+        f"{len(found)} photos à moins de {PROPOSING_M} m d'un panorama ; une proposition pour "
+        f"{made} ; {timing} ; planches dans {out}"
+    )
+
+
+def _proposal_sheet(
+    out: Path, photo: np.ndarray, home: match.Panorama, proposal: registration.Registration
+) -> None:
+    """The photo, today's view it was proposed in, and the photo laid in that view."""
+    picture, view = cv2.imread(str(home.path)), proposal.view
+    if picture is None:
+        return
+    cut = match.perspective(picture, home.axes, view.heading, view.fov, proposing.SIDE, view.pitch)
+    laid = registration.composite(cut, photo, proposal, view, home.axes)
+    row = [_to_width(image, SHEET_COLUMN) for image in (photo, cut, laid)]
+    height = max(image.shape[0] for image in row)
+    cv2.imwrite(
+        str(out), np.hstack([np.pad(i, ((0, height - i.shape[0]), (0, 0), (0, 0))) for i in row])
     )
 
 
