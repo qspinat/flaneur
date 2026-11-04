@@ -317,3 +317,88 @@ def test_a_photo_reopened_keeps_how_it_was_placed_and_not_a_registration_on_anot
 
     reopened = json.loads(again)
     assert reopened["answer"] == "points" and reopened["registration"] is None
+
+
+def test_a_photo_carried_from_a_placed_one_comes_with_its_proposal(page, one):
+    sources, proposal = page
+    sources.ahead = lambda: {"pm:1": "portée"}
+    sources.carried = lambda: {
+        "pm:1": {
+            "registration": proposal,
+            "carried_from": "pm:9",
+            "lon": 2.3,
+            "lat": 48.8,
+            "heading": 0.0,
+        }
+    }
+
+    _, queue = one(sources, "GET", "/api/queue")
+
+    head = json.loads(queue)["photo"]
+    assert (head["why"], head["carried_from"], head["answer"]) == ("portée", "pm:9", "fits")
+    assert registration.from_json(head["registration"]) == proposal
+
+
+def test_a_proposal_carried_later_is_shown_where_none_was_before(page):
+    import http.client
+    import threading
+
+    sources, proposal = page
+    sources.proposal = lambda *_: None  # none made on this panorama
+    carried = {}
+    sources.carried = lambda: carried
+    server = placing.serve(sources, 0)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+
+    def get():
+        connection = http.client.HTTPConnection("127.0.0.1", server.server_port, timeout=10)
+        connection.request("GET", "/api/proposal/pm:1/p1")
+        return json.loads(connection.getresponse().read())
+
+    try:
+        before = get()
+        carried["pm:1"] = {
+            "registration": proposal,
+            "carried_from": "pm:9",
+            "lon": 2.3,
+            "lat": 48.8,
+            "heading": 0.0,
+        }  # a photo placed meanwhile
+        after = get()
+    finally:
+        server.shutdown()
+        server.server_close()
+
+    assert before is None and after["carried_from"] == "pm:9"
+
+
+def test_a_photo_carried_opens_where_its_source_was_placed(page, one):
+    sources, proposal = page
+    sources.ahead = lambda: {"pm:1": "portée"}
+    sources.carried = lambda: {
+        "pm:1": {
+            "registration": proposal,
+            "carried_from": "pm:9",
+            "lon": 2.3467,
+            "lat": 48.8521,
+            "heading": 40.0,
+        }
+    }
+
+    _, queue = one(sources, "GET", "/api/queue")
+
+    head = json.loads(queue)["photo"]
+    assert (head["lon"], head["lat"], head["heading"]) == (2.3467, 48.8521, 40.0)
+
+
+def test_carried_proposals_that_fail_leave_the_queue_going(page, one):
+    sources, _ = page
+
+    def fails():
+        raise IndexError("a pair beyond the features kept")
+
+    sources.carried = fails
+
+    status, queue = one(sources, "GET", "/api/queue")
+
+    assert status == 200 and json.loads(queue)["photo"]["id"] == "pm:1"

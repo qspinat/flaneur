@@ -330,7 +330,8 @@ function show(next) {
   $('title').textContent = photo.title + yearsOf(photo.years);
   const why = { revoir: 'déjà jugée, à revoir', voisins: 'porte d\'autres photos', proche: 'un panorama tout près',
                 isolée: 'loin des autres',
-                'sans panorama': 'aucun panorama proche', passée: 'passée une fois', rouverte: 'rouverte' };
+                'sans panorama': 'aucun panorama proche', passée: 'passée une fois', rouverte: 'rouverte',
+                portée: 'proposée depuis une photo placée' };
   $('progress').textContent = `encore ${left} à placer · ${why[photo.why] || ''}`;
   $('pinned').src = photoUrl();
   map.jumpTo({ center: [spot.lon, spot.lat] });

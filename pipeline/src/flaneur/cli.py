@@ -24,6 +24,7 @@ from shapely.geometry import Point
 from flaneur import (
     align,
     buildings,
+    carrying,
     chain,
     confirming,
     db,
@@ -741,10 +742,7 @@ class _Chaining:
                     self.round_zero[photo_id] = self.anchor(photo_id, view, points, m.inputs)
 
     def features(self, photo_id: str) -> match.Features:
-        path = _exported(photo_id)
-        return self.store.features(
-            photo_id, _image(photo_id), lambda: match.shrunk(cv2.imread(str(path)))
-        )
+        return _features(self.store, photo_id)
 
     def anchor(
         self, photo_id: str, view: match.View, points: match.Points, inputs: str
@@ -1445,6 +1443,114 @@ def _proposal_sheet(
 
 
 PLACINGS = DATA / "overrides" / "placings.jsonl"  # the user's answers on the placing page
+CARRIED = DATA / "pilot" / "carried.json"  # each photo placed, on its neighbouring panoramas
+
+
+def _features(store: chain.Store, photo_id: str, extract: bool = True) -> match.Features | None:
+    """A photo's features as matching reads them (see chain.Store.features); without
+    `extract`, only if kept."""
+    path = _exported(photo_id)
+    read = (lambda: match.shrunk(cv2.imread(str(path)))) if extract else None
+    return store.features(photo_id, _image(photo_id), read)
+
+
+def _answered_as(row: dict) -> str:
+    """What a copy or a proposal was made from: the answer's registration on its image, the way
+    round it was shown."""
+    made = json.dumps([row["registration"], row["inputs"], row["flipped"]], sort_keys=True)
+    return hashlib.sha1(made.encode()).hexdigest()[:16]
+
+
+@app.command("porter")
+def carry_placed() -> None:
+    """Porte chaque photo placée dans son panorama sur les panoramas voisins qui voient les
+    mêmes façades, de proche en proche le long de la rue, s'estompant au loin
+    (data/pilot/carried.json) ; seules les photos répondues depuis la dernière fois sont
+    refaites."""
+    held = {i: r for i, r in placings.holding(PLACINGS).items() if r["answer"] in placings.PLACED}
+    before = json.loads(CARRIED.read_text()) if CARRIED.exists() else {}
+    carried = {i: c for i, c in before.items() if i in held and c["made"] == _answered_as(held[i])}
+    todo = [i for i in held if i not in carried]
+    if todo:
+        with closing(db.connect(DB_PATH)) as conn:
+            pictures = _lined_up(panoramas.load(conn))
+        spheres = {p.id: p for p in _panoramas(pictures, lambda x, y: 0.0)}
+        street = panoramas.links(pictures)  # the next ones along the street, every way
+        views = _views(kept=8)
+        for photo_id in todo:
+            r = placings.registration_of(held[photo_id])
+            home = spheres.get(r.panorama)
+            copies = [] if home is None else _to_neighbours(r, home, spheres, street, views)
+            carried[photo_id] = {"made": _answered_as(held[photo_id]), "copies": copies}
+            write_json(CARRIED, carried)  # kept photo after photo: a stop loses one at most
+    write_json(CARRIED, carried)
+    counts = [len(c["copies"]) for c in carried.values()]
+    typer.echo(
+        f"{len(carried)} photos placées ({len(todo)} refaites) portées sur {sum(counts)} "
+        f"panoramas voisins ({np.median(counts) if counts else 0:.0f} par photo, médiane)"
+    )
+
+
+def _to_neighbours(
+    r: registration.Registration,
+    home: match.Panorama,
+    spheres: dict[str, match.Panorama],
+    street: dict[str, list[tuple[str, float, float]]],
+    views: match.Views,
+) -> list[dict]:
+    """A photo placed on `home`, carried outward along the street to the panoramas that see
+    the same details (the home view's under the photo, matched in their views around its
+    direction, the nearest first)."""
+    n = proposing.around(r.view.heading)[1]  # the kept view it was placed in, or the nearest
+    home_view = registration.ViewOf(heading=float(match.VIEW_HEADINGS[n]))
+    seen = views.of(home)
+    if not seen:
+        return []
+    kept = seen[n]
+    try:
+        inverse = np.linalg.inv(registration.in_view(r, home_view, home.axes))
+    except np.linalg.LinAlgError:
+        return []
+    if not len(kept.keypoints):  # a view with no details (sky): nothing to carry it by
+        return []
+    under = cv2.perspectiveTransform(
+        (kept.keypoints / proposing.SIDE)[None].astype(float), inverse
+    )[0]
+    inside = ((under >= 0) & (under <= 1)).all(axis=1)  # on the photo, warped into the view
+    patch = match.Features(kept.keypoints[inside], kept.descriptors[inside], kept.size)
+    left, nearest, right = proposing.around(home_view.heading)  # the nearest tried first
+
+    def carry(panorama: str) -> registration.Registration | None:
+        sphere = spheres[panorama]
+        theirs = views.of(sphere)
+        for m in (nearest, left, right) if theirs else ():
+            pairs = views.matcher.pairs(patch, theirs[m])
+            copy = carrying.carried_today(
+                r,
+                home_view,
+                home.axes,
+                patch.keypoints[pairs[:, 0]],
+                theirs[m].keypoints[pairs[:, 1]],
+                proposing.SIDE,
+                panorama,
+                registration.ViewOf(heading=float(match.VIEW_HEADINGS[m])),
+                sphere.axes,
+            )
+            if copy is not None:
+                return copy
+        return None
+
+    def links(panorama: str) -> list[tuple[str, float]]:
+        return [(q, metres) for q, _, metres in street.get(panorama, []) if q in spheres]
+
+    def from_home(panorama: str) -> float:
+        p = spheres[panorama]
+        return float(np.hypot(p.x - home.x, p.y - home.y))
+
+    return [
+        {"registration": registration.to_json(copy), "strength": carrying.strength(from_home(q))}
+        for q, copy in carrying.outward(home.id, links, from_home, carry)
+    ]
 
 
 @app.command("placer")
@@ -1453,8 +1559,9 @@ def place_photos(
 ) -> None:
     """Ouvre la page pour placer les photos (locale) : sur le plan, puis dans leur panorama (la
     proposition vérifiée, ou des points cliqués par paires), ou « trop loin ». `--no-live` :
-    seulement les propositions déjà calculées (`flaneur proposer`), sans charger le modèle ;
-    `--answers` : un autre fichier de réponses (pour essayer la page)."""
+    seulement les propositions déjà calculées (`flaneur proposer`) ou portées depuis une photo
+    placée, sans charger le modèle ; `--answers` : un autre fichier de réponses (pour essayer
+    la page)."""
     with closing(db.connect(DB_PATH)) as conn:  # where each photo is best known now
         walk = export.photos(conn, DATA / "pilot", REVIEWS, _places(_confirmed()))
     photos = {
@@ -1473,26 +1580,54 @@ def place_photos(
     spheres = _spheres()
     by_id = {p.id: p for p in spheres}
     computed = json.loads(PROPOSALS.read_text()) if PROPOSALS.exists() else {}
+    store = chain.Store(DATA / "raw", None)  # the photos' features: a matcher once one is loaded
+    raw = DATA / "raw"
+    graph = chain.old_neighbours(
+        raw, {i: p["inputs"] for i, p in photos.items()}, queueing.MIN_SHARED
+    )
 
     @functools.cache
-    def models() -> tuple[match.Views, chain.Store]:  # loaded when first needed
+    def models() -> match.Views:  # loaded when first needed
         views = _views(kept=4)
-        return views, chain.Store(DATA / "raw", views.matcher)
+        store.matcher = views.matcher
+        return views
+
+    images = {i: p["inputs"] for i, p in photos.items()}
+    made: dict[tuple[str, str], dict[str, dict]] = {}  # by source and the answer it holds
+
+    def from_source(source: str, row: dict, *rest) -> dict[str, dict]:  # kept while it holds
+        key = (source, _answered_as(row))
+        if key not in made:
+            made[key] = carrying.from_source(source, row, *rest)
+        return made[key]
+
+    @functools.lru_cache(maxsize=1)
+    def carried_at(answered: tuple[float, int]) -> dict[str, dict]:  # made again on new answers
+        return carrying.proposals(
+            placings.holding(answers),
+            graph,
+            lambda a, b: chain.kept_pairs(raw, (a, images[a]), (b, images[b])),
+            lambda i: _features(store, i, extract=False) if i in photos else None,
+            lambda panorama: by_id[panorama].axes if panorama in by_id else None,
+            images,
+            from_source,
+        )
+
+    def carried_now() -> dict[str, dict]:
+        stat = answers.stat() if answers.exists() else None
+        return carried_at((stat.st_mtime, stat.st_size) if stat else (0.0, 0))
 
     def proposal(photo_id: str, panorama: str) -> dict | None:
-        """Computed by `flaneur proposer` for this panorama, else (live) made now."""
+        """Computed by `flaneur proposer` for this panorama, else (live) made now (those carried
+        from a photo placed come first: see placing.serve)."""
         known = computed.get(photo_id)
         if known and (known["panorama"], known.get("inputs")) == (panorama, _image(photo_id)):
             found = placings.registration_of(known)
         elif live and panorama in by_id and photo_id in photos:
-            views, store = models()
-            path = photos[photo_id]["image"]
-            features = store.features(
-                photo_id, _image(photo_id), lambda: match.shrunk(cv2.imread(str(path)))
-            )
+            views = models()
             home = by_id[panorama]
             found = proposing.propose(
-                features,
+                _features(store, photo_id),
                 panorama,
                 home.axes,
                 views.of(home),
@@ -1504,10 +1639,11 @@ def place_photos(
         return found and {"registration": found, "carried_from": None}
 
     revisit = {i: "revoir" for i, v in _verdicts().items() if v["verdict"] == "yes"}  # a camera
-    graph = chain.old_neighbours(
-        DATA / "raw", {i: p["inputs"] for i, p in photos.items()}, queueing.MIN_SHARED
-    )
-    sources = placing.Sources(photos, spheres, answers, proposal, lambda: revisit, graph)
+
+    def ahead() -> dict[str, str]:  # earlier yes verdicts, then photos carried from placed ones
+        return {**revisit, **{i: "portée" for i in carried_now() if i not in revisit}}
+
+    sources = placing.Sources(photos, spheres, answers, proposal, ahead, graph, carried_now)
     _serve_page(
         lambda: placing.serve(sources, port), f"placer ({len(photos)} photos)", port, open_browser
     )

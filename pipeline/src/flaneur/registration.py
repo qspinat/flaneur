@@ -56,7 +56,7 @@ def _to_camera(view: ViewOf, axes: np.ndarray) -> np.ndarray:
     return axes @ match._view_axes(view.heading, view.pitch).T @ local
 
 
-def _of(panorama: str, m: np.ndarray, view: ViewOf, axes: np.ndarray) -> Registration:
+def of(panorama: str, m: np.ndarray, view: ViewOf, axes: np.ndarray) -> Registration:
     """A registration of unit size, its sign such that the photo's centre lies ahead of the
     view it was made in (a homogeneous matrix and its opposite show opposite directions)."""
     ahead = axes @ match._view_axes(view.heading, view.pitch)[2]
@@ -100,7 +100,7 @@ def fit(
     in_unit = np.diag([1 / side, 1 / side, 1.0]) @ h @ np.diag([photo_size[1], photo_size[0], 1.0])
     if not frame_ok(in_unit):
         raise NotFitted("la photo se replie, se retourne ou sort presque de la vue")
-    return _of(panorama, _to_camera(view, axes) @ in_unit, view, axes), kept
+    return of(panorama, _to_camera(view, axes) @ in_unit, view, axes), kept
 
 
 def in_view(r: Registration, view: ViewOf, axes: np.ndarray) -> np.ndarray:
@@ -176,7 +176,7 @@ def carried(
     """`r`, seen in `view` of its panorama, carried onto panorama `onto` by a homography from
     that view to `onto_view` of it ([0, 1]²)."""
     h = h_between @ in_view(r, view, axes)
-    return _of(onto, _to_camera(onto_view, onto_axes) @ h, onto_view, onto_axes)
+    return of(onto, _to_camera(onto_view, onto_axes) @ h, onto_view, onto_axes)
 
 
 def to_json(r: Registration) -> dict:

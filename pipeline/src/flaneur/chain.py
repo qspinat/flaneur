@@ -119,14 +119,16 @@ class Store:
         return self.folder / kind / f"{safe_name(photo_id)}{suffix}"
 
     def features(
-        self, photo_id: str, image: str, small: Callable[[], np.ndarray]
-    ) -> match.Features:
+        self, photo_id: str, image: str, small: Callable[[], np.ndarray] | None
+    ) -> match.Features | None:
         """A photo's features as matched (`image`: its image's hash; `small()`: the photo,
-        shrunk, when they must be extracted): extracted once, kept in half precision as the
-        views' are, so that every use sees the same."""
+        shrunk, when they must be extracted; none: only if kept, else none): extracted once,
+        kept in half precision as the views' are, so that every use sees the same."""
         key = (photo_id, image)
         if key in self._features:
             return self._features[key]
+        if small is None and not self._path("photo_features", photo_id, f"_{image}.npz").exists():
+            return None  # asked only if kept
         path = self._path("photo_features", photo_id, f"_{image}.npz")
         if path.exists():
             with np.load(path) as kept:
@@ -206,13 +208,27 @@ class Store:
             pair = self.matcher.match(features(first[0]), features(second[0]))
             found = np.column_stack(pair).astype(np.int32)
             write_atomic(path, lambda out: np.save(out, found))
-        return found if first == a else found[:, ::-1]
+        return _oriented(found, first, a)
 
 
 def pair_name(a: tuple[str, str], b: tuple[str, str]) -> str:
     """The file two old photos' shared details are kept in (`a`, `b`: id and image hash,
     in sorted order), whatever the matcher's precision (its folder)."""
     return f"{safe_name(a[0])}_{a[1]}__{safe_name(b[0])}_{b[1]}.npy"
+
+
+def kept_pairs(folder: Path, a: tuple[str, str], b: tuple[str, str]) -> np.ndarray | None:
+    """The details two old photos share (`a`, `b`: id and image hash), as kept by Store.pairs
+    in any precision: rows of indices in a and in b; none when never matched."""
+    first, second = sorted([a, b])
+    for path in sorted(folder.glob(f"old_pairs_*/{pair_name(first, second)}")):
+        return _oriented(np.load(path), first, a)
+    return None
+
+
+def _oriented(found: np.ndarray, first: tuple[str, str], a: tuple[str, str]) -> np.ndarray:
+    """Pairs kept in sorted order, turned to put `a`'s indices first."""
+    return found if first == a else found[:, ::-1]
 
 
 def _rows_kept(path: Path) -> int:

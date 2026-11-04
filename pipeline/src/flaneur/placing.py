@@ -32,11 +32,13 @@ class Sources:
     photos: dict[str, dict]  # id: title, years, lon, lat, heading, image (its file), inputs
     spheres: list[match.Panorama]  # levelled
     placings: Path
-    # (photo, panorama): {registration, carried_from} or None
+    # (photo, panorama): {registration, carried_from} or None: proposed, not carried
     proposal: Callable[[str, str], dict | None]
     # the photos to come first, with why, in order (asked after each answer)
     ahead: Callable[[], dict[str, str]] = dict
     graph: dict[str, set[str]] = field(default_factory=dict)  # old neighbours, by photo
+    # the photos proposed from the placed ones: {registration, carried_from}, by photo
+    carried: Callable[[], dict[str, dict]] = dict
 
 
 class Around:
@@ -75,6 +77,15 @@ def _shown(photo: dict) -> dict:
     return {k: v for k, v in photo.items() if k not in ("image", "inputs")}
 
 
+def carried(sources: Sources) -> dict[str, dict]:
+    """The photos proposed from those placed; none when making them failed (the page goes on)."""
+    try:
+        return sources.carried()
+    except Exception:  # a pair or a feature kept wrong: the queue and the other proposals go on
+        traceback.print_exc(file=sys.stderr)
+        return {}
+
+
 def next_photo(sources: Sources, nearest: dict[str, float], where: dict) -> dict:
     """The next photo to place, in the order of queueing.order (`nearest`: metres to the
     nearest panorama, `where`: x, y, by photo), how many are left, and the photos placed (to
@@ -94,6 +105,14 @@ def next_photo(sources: Sources, nearest: dict[str, float], where: dict) -> dict
         answered=sum(i in sources.photos for i in answers),
     )
     head = found and {"id": found[0][0], **_shown(sources.photos[found[0][0]]), "why": found[0][1]}
+    proposed = head and carried(sources).get(head["id"])
+    if proposed:  # opened where its source was placed, on the panorama it was carried onto
+        head.update(
+            registration=registration.to_json(proposed["registration"]),
+            answer="fits",
+            carried_from=proposed["carried_from"],
+            **{k: proposed[k] for k in ("lon", "lat", "heading")},
+        )
     placed = [
         {"id": i, "answer": r["answer"], "lon": r["lon"], "lat": r["lat"]}
         for i, r in held.items()
@@ -138,7 +157,14 @@ def serve(sources: Sources, port: int) -> HTTPServer:
         return found
 
     def proposal(photo_id: str, panorama: str) -> dict | None:
-        """The proposal, made once; none when making it failed (the user places by points)."""
+        """Carried from a photo placed (as the answers stand now), else made once; none when
+        making it failed (the user places by points)."""
+        found = carried(sources).get(photo_id)
+        if found and found["registration"].panorama == panorama:
+            return {
+                "registration": registration.to_json(found["registration"]),
+                "carried_from": found["carried_from"],
+            }
         with matching:
             if (photo_id, panorama) not in proposals:
                 try:

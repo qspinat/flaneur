@@ -114,3 +114,13 @@ def test_odd_files_among_the_pairs_kept_are_left_aside(tmp_path):
     (folder / "x__y.npy").write_bytes(b"not an array")
 
     assert chain.old_neighbours(tmp_path, {"a": "h"}, 100) == {}
+
+
+def test_the_details_two_old_photos_share_are_read_whichever_way_they_were_kept(tmp_path):
+    folder = tmp_path / "old_pairs_half"
+    folder.mkdir()
+    kept = np.array([[1, 7], [2, 9]], np.int32)  # rows: index in the first (sorted), the second
+    np.save(folder / chain.pair_name(("pm:1", "aa"), ("pm:2", "bb")), kept)
+
+    assert (chain.kept_pairs(tmp_path, ("pm:2", "bb"), ("pm:1", "aa")) == kept[:, ::-1]).all()
+    assert chain.kept_pairs(tmp_path, ("pm:1", "aa"), ("pm:3", "cc")) is None
