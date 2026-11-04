@@ -3,6 +3,7 @@
  *  plan. Background: Plan IGN (Géoplateforme, Etalab 2.0), faded onto paper. */
 import maplibregl, { type GeoJSONSource, type Map as MapLibre } from 'maplibre-gl';
 import 'maplibre-gl/dist/maplibre-gl.css';
+import planStyle from './plan-style.json';
 import { density } from './walk';
 /** A photo on the map. */
 export interface Dot {
@@ -19,33 +20,37 @@ export interface Spot {
   id?: string;
 }
 
-const PLAN_IGN =
-  'https://data.geopf.fr/wmts?SERVICE=WMTS&REQUEST=GetTile&VERSION=1.0.0&STYLE=normal' +
-  '&LAYER=GEOGRAPHICALGRIDSYSTEMS.PLANIGNV2&TILEMATRIXSET=PM&TILEMATRIX={z}&TILEROW={y}' +
-  '&TILECOL={x}&FORMAT=image/png';
+// IGN's vector Plan IGN on faded paper (scripts/plan-style.mjs makes it): small tiles, sharp at
+// any zoom, the street names drawn by the map itself
+const STYLE = planStyle as maplibregl.StyleSpecification;
+// the lowest zoom its tiles go to (scripts/plan-style.mjs): farther out, the plan would be blank
+const LOWEST_ZOOM = Object.values(planStyle.sources)[0].minzoom;
+// the closest: the tiles of 16 drawn four times larger and more, past it they would show their steps
+const HIGHEST_ZOOM = 19.5;
 
-const STYLE: maplibregl.StyleSpecification = {
-  version: 8,
-  sources: {
-    ign: {
-      type: 'raster',
-      tiles: [PLAN_IGN],
-      tileSize: 256,
-      maxzoom: 18, // its level 19 covers only parts of Paris: closer, level 18 is enlarged
-      attribution: '<a href="https://www.ign.fr/">IGN</a> Plan IGN',
-    },
-  },
-  // the plan faded onto albumen paper, like an old print; what is drawn on it keeps its colours
-  layers: [
-    { id: 'paper', type: 'background', paint: { 'background-color': '#e8dcc4' } },
-    {
-      id: 'ign',
-      type: 'raster',
-      source: 'ign',
-      paint: { 'raster-opacity': 0.78, 'raster-saturation': -0.75, 'raster-contrast': -0.1 },
-    },
-  ],
-};
+let warmed = false;
+/** The street names' letters asked for with the first tiles, not once a tile has come and been
+ *  read (the map's own request then finds them in the cache). */
+function warmGlyphs(): void {
+  if (warmed) return;
+  warmed = true;
+  const fonts = new Set(STYLE.layers.flatMap((layer) => (layer.type === 'symbol' && Array.isArray(layer.layout?.['text-font']) ? [layer.layout['text-font'].join(',')] : [])));
+  for (const font of fonts) fetch(STYLE.glyphs!.replace('{fontstack}', font).replace('{range}', '0-255')).catch(() => {});
+}
+
+/** A map on the plan: the style checked when it was made, never farther out than its tiles. */
+function planMap(options: Omit<maplibregl.MapOptions, 'style'>): MapLibre {
+  warmGlyphs();
+  return new maplibregl.Map({
+    style: STYLE,
+    validateStyle: false,
+    pixelRatio: density(),
+    minZoom: LOWEST_ZOOM,
+    maxZoom: HIGHEST_ZOOM,
+    attributionControl: { compact: true },
+    ...options,
+  });
+}
 
 const ENAMEL = '#1b3a6b';
 const RIM = '#2f6b4f';
@@ -129,14 +134,12 @@ export class Maps {
   private make(container: HTMLElement): void {
     this.made = true;
     const here = this.next ?? { ...this.photos[0], heading: null };
-    const mini = new maplibregl.Map({
+    const mini = planMap({
       container,
-      pixelRatio: density(),
-      style: STYLE,
       center: [here.lon, here.lat],
       zoom: 17,
       interactive: false,
-      attributionControl: { compact: true },
+      fadeDuration: 0, // a jump at each step: its labels shown at once, not faded in over 300 ms
     });
     mini.on('load', () => {
       addLayers(mini, this.photos);
@@ -165,7 +168,7 @@ export class Maps {
       (this.plan.getSource('here') as GeoJSONSource | undefined)?.setData(points(here.id ? [here] : []));
       return;
     }
-    const plan = new maplibregl.Map({ container, style: STYLE, center: [here.lon, here.lat], zoom: 17.5, pixelRatio: density() });
+    const plan = planMap({ container, center: [here.lon, here.lat], zoom: 17.5 });
     this.plan = plan;
     plan.on('load', () => addLayers(plan, this.photos, here.id ? here : undefined));
     plan.on('click', (event) => {
@@ -239,15 +242,10 @@ export class Plan {
   constructor(container: HTMLElement, photos: Viewpoint[], choose: (id: string | null) => void, padding: maplibregl.PaddingOptions) {
     const lons = photos.map((p) => p.lon);
     const lats = photos.map((p) => p.lat);
-    this.map = new maplibregl.Map({
+    this.map = planMap({
       container,
-      style: STYLE,
-      pixelRatio: density(),
       center: [(Math.min(...lons) + Math.max(...lons)) / 2, (Math.min(...lats) + Math.max(...lats)) / 2],
       zoom: 15,
-      maxZoom: 19.5,
-      minZoom: 13,
-      attributionControl: { compact: true },
       dragRotate: false,
       pitchWithRotate: false,
     });

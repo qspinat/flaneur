@@ -1,3 +1,4 @@
+/// <reference types="vitest/config" />
 import { existsSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { defineConfig, type Plugin } from 'vite';
@@ -9,12 +10,13 @@ const SCENE = resolve(import.meta.dirname, 'public/data/scene.json');
 const PANORAMAX = existsSync(SCENE)
   ? [...new Set((JSON.parse(readFileSync(SCENE, 'utf8')).panoramas as { image: string }[]).map((p) => new URL(p.image).origin))]
   : [];
+const IGN = 'https://data.geopf.fr'; // the plan's tiles and street-name glyphs
 const POLICY = [
   "default-src 'self'",
   "script-src 'self'",
   "style-src 'self' 'unsafe-inline'", // the map and the 3D view set styles on their elements
-  `img-src 'self' data: blob: https://data.geopf.fr ${PANORAMAX.join(' ')}`,
-  "connect-src 'self' https://data.geopf.fr", // the map fetches its tiles
+  `img-src 'self' data: blob: ${PANORAMAX.join(' ')}`,
+  `connect-src 'self' ${IGN}`, // the map fetches its tiles and glyphs
   'worker-src blob:', // the map's workers
   "font-src 'self'",
   "object-src 'none'",
@@ -22,7 +24,8 @@ const POLICY = [
   "form-action 'none'",
 ].join('; ');
 
-/** The policy, in the built pages only: the development server needs its own socket. */
+/** The policy (and the preconnect to IGN), in the built pages only: the development server needs
+ *  its own socket. */
 function contentSecurityPolicy(): Plugin {
   return {
     name: 'content-security-policy',
@@ -31,7 +34,11 @@ function contentSecurityPolicy(): Plugin {
     transformIndexHtml: (html) => {
       const charset = '<meta charset="UTF-8" />';
       if (!html.includes(charset)) throw new Error(`a page without ${charset}: its security policy would be left out`);
-      return html.replace(charset, `$&\n    <meta http-equiv="Content-Security-Policy" content="${POLICY}" />`);
+      // and the connection to IGN opened while the page loads
+      return html.replace(
+        charset,
+        `$&\n    <meta http-equiv="Content-Security-Policy" content="${POLICY}" />\n    <link rel="preconnect" href="${IGN}" crossorigin />`,
+      );
     },
   };
 }
@@ -40,6 +47,7 @@ function contentSecurityPolicy(): Plugin {
 export default defineConfig({
   base: './', // relative: served at qspinat.github.io/flaneur/
   plugins: [contentSecurityPolicy()],
+  test: { css: true }, // style.css read as itself in the tests, not emptied
   build: {
     rollupOptions: {
       input: { walk: resolve(import.meta.dirname, 'index.html'), three: resolve(import.meta.dirname, '3d.html') },

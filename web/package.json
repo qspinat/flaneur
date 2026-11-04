@@ -8,9 +8,11 @@
     "build": "tsc && vite build",
     "preview": "vite preview",
     "test": "vitest run --passWithNoTests",
-    "check": "tsc --noEmit && npm run -s test"
+    "check": "tsc --noEmit && npm run -s test",
+    "plan-style": "node scripts/plan-style.mjs"
   },
   "devDependencies": {
+    "@maplibre/maplibre-gl-style-spec": "^20.4.0",
     "playwright": "^1.48.2",
     "typescript": "~7.0.2",
     "vite": "^8.3.5",

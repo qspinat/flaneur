@@ -25,11 +25,26 @@ const phase = async (name, run) => {
   const long = await page.evaluate(() => window.__long);
   console.log(`${name}: ${Date.now() - t0} ms; blocking tasks ${long.length}, total ${Math.round(long.reduce((a, b) => a + b, 0))} ms, worst ${Math.round(Math.max(0, ...long))} ms` + (extra ? `; ${JSON.stringify(extra)}` : ''));
 };
-await phase('plan opens', async () => {
-  await page.goto(base);
-  await page.waitForSelector('#map canvas');
-  await page.waitForLoadState('networkidle');
-});
+// what a page fetches from now on (the responses `kept`), as it crossed the network; read once the
+// page is still, which stops counting
+const fetching = (on, kept = () => true) => {
+  const sizes = [];
+  const count = (r) => kept(r.url()) && sizes.push(r.request().sizes().then((s) => s.responseBodySize, () => 0));
+  on.on('response', count);
+  return async () => {
+    on.off('response', count);
+    return { requests: sizes.length, kb: Math.round((await Promise.all(sizes)).reduce((a, b) => a + b, 0) / 1024) };
+  };
+};
+// a first visit, until the plan is whole: what it asked IGN
+const firstVisit = async (on) => {
+  const ign = fetching(on, (url) => url.includes('geopf'));
+  await on.goto(base);
+  await on.waitForSelector('#map canvas');
+  await on.waitForLoadState('networkidle');
+  return { ign: await ign() };
+};
+await phase('plan opens', () => firstVisit(page));
 await page.click('#welcome-close');
 await phase('plan pans (2 s drag)', async () => {
   const frames = page.evaluate(() => window.__frames(2000));
@@ -52,16 +67,12 @@ await phase('a photo opens', async () => {
   await page.waitForLoadState('networkidle');
 });
 await phase('5 steps forward', async () => {
-  const bodies = [];
-  const count = (r) => bodies.push(r.body().then((b) => b.length, () => 0));
-  page.on('response', count);
+  const fetched = fetching(page);
   const frames = page.evaluate(() => window.__frames(5000));
   for (let i = 0; i < 5; i++) { await page.keyboard.press('ArrowUp'); await page.waitForTimeout(900); }
   const seen = await frames;
   await page.waitForLoadState('networkidle'); // what was fetched ahead too
-  page.off('response', count);
-  const bytes = (await Promise.all(bodies)).reduce((a, b) => a + b, 0);
-  return { ...seen, fetched: `${Math.round(bytes / 1024)} KB` };
+  return { ...seen, fetched: await fetched() };
 });
 await phase('back to the plan', async () => {
   const frames = page.evaluate(() => window.__frames(1500));
@@ -73,4 +84,13 @@ await phase('into the photo from its print', async () => {
   await page.click('#enter');
   return await frames;
 });
+// a laptop (1440x900 at 2x, full speed), first visit: until the plan is whole, and what it asks IGN
+{
+  const desk = await browser.newContext({ viewport: { width: 1440, height: 900 }, deviceScaleFactor: 2, bypassCSP: true }); // as the phone
+  const laptop = await desk.newPage();
+  const t0 = Date.now();
+  const { ign } = await firstVisit(laptop);
+  console.log(`laptop plan whole: ${Date.now() - t0} ms; IGN ${JSON.stringify(ign)}`);
+  await desk.close();
+}
 await browser.close();
