@@ -8,7 +8,7 @@ import {
   largest,
   photoIdFrom,
   srcsetOf,
-  startOf,
+  richest,
   yearsLabel,
   type Photo,
 } from './walk';
@@ -88,12 +88,9 @@ describe('the walk', () => {
     expect(erasOf(a, new Map([['b', b]])).map((p) => p.id)).toEqual(['b', 'a']);
   });
 
-
-  it('starts at the photo of the URL, else where there are most ways to go', () => {
+  it('begins the walk where there are most ways to go', () => {
     const lone = photo('lone');
     const hub = photo('hub', { links: { forward: { id: 'lone', distance_m: 40 }, back: null, left: null, right: null } });
-    const walk = { photos: [lone, hub] };
-    expect(startOf(walk, '#/lone').id).toBe('lone');
-    expect(startOf(walk, '').id).toBe('hub');
+    expect(richest([lone, hub]).id).toBe('hub');
   });
 });

@@ -2,7 +2,7 @@
 // chosen on a slider. `#<lon>,<lat>,<heading>,<min>-<max>`.
 import type { Maps } from '../map';
 import { $, drawPlate, outLinks, typing, wirePlan } from '../page';
-import { FIRST_YEAR, LAST_YEAR, format3d, hashOf, json, parse3d, yearsLabel, type Place3d } from '../walk';
+import { FIRST_YEAR, LAST_YEAR, format3d, hashOf, json, parse3d, whenLabel, yearsLabel, type Place3d } from '../walk';
 import { Scene3D } from './scene';
 import './walk3d.css';
 import {
@@ -241,7 +241,7 @@ class Walk3d {
   private showCard(photo: OldPhoto | null): void {
     $('card').hidden = !photo;
     if (!photo) return;
-    $('card-when').textContent = yearsLabel(photo.years) || 'Date inconnue';
+    $('card-when').textContent = whenLabel(photo.years);
     $('card-title').textContent = photo.title;
     $('card-credit').textContent = photo.credit;
     const links: (Node | string)[] = [link(`./${hashOf(photo.id)}`, 'Voir dans la balade')];

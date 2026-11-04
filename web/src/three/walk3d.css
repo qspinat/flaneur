@@ -146,3 +146,19 @@ body.three { background: var(--mount-deep); }
   #credits { right: 12px; bottom: 96px; max-width: calc(100vw - 166px); }
   #card { left: 12px; right: 12px; bottom: 210px; width: auto; }
 }
+
+/* The plan of every photograph, full screen (the photo walk's plan is its home page). */
+#plan { position: fixed; inset: 0; background: var(--mount); z-index: 10; }
+#plan-map { position: absolute; inset: 0; }
+#plan-close, #plan-hint { position: absolute; z-index: 1; font-family: var(--serif); }
+#plan-close { top: 18px; right: 18px; }
+#plan-hint {
+  left: 50%;
+  bottom: 18px;
+  transform: translateX(-50%);
+  margin: 0;
+  padding: 6px 14px;
+  border-radius: 999px;
+  background: var(--veil);
+  font-size: 15px;
+}

@@ -81,6 +81,11 @@ export function yearsLabel([start, end]: [number | null, number | null]): string
   return `${start}–${end}`;
 }
 
+/** A photo's date as shown under it: its years, or that they are not known. */
+export function whenLabel(years: [number | null, number | null]): string {
+  return yearsLabel(years) || 'Date inconnue';
+}
+
 /** "40 m", "1,2 km". */
 export function distanceLabel(metres: number): string {
   if (metres < 1000) return `${Math.round(metres)} m`;
@@ -99,13 +104,10 @@ export function erasOf(photo: Photo, byId: Map<string, Photo>): Photo[] {
   return all.sort((a, b) => (a.years[0] ?? 9999) - (b.years[0] ?? 9999));
 }
 
-/** Where the walk starts: the photo in the URL, else the one with the most ways to go on. */
-export function startOf(walk: Walk, hash: string): Photo {
-  const wanted = photoIdFrom(hash);
-  const found = wanted ? walk.photos.find((p) => p.id === wanted) : undefined;
-  if (found) return found;
+/** Where a walk begins best: the photo with the most ways on (and a view of today). */
+export function richest(photos: Photo[]): Photo {
   const ways = (p: Photo) => Object.values(p.links).filter(Boolean).length + (p.today ? 1 : 0);
-  return walk.photos.reduce((best, p) => (ways(p) > ways(best) ? p : best));
+  return photos.reduce((best, p) => (ways(p) > ways(best) ? p : best));
 }
 
 /** The years shown: from the first photographs of Paris to today. */

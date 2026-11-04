@@ -9,17 +9,55 @@
     <link rel="preload" href="data/walk.json" as="fetch" crossorigin />
   </head>
   <body>
-    <main id="walk" aria-live="polite">
+    <!-- The plan the site opens on: every photograph where its camera stood. -->
+    <section id="home" aria-label="Le plan des photographies">
+      <div id="map" role="application" aria-label="Plan du quartier, chaque photographie là où l'appareil se tenait"></div>
+
+      <a id="brand" class="plate" href="#/" aria-label="Flâneur, le plan">
+        <span class="plate-arrt">Paris, 1850 – 1950</span>
+        <span class="plate-kind">Promenade</span>
+        <span class="plate-name">Flâneur</span>
+      </a>
+      <button id="about-open" class="pill quiet" type="button">À propos</button>
+
+      <aside id="welcome" aria-labelledby="welcome-title" hidden>
+        <h1 id="welcome-title">Le vieux Paris, depuis l'endroit où se tenait le photographe</h1>
+        <p id="welcome-text">
+          Des photographies d'archive du quartier Saint-Séverin, posées sur le plan à la place de
+          l'appareil. Choisissez-en une, puis avancez de rue en rue.
+        </p>
+        <div class="actions">
+          <button id="start" class="pill" type="button">Commencer la promenade</button>
+          <button id="welcome-close" class="link" type="button">Explorer le plan</button>
+        </div>
+      </aside>
+
+      <aside id="print" aria-live="polite" hidden>
+        <button id="print-open" class="print-frame" type="button" aria-label="Entrer dans la photographie">
+          <img id="print-img" alt="" sizes="(max-width: 820px) 42vw, 360px" />
+        </button>
+        <div class="print-words">
+          <button id="print-close" class="close" type="button" aria-label="Fermer">×</button>
+          <p id="print-when"></p>
+          <p id="print-title"></p>
+          <button id="enter" class="pill" type="button">Entrer dans la photo</button>
+        </div>
+      </aside>
+    </section>
+
+    <!-- One photograph, and the ways on from it. -->
+    <main id="walk" aria-live="polite" hidden>
       <div id="stage">
         <img id="photo" alt="" fetchpriority="high" />
         <nav id="steps" aria-label="Avancer"></nav>
       </div>
 
-      <a id="plate" href="#" aria-label="Rue">
-        <span id="plate-arrt"></span>
-        <span id="plate-kind"></span>
-        <span id="plate-name"></span>
+      <a id="plate" class="plate" href="#/" aria-label="Rue">
+        <span id="plate-arrt" class="plate-arrt"></span>
+        <span id="plate-kind" class="plate-kind"></span>
+        <span id="plate-name" class="plate-name"></span>
       </a>
+      <a id="to-plan" class="pill" href="#/">Plan</a>
 
       <section id="about">
         <p id="when"></p>
@@ -32,14 +70,39 @@
         </details>
       </section>
 
-      <div id="minimap" role="button" tabindex="0" aria-label="Ouvrir le plan"></div>
+      <div id="minimap" role="button" tabindex="0" aria-label="Revenir au plan"></div>
     </main>
 
-    <div id="plan" hidden>
-      <div id="plan-map"></div>
-      <button id="plan-close" class="pill" type="button">Revenir à la photo</button>
-      <p id="plan-hint">Touchez un point pour vous y rendre.</p>
-    </div>
+    <dialog id="about-site" aria-labelledby="about-title">
+      <button id="about-close" class="close" type="button" aria-label="Fermer">×</button>
+      <h2 id="about-title">À propos de Flâneur</h2>
+      <p>
+        Flâneur pose des photographies anciennes de Paris là où le photographe se tenait, pour qu'on
+        puisse marcher de l'une à l'autre. Le quartier Saint-Séverin est le premier ; d'autres
+        suivront.
+      </p>
+      <h3>Les photographies</h3>
+      <p>
+        Paris Musées (musée Carnavalet, Histoire de Paris), domaine public (CC0). Chaque photographie
+        porte sa mention et le lien vers sa notice.
+      </p>
+      <h3>Aujourd'hui et le plan</h3>
+      <p>
+        Les vues d'aujourd'hui viennent de Panoramax, sous licence ouverte, avec le nom de leur
+        auteur. Le plan est le Plan IGN (Géoplateforme, Licence Ouverte 2.0).
+      </p>
+      <h3>Vos données</h3>
+      <p>
+        Le site ne dépose aucun cookie et ne mesure pas l'audience ; votre navigateur retient
+        seulement que vous avez vu l'accueil. Le plan est chargé depuis l'IGN, les vues de la
+        balade en 3D depuis Panoramax : ces services voient votre adresse IP.
+      </p>
+      <h3>Le code</h3>
+      <p>
+        Libre, sous licence MIT :
+        <a href="https://github.com/qspinat/flaneur" target="_blank" rel="noopener">github.com/qspinat/flaneur</a>.
+      </p>
+    </dialog>
 
     <script type="module" src="/src/main.ts"></script>
   </body>

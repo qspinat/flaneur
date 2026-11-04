@@ -1,5 +1,6 @@
 // The walk, checked in a real browser (headless Chromium, or Firefox with BROWSER=firefox):
-// open a photo, step forward and back, turn, open "today" and the plan; screenshots at phone
+// the plan the site opens on and its welcome; open a photo, step forward and back, turn, open
+// "today", go back to the plan and in again from the photo's print; screenshots at phone
 // and laptop sizes; the credit and licence of every photo shown; nothing the pages' security
 // policy refuses. Usage:
 //   [BROWSER=firefox] node tests/visual/walk.mjs [base-url] [screenshot-folder]
@@ -32,8 +33,25 @@ const browser = await engine.launch();
 console.log(`browser: ${engine.name()}`);
 for (const [name, viewport] of [['portable', { width: 1440, height: 900 }], ['telephone', { width: 390, height: 844 }]]) {
   // the checks below evaluate code in the page, which its policy refuses: checked apart, after
-  const page = await browser.newPage({ viewport, reducedMotion: 'reduce', bypassCSP: true });
   const errors = [];
+
+  // the site opens on its plan, with a welcome that leads into a photograph (a page of its own:
+  // the photograph's own first load is measured below, from cold)
+  {
+    const home = await browser.newPage({ viewport, reducedMotion: 'reduce', bypassCSP: true });
+    home.on('pageerror', (e) => errors.push(e.message));
+    await home.goto(base);
+    await home.waitForSelector('#map canvas');
+    check(await home.isVisible('#welcome'), `${name}: the plan opens with its welcome`);
+    await home.waitForTimeout(1500); // map tiles
+    await home.screenshot({ path: `${out}/${name}-plan.png` });
+    await home.click('#start');
+    await home.waitForFunction(() => location.hash.length > 2 && !document.getElementById('walk').hidden);
+    check(true, `${name}: the welcome leads into a photograph`);
+    await home.close();
+  }
+
+  const page = await browser.newPage({ viewport, reducedMotion: 'reduce', bypassCSP: true });
   page.on('pageerror', (e) => errors.push(e.message));
   const t0 = Date.now();
   await page.goto(`${base}#/${encodeURIComponent(start.id)}`);
@@ -69,11 +87,20 @@ for (const [name, viewport] of [['portable', { width: 1440, height: 900 }], ['te
   }
 
   await page.click('#minimap');
+  await page.waitForSelector('#print', { state: 'visible' });
+  check((await page.textContent('#print-title')) === start.title, `${name}: the plan shows the photo's print`);
   await page.waitForTimeout(1500);
-  check(await page.isVisible('#plan-map'), `${name}: the plan opens`);
-  await page.screenshot({ path: `${out}/${name}-plan.png` });
+  await page.screenshot({ path: `${out}/${name}-print.png` });
+  await page.click('#enter');
+  await page.waitForFunction((id) => decodeURIComponent(location.hash.slice(2)) === id && !document.getElementById('walk').hidden, start.id);
+  check(true, `${name}: the print leads back into the photograph`);
+  await page.keyboard.press('m');
+  await page.waitForSelector('#print', { state: 'visible' });
   await page.keyboard.press('Escape');
-  check(!(await page.isVisible('#plan-map')), `${name}: Escape closes the plan`);
+  check(!(await page.isVisible('#print')), `${name}: Escape sets the print aside`);
+  await page.goBack();
+  await page.waitForFunction(() => !document.getElementById('walk').hidden);
+  check(true, `${name}: the browser's back returns to the photograph`);
 
   const sizes = await page.evaluate(() =>
     Object.fromEntries(['#photo', '#plate', '.step[data-way="forward"]', '#when'].map((s) => {
@@ -105,10 +132,12 @@ for (const [name, viewport] of [['portable', { width: 1440, height: 900 }], ['te
   page.on('pageerror', (e) => errors.push(e.message));
   // waits for the network to rest (no evaluation in the page), then a moment for late refusals
   const settled = () => page.waitForLoadState('networkidle').then(() => page.waitForTimeout(500));
+  await page.goto(base);
+  await settled();
   await page.goto(`${base}#/${encodeURIComponent(start.id)}`);
   await settled();
   await page.click('#minimap');
-  await page.waitForSelector('#plan-map', { state: 'visible' });
+  await page.waitForSelector('#print', { state: 'visible' });
   await settled();
   await page.goto(new URL('3d.html', base).href);
   await settled();

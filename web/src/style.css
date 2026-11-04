@@ -17,6 +17,9 @@
 
 * { box-sizing: border-box; }
 
+/* what is hidden stays hidden, whatever display its own rules give it */
+[hidden] { display: none !important; }
+
 html, body { height: 100%; margin: 0; }
 
 body {
@@ -95,11 +98,9 @@ body {
 .step[data-way='right'] { right: 2%; top: 50%; transform: translateY(-50%); }
 .step[data-way='back'] svg { width: 40px; height: 40px; }
 
-/* The enamel plate: dark blue, white letters, a green rim inside a white line. */
-#plate {
-  position: absolute;
-  top: 22px;
-  left: 22px;
+/* The enamel plate: dark blue, white letters, a green rim inside a white line. It names the
+   street of a photograph, and the site itself on its plan. */
+.plate {
   display: grid;
   justify-items: center;
   min-width: 190px;
@@ -116,10 +117,10 @@ body {
   line-height: 1.05;
 }
 
-#plate-arrt { font-size: 13px; font-weight: 500; letter-spacing: 0.04em; }
-#plate-kind { font-size: 16px; font-weight: 500; text-transform: uppercase; letter-spacing: 0.08em; }
-#plate-name { font-size: 27px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.02em; }
-#plate[hidden] { display: none; }
+.plate-arrt { font-size: 13px; font-weight: 500; letter-spacing: 0.04em; }
+.plate-kind { font-size: 16px; font-weight: 500; text-transform: uppercase; letter-spacing: 0.08em; }
+.plate-name { font-size: 27px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.02em; }
+#plate { position: absolute; top: 22px; left: 22px; }
 
 /* The side column: what the photograph is, and when. */
 #about {
@@ -165,6 +166,9 @@ a.era { text-decoration: none; }
 #credit { font-size: 14px; color: var(--sepia); }
 #credit a { color: inherit; }
 
+/* Back to the plan, from a photograph. */
+#to-plan { position: absolute; top: 22px; right: calc(340px + 22px); z-index: 1; box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4); }
+
 #minimap {
   grid-column: 2;
   grid-row: 2;
@@ -173,14 +177,7 @@ a.era { text-decoration: none; }
   border-radius: 6px;
   overflow: hidden;
   cursor: pointer;
-  filter: sepia(0.35) saturate(0.7);
 }
-
-/* The plan of every photograph, full screen. */
-#plan { position: fixed; inset: 0; background: var(--mount); z-index: 10; }
-#plan-map { position: absolute; inset: 0; filter: sepia(0.35) saturate(0.7); }
-#plan-close, #plan-hint { position: absolute; z-index: 1; font-family: var(--serif); }
-#plan-close { top: 18px; right: 18px; }
 
 /* A button or link of the site's own: an enamel pill. */
 .pill {
@@ -194,16 +191,6 @@ a.era { text-decoration: none; }
   text-decoration: none;
   cursor: pointer;
 }
-#plan-hint {
-  left: 50%;
-  bottom: 18px;
-  transform: translateX(-50%);
-  margin: 0;
-  padding: 6px 14px;
-  border-radius: 999px;
-  background: var(--veil);
-  font-size: 15px;
-}
 
 .maplibregl-ctrl-attrib { font-family: var(--serif); font-size: 11px; }
 
@@ -216,12 +203,126 @@ a.era { text-decoration: none; }
   }
   #stage { height: 68vh; height: 68svh; }
   #photo { inset: 1.5vh 2vw; width: calc(100% - 4vw); height: calc(100% - 3vh); }
-  #plate { top: 12px; left: 12px; min-width: 0; padding: 5px 12px 6px; }
-  #plate-name { font-size: 20px; }
-  #plate-kind { font-size: 13px; }
-  #plate-arrt { font-size: 11px; }
+  .plate { min-width: 0; padding: 5px 12px 6px; }
+  .plate-name { font-size: 20px; }
+  .plate-kind { font-size: 13px; }
+  .plate-arrt { font-size: 11px; }
+  #plate { top: 12px; left: 12px; }
+  #to-plan, #about-open { top: 12px; right: 12px; padding: 6px 13px; font-size: 15px; }
   #about { border: 0; padding: 18px 16px 8px; }
   #when { font-size: 42px; }
   #minimap { height: 180px; margin: 0 16px 24px; }
   .step svg { width: 44px; height: 44px; }
+}
+
+
+/* ---- The plan the site opens on ------------------------------------------------------- */
+
+#home { position: fixed; inset: 0; background: var(--mount); }
+#map { position: absolute; inset: 0; }
+
+#brand { position: absolute; top: 22px; left: 22px; z-index: 1; min-width: 0; padding: 8px 22px 10px; }
+#brand .plate-name { font-size: 34px; letter-spacing: 0.06em; }
+
+#about-open { position: absolute; top: 22px; right: 22px; z-index: 1; }
+
+/* A quieter pill, laid over the plan or a picture. */
+.pill.quiet { background: var(--veil); color: var(--albumen); box-shadow: 0 4px 12px rgba(0, 0, 0, 0.35); }
+
+.link {
+  padding: 8px 4px;
+  border: 0;
+  background: none;
+  color: var(--albumen);
+  font-family: var(--serif);
+  font-size: 16px;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  cursor: pointer;
+}
+
+.close {
+  position: absolute;
+  top: 6px;
+  right: 8px;
+  width: 36px;
+  height: 36px;
+  border: 0;
+  background: none;
+  color: var(--sepia);
+  font-size: 26px;
+  line-height: 1;
+  cursor: pointer;
+}
+.close:hover { color: var(--albumen); }
+
+/* Laid on the plan like a mount: brown board, a fine albumen line inside its edge. */
+#welcome, #print, #about-site {
+  background: var(--mount-deep);
+  border-radius: 4px;
+  box-shadow: inset 0 0 0 1px rgba(237, 228, 211, 0.16), 0 14px 34px rgba(0, 0, 0, 0.5);
+}
+#welcome, #print { position: absolute; z-index: 1; }
+
+#welcome { left: 22px; bottom: 34px; width: min(400px, calc(100% - 44px)); padding: 24px 26px 20px; }
+#welcome h1 { margin: 0 0 10px; font-size: 24px; font-weight: 500; line-height: 1.25; }
+#welcome p { margin: 0 0 18px; font-size: 16px; line-height: 1.6; color: var(--albumen); }
+.actions { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 18px; }
+
+/* A photograph chosen on the plan: its print, with its white margin, and what it is. */
+#print { right: 22px; bottom: 34px; width: min(360px, calc(100% - 44px)); padding: 18px; }
+.print-words { position: relative; }
+.print-words .close { top: -4px; right: -8px; }
+.print-frame {
+  display: block;
+  width: 100%;
+  margin: 0 0 14px;
+  padding: 9px;
+  border: 0;
+  background: var(--albumen);
+  box-shadow: 0 6px 14px rgba(0, 0, 0, 0.45);
+  cursor: zoom-in;
+}
+#print-img { display: block; width: 100%; height: auto; max-height: 38vh; object-fit: contain; background: var(--mount); }
+#print-when { margin: 0 40px 0 0; font-family: var(--plate); font-size: 40px; font-weight: 500; line-height: 1; font-variant-numeric: lining-nums; }
+#print-title { margin: 6px 0 16px; font-size: 16px; line-height: 1.45; }
+
+/* The À propos page, over the plan. */
+#about-site {
+  max-width: min(560px, calc(100% - 32px));
+  max-height: min(80vh, 720px);
+  padding: 26px 30px 22px;
+  border: 0;
+  color: var(--albumen);
+  font-size: 16px;
+  line-height: 1.6;
+}
+#about-site::backdrop { background: rgba(20, 17, 14, 0.55); }
+#about-site h2 { margin: 0 0 12px; font-size: 26px; font-weight: 500; }
+#about-site h3 { margin: 20px 0 4px; font-family: var(--plate); font-size: 19px; font-weight: 500; letter-spacing: 0.02em; }
+#about-site p { margin: 0; }
+#about-site a { color: inherit; }
+
+/* The print grows into the photograph (where the browser can say so: view transitions). */
+::view-transition-group(print) { animation-duration: 420ms; animation-timing-function: cubic-bezier(0.2, 0.7, 0.2, 1); }
+::view-transition-old(root), ::view-transition-new(root) { animation-duration: 260ms; }
+@media (prefers-reduced-motion: reduce) {
+  ::view-transition-group(*), ::view-transition-old(*), ::view-transition-new(*) { animation: none; }
+}
+
+@media (max-width: 820px) {
+  #brand { top: 12px; left: 12px; padding: 5px 14px 7px; }
+  #brand .plate-name { font-size: 24px; }
+  /* sheets along the bottom edge, the plan above them */
+  #welcome, #print { left: 0; right: 0; bottom: 0; width: auto; border-radius: 10px 10px 0 0; padding-bottom: calc(18px + env(safe-area-inset-bottom)); }
+  #welcome { padding: 20px 18px; }
+  #welcome h1 { font-size: 21px; }
+  #print { display: grid; grid-template-columns: 42% 1fr; gap: 14px; align-items: start; padding: 16px; }
+  .print-frame { margin: 0; padding: 6px; }
+  #print-img { max-height: 30vh; }
+  #print-when { font-size: 32px; }
+  #print-title { margin: 4px 0 12px; font-size: 15px; display: -webkit-box; -webkit-line-clamp: 4; line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden; }
+  .print-words .close { top: -10px; right: -10px; }
+  /* the plan's credit (its licence asks for it), clear of the sheets along the bottom */
+  #map .maplibregl-ctrl-bottom-right { top: 52px; bottom: auto; }
 }
