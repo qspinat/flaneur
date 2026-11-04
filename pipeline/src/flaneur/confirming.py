@@ -12,7 +12,7 @@ from pathlib import Path
 from urllib.parse import unquote
 
 from flaneur import localpage
-from flaneur.sources import append_row
+from flaneur.sources import append_row, seconds_taken
 
 PAGE = Path(__file__).with_name("confirming_page.html")
 VERDICTS = ("yes", "near", "no")
@@ -26,13 +26,11 @@ def record(
     over to a new placement that hardly moves the camera (not done yet)."""
     if verdict not in VERDICTS:
         raise ValueError(f"un verdict est l'un de {VERDICTS}")
-    if not isinstance(seconds, int | float) or isinstance(seconds, bool) or seconds < 0:
-        raise ValueError("les secondes sont un nombre positif")
     row = {
         "photo_id": photo_id,
         "verdict": verdict,
         "inputs": inputs,
-        "seconds": round(float(seconds), 1),
+        "seconds": seconds_taken(seconds),
     }
     if camera is not None:
         row["camera"] = camera

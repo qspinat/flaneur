@@ -18,7 +18,7 @@ from PIL import Image
 from flaneur import dedup, localpage, placements, places
 from flaneur.gazetteer import Gazetteer
 from flaneur.pilot import safe_name, tile_box
-from flaneur.sources import append_row
+from flaneur.sources import append_row, rows, seconds_taken
 
 PAGE = Path(__file__).with_name("review_page.html")
 DECISIONS = ("confirm", "fix", "not_a_street_view", "skip")
@@ -50,10 +50,7 @@ class Item:
 
 def latest(reviews_path: Path, key: str = "id") -> dict[str, dict]:
     """The last decision taken on each item (an item reviewed again keeps its last word)."""
-    if not reviews_path.exists():
-        return {}
-    rows = (json.loads(line) for line in reviews_path.read_text().splitlines() if line.strip())
-    return {row[key]: row for row in rows}
+    return {row[key]: row for row in rows(reviews_path)}
 
 
 def decisions_by_photo(reviews_path: Path, negatives: dict[str, list[str]]) -> dict[str, dict]:
@@ -222,7 +219,7 @@ def record(reviews_path: Path, decision: dict) -> dict:
         "lon": decision.get("lon"),
         "lat": decision.get("lat"),
         "heading": decision.get("heading"),
-        "seconds": decision.get("seconds"),
+        "seconds": None if decision.get("seconds") is None else seconds_taken(decision["seconds"]),
         "photos": decision.get("photos"),
         # [left, top, right, bottom] as fractions of the image, or None: of the item's own
         # print only (prints of one negative differ in trimming and mount)
