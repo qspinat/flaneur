@@ -1,5 +1,5 @@
 import type { Maps, Plan } from './map';
-import { $, Years, drawPlate, outLinks, typing } from './page';
+import { $, Years, drawPlate, outLinks, typing, button } from './page';
 import {
   DATA,
   density,
@@ -46,14 +46,6 @@ const WAYS: { way: Direction; label: string; key: string; arrow: string }[] = [
 
 const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)');
 
-function button(className: string, text: string, onClick: () => void): HTMLButtonElement {
-  const b = document.createElement('button');
-  b.type = 'button';
-  b.className = className;
-  b.textContent = text;
-  b.addEventListener('click', onClick);
-  return b;
-}
 
 
 /** The plan's welcome is shown until the visitor sets it aside (remembered by this browser). */

@@ -5,11 +5,12 @@
     <link rel="icon" type="image/svg+xml" href="favicon.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Flâneur en 3D, le vieux Paris sur la rue d'aujourd'hui</title>
-    <meta name="description" content="Se promener dans la rue d'aujourd'hui, les photographies d'archive à leur place sur les façades." />
+    <meta name="description" content="Se promener dans la rue d'aujourd'hui, les photographies d'archive à leur place dans la vue." />
   </head>
   <body class="three">
-    <canvas id="view" aria-label="Vue de la rue : faites glisser pour regarder autour de vous"></canvas>
+    <div id="view" aria-label="Vue de la rue : faites glisser pour regarder autour de vous"></div>
     <div id="ways"></div>
+    <div id="pointers"></div>
 
     <a id="plate" class="plate" href="#" aria-label="Rue" hidden>
       <span id="plate-arrt" class="plate-arrt"></span>
@@ -18,6 +19,8 @@
     </a>
 
     <a id="back" class="pill" href="./">Retour aux photos</a>
+
+    <p id="notice" role="status" hidden></p>
 
     <section id="card" hidden aria-live="polite">
       <button id="card-close" type="button" aria-label="Fermer">×</button>
@@ -31,6 +34,8 @@
 
     <form id="range" class="years" aria-label="Années montrées"></form>
 
+    <label id="fade-control">aujourd'hui <input id="fade" type="range" min="0" max="100" value="85" aria-label="Autrefois ou aujourd'hui" /> autrefois</label>
+
     <details id="credits">
       <summary>Crédits</summary>
       <div id="credits-list"></div>
@@ -42,6 +47,6 @@
       <p id="plan-hint">Touchez un point pour vous y rendre.</p>
     </div>
 
-    <script type="module" src="/src/three/main3d.ts"></script>
+    <script type="module" src="/src/sphere/main3d.ts"></script>
   </body>
 </html>

@@ -21,8 +21,9 @@
   "dependencies": {
     "@fontsource/barlow-condensed": "^5.1.0",
     "@fontsource/spectral": "^5.1.0",
-    "@types/three": "^0.170.0",
+    "@photo-sphere-viewer/core": "^5.15.1",
+    "@types/three": "^0.185.1",
     "maplibre-gl": "^4.7.1",
-    "three": "^0.170.0"
+    "three": "^0.185.1"
   }
 }

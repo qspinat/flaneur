@@ -8,7 +8,13 @@ import { defineConfig, type Plugin } from 'vite';
 // come and go). Data that slips past the checks still cannot run script nor load from elsewhere.
 const SCENE = resolve(import.meta.dirname, 'public/data/scene.json');
 const PANORAMAX = existsSync(SCENE)
-  ? [...new Set((JSON.parse(readFileSync(SCENE, 'utf8')).panoramas as { image: string }[]).map((p) => new URL(p.image).origin))]
+  ? [
+      ...new Set(
+        (JSON.parse(readFileSync(SCENE, 'utf8')).panoramas as { image: string }[])
+          .filter((p) => p.image.startsWith('https://')) // the others are copied onto the site
+          .map((p) => new URL(p.image).origin),
+      ),
+    ]
   : [];
 const IGN = 'https://data.geopf.fr'; // the plan's tiles and street-name glyphs
 const POLICY = [
@@ -16,7 +22,7 @@ const POLICY = [
   "script-src 'self'",
   "style-src 'self' 'unsafe-inline'", // the map and the 3D view set styles on their elements
   `img-src 'self' data: blob: ${PANORAMAX.join(' ')}`,
-  `connect-src 'self' ${IGN}`, // the map fetches its tiles and glyphs
+  `connect-src 'self' ${IGN} ${PANORAMAX.join(' ')}`, // the map's tiles and glyphs; the 3D walk's panoramas
   'worker-src blob:', // the map's workers
   "font-src 'self'",
   "object-src 'none'",

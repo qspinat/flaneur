@@ -113,3 +113,13 @@ export class Years {
     );
   }
 }
+
+/** A button of this class, saying `text`, doing `onClick`. */
+export function button(className: string, text: string, onClick: () => void): HTMLButtonElement {
+  const b = document.createElement('button');
+  b.type = 'button';
+  b.className = className;
+  b.textContent = text;
+  b.addEventListener('click', onClick);
+  return b;
+}
