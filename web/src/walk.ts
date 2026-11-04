@@ -31,17 +31,29 @@ export interface Photo {
   today: Today | null;
   links: Record<Direction, Link | null>;
   eras: string[]; // the same view at other dates, one per date, oldest first
+  in_3d: boolean; // shown in the 3D walk (its placement confirmed)
 }
 
 export interface Walk {
   photos: Photo[];
 }
 
-export const DATA = '/data/';
+export const DATA = 'data/'; // relative: the site may be served from a sub-path
 
 /** Every size of a photograph, for `srcset`: "…-960.webp 960w, ….webp 1600w". */
 export function srcsetOf(images: Record<string, string>): string {
   return Object.entries(images).map(([width, path]) => `${DATA}${path} ${width}w`).join(', ');
+}
+
+/** A link out of the site, as the data gives it, if it is an https address (a `javascript:`
+ *  one would run on this page); else null. */
+export function httpsUrl(href: string | null | undefined): string | null {
+  if (!href) return null;
+  try {
+    return new URL(href).protocol === 'https:' ? href : null;
+  } catch {
+    return null;
+  }
 }
 
 /** The largest size of a photograph. */
@@ -51,8 +63,11 @@ export function largest(images: Record<string, string>): string {
 
 /** The photo a URL points to: `#/paris_musees:75860`, or null. */
 export function photoIdFrom(hash: string): string | null {
-  const id = decodeURIComponent(hash.replace(/^#\/?/, ''));
-  return id || null;
+  try {
+    return decodeURIComponent(hash.replace(/^#\/?/, '')) || null;
+  } catch {
+    return null; // a malformed link: as if it named none
+  }
 }
 
 export function hashOf(id: string): string {

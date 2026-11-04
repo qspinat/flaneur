@@ -190,3 +190,18 @@ def test_a_photo_situated_against_today_takes_its_found_place_unless_reviewed(tm
     assert (reviewed.lon, reviewed.heading, reviewed.situated) == (2.346, 90, False)
     assert (situated.lon, situated.lat, situated.heading) == (2.3465, 48.8525, 120.0)
     assert situated.situated and not situated.reviewed
+
+
+def test_images_of_photos_no_longer_in_the_walk_are_removed(tmp_path):
+    me = WalkPhoto(
+        "pm:a", "t", None, [None, None], "p", "c", None, 0.0, 0.0, None, None, None, "u", None
+    )
+    image = export.image_name(me.id)
+    kept = [image, export.small(image), f"today/{export.safe_name(me.id)}.webp"]
+    for name in [*kept, "photos/gone.webp", "today/gone.webp"]:
+        (tmp_path / name).parent.mkdir(exist_ok=True)
+        (tmp_path / name).write_bytes(b"x")
+
+    export._remove_others(tmp_path, [me])  # its download may have failed: its images stay
+
+    assert sorted(str(p.relative_to(tmp_path)) for p in tmp_path.rglob("*.webp")) == sorted(kept)

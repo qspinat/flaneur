@@ -44,7 +44,6 @@ export interface OldPhoto {
   pose: Pose;
   walls: Wall[]; // the facades it is projected onto, as they stood,
   base: number; // from the street's height there
-  checked: boolean;
 }
 
 export interface Building {

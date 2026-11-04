@@ -173,8 +173,9 @@ def import_placements() -> None:
 @app.command("export")
 def export_walk(images: bool = True) -> None:
     """Écrit la balade (photos relues appliquées, liens, vue d'aujourd'hui) pour le site."""
+    confirmed = _confirmed()
     with closing(db.connect(DB_PATH)) as conn:
-        walk = export.build(conn, DATA / "pilot", REVIEWS, _places(_situated()))
+        walk = export.build(conn, DATA / "pilot", REVIEWS, _places(confirmed), in_3d=confirmed)
     if images:
         with httpx.Client(timeout=120, follow_redirects=True) as client:
             walk = export.write(walk, client, DATA / "raw" / "images", WEB_DATA)
@@ -223,8 +224,9 @@ def find_buildings() -> None:
 
 @app.command("align")
 def align_photos(street: str = "") -> None:
-    """Propose, pour chaque photo, sa direction, son horizon et sa scène (balade en 3D).
-    `--street` : seulement les photos dont la rue contient ce texte."""
+    """Ancienne méthode (géométrie de la rue) : propose pour chaque photo sa direction, son
+    horizon et ses façades, dans alignments.json, que la scène 3D ne lit plus (elle prend les
+    photos situées confirmées). `--street` : seulement les photos dont la rue contient ce texte."""
     situated = _situated()
     with closing(db.connect(DB_PATH)) as conn:
         walk = export.photos(conn, DATA / "pilot", REVIEWS, _places(situated))
@@ -473,6 +475,20 @@ def _situated() -> dict[str, match.Situated]:
             if m["inputs"] == _inputs(photo_id, setup) and (photo_id, m["inputs"]) not in refused:
                 found[photo_id] = match.Situated(**m)
     return found
+
+
+def _confirmed() -> dict[str, match.Situated]:
+    """The situated photos the user said yes to as they are placed now: the photo walk takes
+    their place and the 3D walk shows them (unless their place was set by hand since: a
+    reviewed place wins, see export.photos). A placement not judged, or judged on other inputs,
+    waits for a yes (a camera can collapse onto a panorama's spot and still look right).
+    Photos placed by chaining are not among them: chaining is set aside."""
+    verdicts = _verdicts()
+    return {
+        photo_id: m
+        for photo_id, m in _situated().items()
+        if (v := verdicts.get(photo_id)) and v["verdict"] == "yes" and v["inputs"] == m.inputs
+    }
 
 
 def _refused() -> set[tuple[str, str]]:
@@ -1321,6 +1337,7 @@ def confirm_placed(port: int = 8768, open_browser: bool = True) -> None:
             "id": k,
             "title": titles[k],
             "inputs": m.inputs,
+            "camera": {"x": round(m.x, 2), "y": round(m.y, 2), "heading": round(m.heading, 2)},
             "agree": m.agree,
             "moved_m": m.moved_m,
             **rounds[k],
@@ -1346,13 +1363,16 @@ def confirm_placed(port: int = 8768, open_browser: bool = True) -> None:
 
 @app.command("scene")
 def write_scene() -> None:
-    """Écrit la scène de la balade en 3D (panoramas, bâtiments, sol, photos alignées)."""
+    """Écrit la scène de la balade en 3D (panoramas, bâtiments, sol, et les photos situées que
+    l'utilisateur a confirmées)."""
+    confirmed = _confirmed()
     with closing(db.connect(DB_PATH)) as conn:
-        walk = export.photos(conn, DATA / "pilot", REVIEWS, _places(_situated()))
+        walk = export.photos(conn, DATA / "pilot", REVIEWS, _places(confirmed))
         area = placements.area(conn, buildings.MARGIN_M)
         features = _buildings(area)
         pictures = panoramas.load(conn)
-    proposals = json.loads((DATA / "pilot" / "alignments.json").read_text())
+    reviewed = {me.id for me in walk if me.reviewed}  # a place set by hand wins, as in the walk
+    proposals = [align.matched(k, m) for k, m in confirmed.items() if k not in reviewed]
     pictures = _lined_up(pictures)
     built = scene.build(pictures, features, proposals, walk, area, WEB_DATA)
     write_json(WEB_DATA / "scene.json", built)

@@ -45,7 +45,7 @@ describe('the 3D walk', () => {
 
 const photo = (id: string, x: number, heading: number): OldPhoto => ({
   id, title: id, years: [1900, 1900], credit: '', image: '', aspect: 1.3,
-  pose: { x, y: 0, z: 1.6, heading, horizon: 0.6, fov: 53 }, walls: [], base: 0, checked: false,
+  pose: { x, y: 0, z: 1.6, heading, horizon: 0.6, fov: 53 }, walls: [], base: 0,
 });
 
 describe('the old photos around', () => {

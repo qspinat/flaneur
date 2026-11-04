@@ -35,14 +35,6 @@ def test_buildings_stand_on_their_ground_relative_to_the_origin():
     assert np.isfinite(ground.heights).all()
 
 
-def test_a_camera_inside_today_s_buildings_is_not_shown():
-    pose = {"x": 5, "y": 5, "z": 1.6, "heading": 0, "horizon": 0.6, "fov": 53}
-    proposals = [{"photo_id": "a", "status": "lines", "pose": pose, "walls": []}]
-
-    assert scene.shown(proposals, standing=box(0, 0, 10, 10)) == []
-    assert len(scene.shown(proposals, standing=box(20, 20, 30, 30))) == 1
-
-
 def test_each_building_has_a_core_that_hides_old_photos_behind_it():
     features = [
         feature(0, 0, 30.0),

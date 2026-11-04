@@ -1,5 +1,5 @@
 import type { Maps } from './map';
-import { $, drawPlate, typing, wirePlan } from './page';
+import { $, drawPlate, outLinks, typing, wirePlan } from './page';
 import {
   DATA,
   FIRST_YEAR,
@@ -51,9 +51,6 @@ function button(className: string, text: string, onClick: () => void): HTMLButto
   return b;
 }
 
-function outLink(href: string, text: string, className = ''): HTMLAnchorElement {
-  return Object.assign(document.createElement('a'), { href, textContent: text, className, target: '_blank', rel: 'noopener' });
-}
 
 class Walker {
   private byId: Map<string, Photo>;
@@ -184,11 +181,8 @@ class Walker {
     $('caption').textContent = photo.caption ?? '';
     $('credit').replaceChildren(
       ...(today
-        ? [`Vue d'aujourd'hui : ${today.credit}. `, outLink(today.url, 'Ouvrir dans Panoramax')]
-        : [
-            `${photo.photographer}. ${photo.credit}. `,
-            ...(photo.record_url ? [outLink(photo.record_url, 'Voir la notice du musée')] : []),
-          ]),
+        ? [`Vue d'aujourd'hui : ${today.credit}. `, ...outLinks(today.url, 'Ouvrir dans Panoramax')]
+        : [`${photo.photographer}. ${photo.credit}. `, ...outLinks(photo.record_url, 'Voir la notice du musée')]),
     );
     this.drawEras(photo);
   }
@@ -203,7 +197,9 @@ class Walker {
             return era;
           })
         : [];
-    buttons.push(Object.assign(document.createElement('a'), { href: `/3d.html${in3d(photo)}`, textContent: 'En 3D', className: 'era three' }));
+    if (photo.in_3d) {
+      buttons.push(Object.assign(document.createElement('a'), { href: `3d.html${in3d(photo)}`, textContent: 'En 3D', className: 'era three' }));
+    }
     if (photo.today) {
       const today = button('era today', "Aujourd'hui", () => this.toggleToday());
       today.setAttribute('aria-pressed', String(this.showingToday));
@@ -211,7 +207,7 @@ class Walker {
     } else {
       // no view of today matched for sure: Panoramax, open at this spot
       const map = `https://api.panoramax.xyz/#focus=map&map=19/${photo.lat}/${photo.lon}`;
-      buttons.push(outLink(map, "Aujourd'hui, sur Panoramax", 'era today'));
+      buttons.push(...outLinks(map, "Aujourd'hui, sur Panoramax", 'era today'));
     }
     $('eras').replaceChildren(...buttons);
   }

@@ -15,6 +15,7 @@ Links (thresholds fixed in the design before looking at the result):
 import json
 import re
 import sqlite3
+from collections.abc import Collection
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -44,6 +45,16 @@ LICENSES = {
     "etalab-2.0": "Licence Ouverte 2.0",
     "CC-BY-SA-4.0": "CC BY-SA 4.0",
 }
+
+
+def panoramax_credit(picture: panoramax.Picture) -> str:
+    """The credit of a Panoramax picture as shown: who to credit, then its licence."""
+    return f"{panoramax.credit_of(picture)}, {LICENSES.get(picture.license, picture.license)}"
+
+
+def https_or_none(url: str | None) -> str | None:
+    """A link out of the site, kept only when it is an https address (it is put on a page)."""
+    return url if url and url.startswith("https://") else None
 
 
 @dataclass
@@ -82,6 +93,7 @@ class WalkPhoto:
     reviewed: bool = False  # its place was confirmed or fixed by hand (not exported)
     situated: bool = False  # its place was found against today's panoramas (not exported)
     moved_by_review: bool = False  # fixed by hand far from the proposed place or direction
+    in_3d: bool = False  # shown in the 3D walk (its placement confirmed by the user)
     image: str | None = None  # path of the exported image, relative to the data folder
     today: Today | None = None
     links: dict[str, Link | None] = field(default_factory=dict)
@@ -116,6 +128,7 @@ class WalkPhoto:
                 k: v and {"id": v.id, "distance_m": v.distance_m} for k, v in self.links.items()
             },
             "eras": self.eras,
+            "in_3d": self.in_3d,
         }
 
 
@@ -181,7 +194,7 @@ def photos(
                 years=info["years"],
                 photographer=display_name(r["photographer"]),
                 credit=f"{r['credit']}, {LICENSES.get(r['license'], r['license'])}",
-                record_url=r["record_url"],
+                record_url=https_or_none(r["record_url"]),
                 lon=place["lon"],
                 lat=place["lat"],
                 heading=place["heading"],
@@ -278,9 +291,13 @@ def build(
     pilot_dir: Path,
     reviews_path: Path,
     situated: dict[str, dict] | None = None,
+    in_3d: Collection[str] = (),
 ) -> list[WalkPhoto]:
-    """The walk, linked, each photo with its view of today chosen (images not yet written)."""
+    """The walk, linked, each photo with its view of today chosen (images not yet written);
+    `in_3d`: the photos the 3D walk shows."""
     walk = photos(conn, pilot_dir, reviews_path, situated)
+    for me in walk:
+        me.in_3d = me.id in in_3d and not me.reviewed  # a place set by hand wins (see cli.scene)
     link(walk)
     tiles = _tiles(pilot_dir)
     matched = dict(conn.execute("SELECT photo_id, match_panoramax_id FROM placements"))
@@ -307,8 +324,7 @@ def _today_image(client: httpx.Client, today: Today, cache_dir: Path, out: Path)
     if today.panoramic:
         image = panoramax.view(image.convert("RGB"), picture.azimuth or 0, today.heading)
     _save(image, TODAY_SIDE, out)
-    by = f"Panoramax, {picture.producer}" if picture.producer else "Panoramax"
-    today.credit = f"{by}, {LICENSES.get(picture.license, picture.license)}"
+    today.credit = panoramax_credit(picture)
     today.url = (
         f"https://api.panoramax.xyz/#focus=pic&pic={today.panoramax_id}"
         f"&xyz={today.heading:.0f}/0/30"
@@ -365,7 +381,22 @@ def write(
         me.links = {k: v if v and v.id in ids else None for k, v in me.links.items()}
         me.eras = [i for i in me.eras if i in ids]
     write_json(out_dir / "walk.json", {"photos": [p.for_site() for p in exported]})
+    _remove_others(out_dir, walk)
     return exported
+
+
+def _remove_others(out_dir: Path, walk: list[WalkPhoto]) -> None:
+    """Remove the images of photos no longer in the walk (left out by the review, merged as
+    copies of one negative…), so that what is published is what the pages use. A photo still
+    in the walk keeps its images even when its download failed this time: matching reads them."""
+    kept = set()
+    for me in walk:
+        image = image_name(me.id)
+        kept |= {image, small(image), f"today/{safe_name(me.id)}.webp"}
+    for folder in ("photos", "today"):
+        for path in (out_dir / folder).glob("*"):
+            if f"{folder}/{path.name}" not in kept:
+                path.unlink()
 
 
 def summary(walk: list[WalkPhoto]) -> dict[str, float]:

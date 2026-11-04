@@ -4,6 +4,7 @@ import {
   distanceLabel,
   erasOf,
   hashOf,
+  httpsUrl,
   largest,
   photoIdFrom,
   srcsetOf,
@@ -30,6 +31,7 @@ function photo(id: string, over: Partial<Photo> = {}): Photo {
     today: null,
     links: { forward: null, back: null, left: null, right: null },
     eras: [],
+    in_3d: false,
     ...over,
   };
 }
@@ -38,6 +40,22 @@ describe('the URL', () => {
   it('names a photo and reads back', () => {
     expect(photoIdFrom(hashOf('paris_musees:75860'))).toBe('paris_musees:75860');
     expect(photoIdFrom('')).toBeNull();
+  });
+
+  it('takes a malformed link for none', () => {
+    expect(photoIdFrom('#/%E0%A4')).toBeNull();
+  });
+});
+
+describe('links out of the site', () => {
+  it('keeps https addresses only', () => {
+    expect(httpsUrl('https://www.parismuseescollections.paris.fr/fr/node/1')).toBe(
+      'https://www.parismuseescollections.paris.fr/fr/node/1',
+    );
+    expect(httpsUrl('javascript:alert(1)')).toBeNull();
+    expect(httpsUrl('http://example.org/')).toBeNull();
+    expect(httpsUrl('not a url')).toBeNull();
+    expect(httpsUrl(null)).toBeNull();
   });
 });
 
@@ -58,7 +76,7 @@ describe('labels', () => {
 describe('photograph sizes', () => {
   it('lists every size for srcset and finds the largest', () => {
     const images = { '960': 'photos/a-960.webp', '1600': 'photos/a.webp' };
-    expect(srcsetOf(images)).toBe('/data/photos/a-960.webp 960w, /data/photos/a.webp 1600w');
+    expect(srcsetOf(images)).toBe('data/photos/a-960.webp 960w, data/photos/a.webp 1600w');
     expect(largest(images)).toBe('photos/a.webp');
   });
 });

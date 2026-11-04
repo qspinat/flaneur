@@ -1,6 +1,7 @@
 /** The 3D walk drawn with three.js: stand in a panorama, look around, glide to the next; the
  * old photos around, each on the facades it shows. */
 import * as THREE from 'three';
+import { DATA } from '../walk';
 import { EDGE, GONE_DEG, panoramaMaterial, photoMaterial } from './projection';
 import { toThree, type OldPhoto, type Panorama, type Scene, type Wall } from './walk3d';
 
@@ -215,7 +216,7 @@ export class Scene3D {
   /** Put these old photos on their facades; a photo whose image cannot be had is left out. */
   async setPhotos(photos: OldPhoto[]): Promise<void> {
     const asked = ++this.photosAsked;
-    const settled = await Promise.allSettled(photos.map((p) => this.texture(`/data/${p.image}`)));
+    const settled = await Promise.allSettled(photos.map((p) => this.texture(`${DATA}${p.image}`)));
     if (asked !== this.photosAsked) return; // a newer set was asked for while these loaded
     for (const old of this.shown) {
       this.old.remove(old.facades);

@@ -9,11 +9,10 @@ import numpy as np
 from PIL import Image
 from shapely.geometry import Point, Polygon, shape
 from shapely.geometry.base import BaseGeometry
-from shapely.ops import unary_union
 
 from flaneur import buildings, panoramas
 from flaneur.blocks import MOST_PAIRS
-from flaneur.export import LICENSES, WalkPhoto, image_name
+from flaneur.export import WalkPhoto, image_name, panoramax_credit
 from flaneur.gazetteer import to_metres
 from flaneur.panoramax import Picture
 
@@ -128,13 +127,6 @@ def cores_of(features: list[dict], origin: tuple[float, float, float]) -> list[d
     return found
 
 
-def shown(proposals: list[dict], standing: BaseGeometry) -> list[dict]:
-    """The photos drawn in the 3D walk, checked or not: those whose camera stands outside
-    today's buildings (`standing`: their union; a camera inside one is a placement to
-    correct). The user's checks are applied in a later step."""
-    return [p for p in proposals if not standing.contains(Point(p["pose"]["x"], p["pose"]["y"]))]
-
-
 def _local(x: float, y: float, origin) -> tuple[float, float]:
     return round(x - origin[0], 2), round(y - origin[1], 2)
 
@@ -169,7 +161,6 @@ def panoramas_of(pictures: list[Picture], ground: Ground, origin) -> list[dict]:
     for p in pictures:
         point = p.point
         x, y = _local(point.x, point.y, origin)
-        by = f"Panoramax, {p.producer}" if p.producer else "Panoramax"
         found.append(
             {
                 "id": p.id,
@@ -180,7 +171,7 @@ def panoramas_of(pictures: list[Picture], ground: Ground, origin) -> list[dict]:
                 "lat": round(p.lat, 7),
                 "azimuth": round(p.azimuth or 0, 2),
                 "taken": p.taken,
-                "credit": f"{by}, {LICENSES.get(p.license, p.license)}",
+                "credit": panoramax_credit(p),
                 "url": f"https://api.panoramax.xyz/#focus=pic&pic={p.id}",
                 "image": p.sd_url,
                 "links": [[i, round(b, 1), round(d, 1)] for i, b, d in ways[p.id]],
@@ -216,12 +207,11 @@ def photos_of(
     walk: list[WalkPhoto],
     data_dir: Path,
     ground: Ground,
-    standing: BaseGeometry,
     origin,
 ) -> list[dict]:
     by_id = {me.id: me for me in walk}
     found = []
-    for proposal in shown(proposals, standing):
+    for proposal in proposals:  # each confirmed by the user, inside a building of today or not
         me = by_id.get(proposal["photo_id"])
         if me is None:
             continue
@@ -252,7 +242,6 @@ def photos_of(
                     for wall in proposal["walls"]
                 ],
                 "base": round(ground.at(here) - origin[2], 2),  # the street where the facades stand
-                "checked": False,
             }
         )
     return found
@@ -285,7 +274,6 @@ def build(
             walk,
             data_dir,
             ground,
-            unary_union([part for f in features for part in buildings.outlines(f)]),
             origin,
         ),
     }

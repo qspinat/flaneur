@@ -1,9 +1,10 @@
-// The walk, checked in a real browser (Chromium, headless): open a photo, step forward and
-// back, turn, open "today" and the plan; screenshots at phone and laptop sizes; the credit
-// and licence of every photo shown. Usage:
-//   node tests/visual/walk.mjs [base-url] [screenshot-folder]
+// The walk, checked in a real browser (headless Chromium, or Firefox with BROWSER=firefox):
+// open a photo, step forward and back, turn, open "today" and the plan; screenshots at phone
+// and laptop sizes; the credit and licence of every photo shown; nothing the pages' security
+// policy refuses. Usage:
+//   [BROWSER=firefox] node tests/visual/walk.mjs [base-url] [screenshot-folder]
 // Exits 1 when a check fails.
-import { chromium } from 'playwright';
+import { chromium, firefox } from 'playwright';
 import { mkdirSync } from 'node:fs';
 
 const base = process.argv[2] ?? 'http://localhost:5173/';
@@ -26,9 +27,12 @@ if (!start) {
   process.exit(1);
 }
 
-const browser = await chromium.launch();
+const engine = process.env.BROWSER === 'firefox' ? firefox : chromium;
+const browser = await engine.launch();
+console.log(`browser: ${engine.name()}`);
 for (const [name, viewport] of [['portable', { width: 1440, height: 900 }], ['telephone', { width: 390, height: 844 }]]) {
-  const page = await browser.newPage({ viewport, reducedMotion: 'reduce' });
+  // the checks below evaluate code in the page, which its policy refuses: checked apart, after
+  const page = await browser.newPage({ viewport, reducedMotion: 'reduce', bypassCSP: true });
   const errors = [];
   page.on('pageerror', (e) => errors.push(e.message));
   const t0 = Date.now();
@@ -84,8 +88,39 @@ for (const [name, viewport] of [['portable', { width: 1440, height: 900 }], ['te
   await page.close();
 }
 
-// the first photo on a slow 4G connection (Lighthouse's mobile profile: 1.6 Mbit/s, 150 ms)
+// with the pages' security policy in force: a photo, the plan, the 3D walk load, and nothing
+// they need is refused (clicks and waits only: nothing evaluated in the page)
 {
+  const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
+  // each refusal said on the console from inside the page (Firefox reports them only to its
+  // own web console); an init script runs whatever the page's policy
+  await page.addInitScript(() =>
+    document.addEventListener('securitypolicyviolation', (e) =>
+      console.error(`Content Security Policy refused ${e.violatedDirective} ${e.blockedURI}`),
+    ),
+  );
+  const refused = [];
+  const errors = [];
+  page.on('console', (m) => /Content.Security.Policy|violates/i.test(m.text()) && refused.push(m.text()));
+  page.on('pageerror', (e) => errors.push(e.message));
+  // waits for the network to rest (no evaluation in the page), then a moment for late refusals
+  const settled = () => page.waitForLoadState('networkidle').then(() => page.waitForTimeout(500));
+  await page.goto(`${base}#/${encodeURIComponent(start.id)}`);
+  await settled();
+  await page.click('#minimap');
+  await page.waitForSelector('#plan-map', { state: 'visible' });
+  await settled();
+  await page.goto(new URL('3d.html', base).href);
+  await settled();
+  await page.screenshot({ path: `${out}/policy-3d.png` });
+  check(refused.length === 0, `security policy: nothing refused ${refused.slice(0, 3).join(' | ')}`);
+  check(errors.length === 0, `security policy: no script error ${errors.slice(0, 3).join(' | ')}`);
+  await page.close();
+}
+
+// the first photo on a slow 4G connection (Lighthouse's mobile profile: 1.6 Mbit/s, 150 ms);
+// throttled through Chromium's own protocol, so measured in Chromium only
+if (engine === chromium) {
   const page = await browser.newPage({ viewport: { width: 390, height: 844 } });
   const cdp = await page.context().newCDPSession(page);
   await cdp.send('Network.enable');
@@ -101,7 +136,7 @@ for (const [name, viewport] of [['portable', { width: 1440, height: 900 }], ['te
 }
 
 // every photo of the walk can be opened, with its credit
-const page = await browser.newPage({ viewport: { width: 1440, height: 900 }, reducedMotion: 'reduce' });
+const page = await browser.newPage({ viewport: { width: 1440, height: 900 }, reducedMotion: 'reduce', bypassCSP: true });
 let shown = 0;
 for (const photo of walk.photos) {
   await page.goto(`${base}#/${encodeURIComponent(photo.id)}`);

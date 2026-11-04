@@ -1,7 +1,7 @@
 // The 3D walk: today's street from Panoramax, the old photos on their facades, the years
 // chosen on a slider. `#<lon>,<lat>,<heading>,<min>-<max>`.
 import type { Maps } from '../map';
-import { $, drawPlate, typing, wirePlan } from '../page';
+import { $, drawPlate, outLinks, typing, wirePlan } from '../page';
 import { FIRST_YEAR, LAST_YEAR, format3d, hashOf, json, parse3d, yearsLabel, type Place3d } from '../walk';
 import { Scene3D } from './scene';
 import './walk3d.css';
@@ -26,6 +26,7 @@ function link(href: string, text: string, newTab = false): HTMLAnchorElement {
   if (newTab) Object.assign(a, { target: '_blank', rel: 'noopener' });
   return a;
 }
+
 
 /** What changed since the last frame: where one stands, the way one looks, the years. */
 interface Changes {
@@ -174,7 +175,7 @@ class Walk3d {
     if (step || look) {
       this.placeWays();
       const toward = photoToward(this.scene.walk, x, y, this.view.heading);
-      $<HTMLAnchorElement>('back').href = toward ? `/${hashOf(toward.id)}` : '/';
+      $<HTMLAnchorElement>('back').href = toward ? `./${hashOf(toward.id)}` : './';
       drawPlate(toward);
       this.maps?.show({ lon, lat, heading: this.view.heading });
     }
@@ -225,7 +226,7 @@ class Walk3d {
   private drawCredits(): void {
     const here = this.view.here;
     const today = document.createElement('p');
-    today.append(`Rue d'aujourd'hui (${here.taken.slice(0, 4)}) : ${here.credit}. `, link(here.url, 'Ouvrir dans Panoramax', true));
+    today.append(`Rue d'aujourd'hui (${here.taken.slice(0, 4)}) : ${here.credit}. `, ...outLinks(here.url, 'Ouvrir dans Panoramax'));
     $('credits-list').replaceChildren(
       today,
       ...this.view.photos.map((photo) =>
@@ -243,7 +244,7 @@ class Walk3d {
     $('card-when').textContent = yearsLabel(photo.years) || 'Date inconnue';
     $('card-title').textContent = photo.title;
     $('card-credit').textContent = photo.credit;
-    const links: (Node | string)[] = [link(`/${hashOf(photo.id)}`, 'Voir dans la balade')];
+    const links: (Node | string)[] = [link(`./${hashOf(photo.id)}`, 'Voir dans la balade')];
     // in the local version only: correct its place in the review page
     if (import.meta.env.DEV) links.push(' · ', link(`${REVIEW}#${encodeURIComponent(photo.id)}`, 'Corriger', true));
     $('card-links').replaceChildren(...links);

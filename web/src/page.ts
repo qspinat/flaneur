@@ -7,7 +7,7 @@ import '@fontsource/spectral/latin-400.css';
 import '@fontsource/spectral/latin-400-italic.css';
 import '@fontsource/spectral/latin-500.css';
 import './style.css';
-import { arrondissementLabel } from './walk';
+import { arrondissementLabel, httpsUrl } from './walk';
 
 export const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
 
@@ -45,4 +45,12 @@ export function wirePlan(open: () => void, close: () => void): () => boolean {
 /** Keys typed into a field are not the walk's. */
 export function typing(event: KeyboardEvent): boolean {
   return !!(event.target as HTMLElement).closest('summary, input, textarea');
+}
+
+/** A link out of the site, in a new tab: none when the address is not https (one from the
+ *  data that would be `javascript:` would run on this page). */
+export function outLinks(href: string | null, text: string, className = ''): HTMLAnchorElement[] {
+  const safe = httpsUrl(href);
+  if (!safe) return [];
+  return [Object.assign(document.createElement('a'), { href: safe, textContent: text, className, target: '_blank', rel: 'noopener' })];
 }

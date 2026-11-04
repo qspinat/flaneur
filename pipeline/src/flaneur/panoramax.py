@@ -1,6 +1,7 @@
 """Panoramax: today's street-level pictures (open licences: Etalab 2.0 for the IGN instance,
 CC BY-SA for OpenStreetMap France), used to see what an old photo's street looks like now."""
 
+import re
 from dataclasses import dataclass
 from functools import cached_property
 
@@ -37,6 +38,20 @@ class Picture:
     def point(self) -> Point:
         """Where it was taken, in Lambert-93 metres."""
         return to_metres(Point(self.lon, self.lat))
+
+
+EMAIL = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
+
+
+def credit_of(picture: Picture) -> str:
+    """Who to credit for a picture: Panoramax and its producer, an e-mail address in their
+    name left out (nothing for address harvesters): "zach@x.com" → "zach", "Jean D. <j@x.fr>"
+    → "Jean D."."""
+    name = (picture.producer or "").strip()
+    if EMAIL.fullmatch(name):
+        name = name.split("@")[0]
+    name = re.sub(r"\s*[<(\[]?\s*" + EMAIL.pattern + r"\s*[>)\]]?", "", name).strip(" ,;-")
+    return f"Panoramax, {name}" if name else "Panoramax"
 
 
 def _parse(feature: dict) -> Picture:

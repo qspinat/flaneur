@@ -18,8 +18,12 @@ PAGE = Path(__file__).with_name("confirming_page.html")
 VERDICTS = ("yes", "near", "no")
 
 
-def record(path: Path, photo_id: str, verdict: str, inputs: str, seconds: float) -> dict:
-    """Append the user's verdict on a photo placed from `inputs` (see cli._inputs)."""
+def record(
+    path: Path, photo_id: str, verdict: str, inputs: str, seconds: float, camera: dict | None = None
+) -> dict:
+    """Append the user's verdict on a photo placed from `inputs` (see cli._inputs), with the
+    camera judged (`camera`: x, y, heading): recorded so that a verdict can later be carried
+    over to a new placement that hardly moves the camera (not done yet)."""
     if verdict not in VERDICTS:
         raise ValueError(f"un verdict est l'un de {VERDICTS}")
     if not isinstance(seconds, int | float) or isinstance(seconds, bool) or seconds < 0:
@@ -30,6 +34,8 @@ def record(path: Path, photo_id: str, verdict: str, inputs: str, seconds: float)
         "inputs": inputs,
         "seconds": round(float(seconds), 1),
     }
+    if camera is not None:
+        row["camera"] = camera
     return append_row(path, row)
 
 
@@ -89,6 +95,7 @@ def serve(
                         body.get("verdict"),
                         photo["inputs"],
                         body.get("seconds", 0),
+                        photo.get("camera"),
                     )
                 )
             except (ValueError, KeyError, TypeError, AttributeError) as error:
