@@ -3,6 +3,7 @@ import {
   arrondissementLabel,
   distanceLabel,
   erasOf,
+  fitting,
   hashOf,
   httpsUrl,
   largest,
@@ -33,6 +34,7 @@ function photo(id: string, over: Partial<Photo> = {}): Photo {
     links: { forward: null, back: null, left: null, right: null },
     eras: [],
     in_3d: false,
+    aspect: null,
     ...over,
   };
 }
@@ -79,6 +81,14 @@ describe('photograph sizes', () => {
     const images = { '960': 'photos/a-960.webp', '1600': 'photos/a.webp' };
     expect(srcsetOf(images)).toBe('data/photos/a-960.webp 960w, data/photos/a.webp 1600w');
     expect(largest(images)).toBe('photos/a.webp');
+  });
+
+  it('picks the smallest size about as wide as needed, else the largest', () => {
+    const images = { '213': 'photos/a-320.webp', '640': 'photos/a-960.webp', '1067': 'photos/a.webp' };
+    expect(fitting(images, 150)).toBe('photos/a-320.webp');
+    expect(fitting(images, 700)).toBe('photos/a-960.webp'); // 640 is within a tenth of it
+    expect(fitting(images, 1014)).toBe('photos/a.webp');
+    expect(fitting(images, 3000)).toBe('photos/a.webp');
   });
 });
 

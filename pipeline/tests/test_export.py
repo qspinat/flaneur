@@ -217,8 +217,11 @@ def test_each_size_is_listed_by_the_width_it_has():
     )
     me.image = export.image_name(me.id)
     me.widths = {320: 213, 960: 640, 1600: 1067}  # a portrait: its widths are 2/3 of its sides
+    me.aspect = 1.5
 
-    images = me.for_site()["images"]
+    site = me.for_site()
+    images = site["images"]
+    assert site["aspect"] == 1.5  # height over width: the site fits it to its frame
 
     assert images == {
         "213": export.sized(me.image, 320),

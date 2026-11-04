@@ -3,6 +3,7 @@
  *  plan. Background: Plan IGN (Géoplateforme, Etalab 2.0), faded onto paper. */
 import maplibregl, { type GeoJSONSource, type Map as MapLibre } from 'maplibre-gl';
 import 'maplibre-gl/dist/maplibre-gl.css';
+import { density } from './walk';
 /** A photo on the map. */
 export interface Dot {
   id: string;
@@ -78,85 +79,82 @@ function cone(lon: number, lat: number, heading: number): GeoJSON.Feature {
   return { type: 'Feature', properties: {}, geometry: { type: 'Polygon', coordinates: [ring] } };
 }
 
-function points(photos: Dot[], here?: string): GeoJSON.FeatureCollection {
+function points(photos: { id?: string; lon: number; lat: number }[]): GeoJSON.FeatureCollection {
   return {
     type: 'FeatureCollection',
     features: photos.map((p) => ({
       type: 'Feature',
-      properties: { id: p.id, here: p.id === here },
+      properties: { id: p.id },
       geometry: { type: 'Point', coordinates: [p.lon, p.lat] },
     })),
   };
 }
 
-function addLayers(map: MapLibre, photos: Dot[], here?: string): void {
-  map.addSource('photos', { type: 'geojson', data: points(photos, here) });
+/** Every photograph, laid once; the one here drawn apart over them (moving it redraws one
+ *  point, not all of them). */
+function addLayers(map: MapLibre, photos: Dot[], here?: Spot): void {
+  map.addSource('photos', { type: 'geojson', data: points(photos) });
+  map.addSource('here', { type: 'geojson', data: points(here ? [here] : []) });
   map.addSource('cone', { type: 'geojson', data: { type: 'FeatureCollection', features: [] } });
   map.addLayer({ id: 'cone', type: 'fill', source: 'cone', paint: { 'fill-color': RIM, 'fill-opacity': 0.35 } });
-  map.addLayer({
-    id: 'photos',
-    type: 'circle',
-    source: 'photos',
-    paint: {
-      'circle-radius': ['case', ['get', 'here'], 8, 6],
-      'circle-color': ['case', ['get', 'here'], RIM, ENAMEL], // as on the plan: the photo here in green
-      'circle-stroke-color': '#fff',
-      'circle-stroke-width': 1.5,
-    },
-  });
+  const dot = (color: string, radius: number) => ({ 'circle-radius': radius, 'circle-color': color, 'circle-stroke-color': '#fff', 'circle-stroke-width': 1.5 });
+  map.addLayer({ id: 'photos', type: 'circle', source: 'photos', paint: dot(ENAMEL, 6) });
+  map.addLayer({ id: 'here', type: 'circle', source: 'here', paint: dot(RIM, 8) }); // as on the plan: green
 }
 
 export class Maps {
-  private mini: MapLibre;
+  private mini: MapLibre | null = null; // made when first seen (on a phone it lies below the story)
   private plan: MapLibre | null = null;
   private photos: Dot[];
-  private marked: string | undefined; // the photo marked on the minimap now
-  private centre = '';
+  private next: Spot | null = null; // the place to show, kept while out of sight or not ready
+  private inView = false;
+  private made = false;
 
   constructor(miniContainer: HTMLElement, photos: Dot[]) {
     this.photos = photos;
-    this.mini = new maplibregl.Map({
-      container: miniContainer,
+    new IntersectionObserver(([entry]) => {
+      this.inView = entry.isIntersecting;
+      if (!this.inView) return;
+      if (!this.made) this.make(miniContainer);
+      else this.update();
+    }).observe(miniContainer);
+  }
+
+  /** Show where I stand and which way I look (drawn when the minimap can be seen). */
+  show(spot: Spot): void {
+    this.next = spot;
+    if (this.inView) this.update();
+  }
+
+  private make(container: HTMLElement): void {
+    this.made = true;
+    const here = this.next ?? { ...this.photos[0], heading: null };
+    const mini = new maplibregl.Map({
+      container,
+      pixelRatio: density(),
       style: STYLE,
-      center: [photos[0].lon, photos[0].lat],
+      center: [here.lon, here.lat],
       zoom: 17,
       interactive: false,
       attributionControl: { compact: true },
     });
-    this.mini.on('load', () => addLayers(this.mini, photos));
-  }
-
-  /** Show where I stand and which way I look: the marked photo is redrawn only when it
-   * changes, and the map moves only when I do. */
-  show(spot: Spot): void {
-    const waiting = this.next !== null;
-    this.next = spot; // before the map is ready, only the latest place counts
-    if (!waiting) this.whenReady(() => this.update());
-  }
-
-  private next: Spot | null = null;
-
-  private whenReady(then: () => void): void {
-    if (this.mini.getSource('photos')) then();
-    else this.mini.once('load', then);
+    mini.on('load', () => {
+      addLayers(mini, this.photos);
+      this.mini = mini;
+      this.update();
+    });
   }
 
   private update(): void {
-    const spot = this.next!;
+    const spot = this.next;
+    if (!spot || !this.mini) return;
     this.next = null;
-    if (spot.id !== this.marked) {
-      this.marked = spot.id;
-      (this.mini.getSource('photos') as GeoJSONSource).setData(points(this.photos, spot.id));
-    }
+    (this.mini.getSource('here') as GeoJSONSource).setData(points(spot.id ? [spot] : []));
     (this.mini.getSource('cone') as GeoJSONSource).setData({
       type: 'FeatureCollection',
       features: spot.heading == null ? [] : [cone(spot.lon, spot.lat, spot.heading)],
     });
-    const centre = `${spot.lon},${spot.lat}`;
-    if (centre !== this.centre) {
-      this.centre = centre;
-      this.mini.easeTo({ center: [spot.lon, spot.lat], duration: 400 });
-    }
+    this.mini.jumpTo({ center: [spot.lon, spot.lat] }); // one redraw a step, not one a frame
   }
 
   /** The plan of every photograph; `go` is called with the photo nearest a tap. */
@@ -164,12 +162,12 @@ export class Maps {
     if (this.plan) {
       this.plan.resize();
       this.plan.jumpTo({ center: [here.lon, here.lat] });
-      (this.plan.getSource('photos') as GeoJSONSource | undefined)?.setData(points(this.photos, here.id));
+      (this.plan.getSource('here') as GeoJSONSource | undefined)?.setData(points(here.id ? [here] : []));
       return;
     }
-    const plan = new maplibregl.Map({ container, style: STYLE, center: [here.lon, here.lat], zoom: 17.5 });
+    const plan = new maplibregl.Map({ container, style: STYLE, center: [here.lon, here.lat], zoom: 17.5, pixelRatio: density() });
     this.plan = plan;
-    plan.on('load', () => addLayers(plan, this.photos, here.id));
+    plan.on('load', () => addLayers(plan, this.photos, here.id ? here : undefined));
     plan.on('click', (event) => {
       const id = nearestAt(plan, event.point, 'photos'); // a tap beside every dot goes nowhere
       if (id) go(id);
@@ -244,6 +242,7 @@ export class Plan {
     this.map = new maplibregl.Map({
       container,
       style: STYLE,
+      pixelRatio: density(),
       center: [(Math.min(...lons) + Math.max(...lons)) / 2, (Math.min(...lats) + Math.max(...lats)) / 2],
       zoom: 15,
       maxZoom: 19.5,
@@ -264,7 +263,7 @@ export class Plan {
     );
     // the marks as soon as the style is read, without waiting for every tile of the plan
     this.map.once('style.load', () => {
-      const ratio = Math.min(2, window.devicePixelRatio || 1);
+      const ratio = density(); // the icons, as sharp as the map they lie on
       for (const [name, size, fill] of [['view', 44, ENAMEL], ['view-here', 70, RIM]] as const) {
         this.map.addImage(name, viewpointIcon(Math.round(size * ratio), fill, '#f5efe3'), { pixelRatio: ratio });
         this.map.addImage(`${name}-foot`, viewpointIcon(Math.round(size * ratio), fill, '#f5efe3', false), { pixelRatio: ratio });

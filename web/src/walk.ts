@@ -32,6 +32,7 @@ export interface Photo {
   links: Record<Direction, Link | null>;
   eras: string[]; // the same view at other dates, one per date, oldest first
   in_3d: boolean; // shown in the 3D walk (its placement confirmed)
+  aspect: number | null; // height over width (null in an older export)
 }
 
 export interface Walk {
@@ -39,6 +40,13 @@ export interface Walk {
 }
 
 export const DATA = 'data/'; // relative: the site may be served from a sub-path
+
+/** How many device pixels to draw per CSS pixel (maps, the 3D view, the photographs): at most
+ *  two, a phone's 2.6 would cost 70% more to draw and fetch, for little to see. Read when
+ *  asked: zooming the page changes it. */
+export function density(): number {
+  return Math.min(2, globalThis.devicePixelRatio || 1); // (1 in the tests: no screen)
+}
 
 /** Every size of a photograph, for `srcset`: "…-960.webp 960w, ….webp 1600w". */
 export function srcsetOf(images: Record<string, string>): string {
@@ -56,9 +64,17 @@ export function httpsUrl(href: string | null | undefined): string | null {
   }
 }
 
+/** The size of a photograph to show `pixels` wide: the smallest at least that wide (or within a
+ *  tenth of it), else the largest. Chosen here rather than by the browser's srcset, so that
+ *  what is fetched ahead is exactly what will be shown. */
+export function fitting(images: Record<string, string>, pixels: number): string {
+  const widths = Object.keys(images).map(Number).sort((a, b) => a - b);
+  return images[widths.find((w) => w >= pixels * 0.9) ?? widths[widths.length - 1]];
+}
+
 /** The largest size of a photograph. */
 export function largest(images: Record<string, string>): string {
-  return images[Math.max(...Object.keys(images).map(Number))];
+  return fitting(images, Infinity);
 }
 
 /** The photo a URL points to: `#/paris_musees:75860`, or null. */

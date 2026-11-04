@@ -2,10 +2,12 @@ import type { Maps, Plan } from './map';
 import { $, Years, drawPlate, outLinks, typing } from './page';
 import {
   DATA,
+  density,
   FIRST_YEAR,
   LAST_YEAR,
   distanceLabel,
   erasOf,
+  fitting,
   format3d,
   hashOf,
   json,
@@ -23,6 +25,7 @@ import {
   type Walk,
 } from './walk';
 
+const LINGER_MS = 1500; // looking at a photograph this long, one may turn: its other ways are fetched
 const AROUND_YEARS = 5; // the 3D walk opens on the photo's years, and this many either side
 const PLAN_LAST = 1950; // the plan's years end here, or at the last year a photograph has
 
@@ -40,9 +43,6 @@ const WAYS: { way: Direction; label: string; key: string; arrow: string }[] = [
   { way: 'left', label: 'Tourner à gauche', key: 'ArrowLeft', arrow: 'M34 8 L16 27 L34 46' },
   { way: 'right', label: 'Tourner à droite', key: 'ArrowRight', arrow: 'M20 8 L38 27 L20 46' },
 ];
-
-// how wide the photograph is shown (see style.css): all the width on a phone
-const SIZES = '(max-width: 820px) 100vw, 75vw';
 
 const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)');
 
@@ -142,12 +142,23 @@ class Walker {
   private moving = false;
   private years: Years; // which photographs the plan shows
   private yearsFrame = 0;
+  private box = { width: 0, height: 0 }; // the photograph's frame on the stage, as last drawn
+  private lingered = 0; // the timer fetching the other ways ahead
   private refocus: string | null = null; // the way's selector to focus on the next photo (keyboard)
 
   constructor(photos: Photo[]) {
     this.photos = photos;
     this.byId = new Map(photos.map((p) => [p.id, p]));
     keepCreditClear();
+    // the photograph's frame: when it changes (a phone turned, a window resized), the size
+    // fitting it is chosen again
+    new ResizeObserver(([entry]) => {
+      const { width, height } = entry.contentRect;
+      if (!width) return; // the plan hides it: the last size kept
+      this.box = { width, height };
+      const img = $<HTMLImageElement>('photo');
+      if (this.here && !this.showingToday && !img.src.endsWith(this.sizeFor(this.here))) img.src = DATA + this.sizeFor(this.here);
+    }).observe($('photo'));
     const last = Math.max(PLAN_LAST, ...yearsTaken(photos).slice(-1));
     this.years = new Years($('plan-years'), FIRST_YEAR, last, () => this.showYears());
     // a mark at the year each photograph was taken (where it spans decades, its first)
@@ -164,7 +175,11 @@ class Walker {
     });
     $('welcome-close').addEventListener('click', () => this.setWelcomeAside());
     $('print-close').addEventListener('click', () => this.choose(null));
-    for (const id of ['enter', 'print-open']) $(id).addEventListener('click', () => this.chosen && this.enter(this.chosen));
+    for (const id of ['enter', 'print-open']) {
+      $(id).addEventListener('click', () => this.chosen && this.enter(this.chosen));
+      // one means to enter (pointing, a finger down): the photograph is fetched
+      for (const type of ['pointerover', 'pointerdown']) $(id).addEventListener(type, () => this.fetchAhead(this.chosen?.id));
+    }
     const about = $<HTMLDialogElement>('about-site');
     $('about-open').addEventListener('click', () => about.showModal());
     $('about-close').addEventListener('click', () => about.close());
@@ -176,6 +191,7 @@ class Walker {
         const way = wayOf(event.target);
         if (!way || wayOf(event.relatedTarget) === way) return; // within the same way: nothing changes
         const on = type === 'pointerover' || type === 'focusin';
+        if (on) this.fetchAhead(this.here.links[way as Direction]?.id); // one means to go there
         for (const el of $('walk').querySelectorAll<HTMLElement>(`[data-way="${way}"]`)) el.classList.toggle('lit', on);
       });
     }
@@ -249,8 +265,6 @@ class Walker {
     if (photo) $('welcome').hidden = true;
     this.plan?.select(photo);
     if (!photo) return;
-    // the photograph itself, fetched meanwhile: entering it finds it ready
-    Object.assign(new Image(), { fetchPriority: 'low', sizes: SIZES, srcset: srcsetOf(photo.images) });
     const img = $<HTMLImageElement>('print-img');
     img.srcset = srcsetOf(photo.images);
     img.src = DATA + largest(photo.images);
@@ -336,11 +350,13 @@ class Walker {
     img.classList.add('loading');
     img.onload = () => {
       img.classList.remove('loading');
-      // the photographs one step away, once this one is shown
-      for (const link of Object.values(photo.links)) {
-        const p = link && this.byId.get(link.id);
-        if (p) Object.assign(new Image(), { fetchPriority: 'low', sizes: SIZES, srcset: srcsetOf(p.images) });
-      }
+      // the photograph ahead, once this one is shown (the very file it will be shown with); the
+      // other ways once one lingers here (looking around, one turns), or points at them
+      this.fetchAhead(photo.links.forward?.id);
+      window.clearTimeout(this.lingered);
+      this.lingered = window.setTimeout(() => {
+        for (const way of ['left', 'right', 'back'] as const) this.fetchAhead(photo.links[way]?.id);
+      }, LINGER_MS);
     };
     drawPlate(photo);
     this.drawSteps(photo);
@@ -371,6 +387,27 @@ class Walker {
     );
   }
 
+  /** The size of a photograph for its frame on the stage, fitted in it as style.css does
+   *  (object-fit: contain): the frame as last drawn, or before any photograph is, as style.css
+   *  sets it (#stage, #photo). */
+  private sizeFor(photo: Photo): string {
+    const [w, h] = [window.innerWidth, window.innerHeight];
+    const frame = this.box.width
+      ? this.box
+      : w <= 820
+        ? { width: w * 0.96, height: h * 0.68 - h * 0.03 } // a phone: 68svh, inset 1.5vh 2vw
+        : { width: w - 340 - w * 0.06, height: h * 0.94 }; // the side column, inset 3vh 3vw
+    const shown = photo.aspect ? Math.min(frame.width, frame.height / photo.aspect) : frame.width;
+    return fitting(photo.images, shown * density());
+  }
+
+  /** Fetch ahead, quietly, the photograph `id` names: the very file it will be shown with (the
+   *  browser keeps it; asking again is free). */
+  private fetchAhead(id: string | undefined): void {
+    const photo = id ? this.byId.get(id) : undefined;
+    if (photo) Object.assign(new Image(), { fetchPriority: 'low', src: DATA + this.sizeFor(photo) });
+  }
+
   /** Where each way leads: the photograph there, small, with how far and when; laid out as
    *  the arrows are. Pointing at an arrow lights its way, and the way its arrow. */
   private drawWays(photo: Photo): void {
@@ -384,7 +421,7 @@ class Walker {
         const img = Object.assign(document.createElement('img'), {
           alt: '',
           loading: 'lazy',
-          sizes: '112px',
+          sizes: '56px', // as wide as style.css draws it (.onward img)
           srcset: srcsetOf(there.images),
           src: DATA + largest(there.images),
         });
@@ -409,9 +446,7 @@ class Walker {
     const photo = this.here;
     const today = this.showingToday ? photo.today : null;
     const img = $<HTMLImageElement>('photo');
-    img.sizes = SIZES;
-    img.srcset = today ? '' : srcsetOf(photo.images);
-    img.src = DATA + (today ? today.image : largest(photo.images));
+    img.src = DATA + (today ? today.image : this.sizeFor(photo));
     img.alt = today ? "Le même endroit aujourd'hui" : photo.title;
     $('when').textContent = today ? today.taken.slice(0, 4) : whenLabel(photo.years);
     $('title').textContent = photo.title;

@@ -97,9 +97,9 @@ class WalkPhoto:
     moved_by_review: bool = False  # fixed by hand far from the proposed place or direction
     in_3d: bool = False  # shown in the 3D walk (its placement confirmed by the user)
     image: str | None = None  # path of the exported image, relative to the data folder
-    widths: dict[int, int] = field(
-        default_factory=dict
-    )  # each size's width as written (by its side)
+    # each size's width as written, by its side
+    widths: dict[int, int] = field(default_factory=dict)
+    aspect: float | None = None  # height over width, as exported (the site fits it to its frame)
     today: Today | None = None
     links: dict[str, Link | None] = field(default_factory=dict)
     eras: list[str] = field(default_factory=list)
@@ -126,6 +126,7 @@ class WalkPhoto:
                 **{str(self.widths.get(side, side)): sized(self.image, side) for side in SIZES},
                 str(self.widths.get(PHOTO_SIDE, PHOTO_SIDE)): self.image,
             },
+            "aspect": self.aspect,
             "today": self.today
             and {
                 "image": self.today.image,
@@ -362,6 +363,7 @@ def _write_one(me: WalkPhoto, client: httpx.Client, cache_dir: Path, out_dir: Pa
         image.draft("RGB", (PHOTO_SIDE * 2, PHOTO_SIDE * 2))  # decode no larger than needed
         framed = crop.apply(image, me.crop) if me.crop else image
         me.image = image_name(me.id)
+        me.aspect = round(framed.height / framed.width, 4)
         me.widths = {PHOTO_SIDE: _save(framed, PHOTO_SIDE, out_dir / me.image)}
         for side in SIZES:
             me.widths[side] = _save(framed, side, out_dir / sized(me.image, side))

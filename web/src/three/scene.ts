@@ -1,7 +1,7 @@
 /** The 3D walk drawn with three.js: stand in a panorama, look around, glide to the next; the
  * old photos around, each on the facades it shows. */
 import * as THREE from 'three';
-import { DATA } from '../walk';
+import { DATA, density } from '../walk';
 import { EDGE, GONE_DEG, panoramaMaterial, photoMaterial } from './projection';
 import { toThree, type OldPhoto, type Panorama, type Scene, type Wall } from './walk3d';
 
@@ -109,7 +109,7 @@ export class Scene3D {
   constructor(canvas: HTMLCanvasElement, scene: Scene) {
     this.scene = scene;
     this.renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
-    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    this.renderer.setPixelRatio(density());
     this.loader.setCrossOrigin('anonymous');
     const [solid, sky] = this.today;
     for (const b of scene.buildings) this.world.add(new THREE.Mesh(prism(b.footprint, b.base, b.height), solid));
