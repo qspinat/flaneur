@@ -93,7 +93,6 @@ class WalkPhoto:
     image_url: str  # the source's full-size image (not exported)
     crop: list[float] | None  # (not exported: applied to the image)
     reviewed: bool = False  # its place was confirmed or fixed by hand (not exported)
-    situated: bool = False  # its place was found against today's panoramas (not exported)
     moved_by_review: bool = False  # fixed by hand far from the proposed place or direction
     in_3d: bool = False  # shown in the 3D walk (placed in its panorama by the user)
     no_3d: bool = False  # no panorama sees it (answered so on the placing page)
@@ -226,7 +225,6 @@ def photos(
                 image_url=r["image_url"],
                 crop=None if frame == [0, 0, 1, 1] else frame,
                 reviewed=by_hand is not None,
-                situated=found is not None,
                 moved_by_review=bool(by_hand) and _moved(r, by_hand),
             )
         )

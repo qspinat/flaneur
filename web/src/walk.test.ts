@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   arrondissementLabel,
+  offerOf3d,
   distanceLabel,
   erasOf,
   fitting,
@@ -34,6 +35,7 @@ function photo(id: string, over: Partial<Photo> = {}): Photo {
     links: { forward: null, back: null, left: null, right: null },
     eras: [],
     in_3d: false,
+    no_3d: false,
     aspect: null,
     ...over,
   };
@@ -113,5 +115,21 @@ describe('the years chosen', () => {
     expect(shownIn([1912, null], [1912, 1912], false)).toBe(true);
     expect(shownIn([null, null], [1900, 1950], false)).toBe(false);
     expect(shownIn([null, null], [1850, 1950], true)).toBe(true);
+  });
+});
+
+
+describe('the 3D walk, from a photo', () => {
+  it('is offered only for a photo placed in it', () => {
+    expect(offerOf3d(photo('a', { in_3d: true }))).toBe('link');
+    expect(offerOf3d(photo('b'))).toBeNull();
+  });
+
+  it('is said not to be for a photo no panorama sees', () => {
+    expect(offerOf3d(photo('c', { no_3d: true }))).toBe('far');
+  });
+
+  it('is offered when a photo is placed in it, whatever else was answered', () => {
+    expect(offerOf3d(photo('d', { in_3d: true, no_3d: true }))).toBe('link');
   });
 });

@@ -31,7 +31,8 @@ export interface Photo {
   today: Today | null;
   links: Record<Direction, Link | null>;
   eras: string[]; // the same view at other dates, one per date, oldest first
-  in_3d: boolean; // shown in the 3D walk (its placement confirmed)
+  in_3d: boolean; // shown in the 3D walk (placed in its panorama)
+  no_3d: boolean; // no panorama sees it: no 3D walk from it
   aspect: number | null; // height over width (null in an older export)
 }
 
@@ -179,4 +180,10 @@ export async function json<T>(name: string): Promise<T> {
   const response = await fetch(`${DATA}${name}`);
   if (!response.ok) throw new Error(`${name}: ${response.status}`);
   return response.json() as Promise<T>;
+}
+
+/** What the photo page offers of the 3D walk: a link to it, or a line saying no view of
+ *  today is near enough (a photo no panorama sees), or nothing (not placed yet). */
+export function offerOf3d(photo: Photo): 'link' | 'far' | null {
+  return photo.in_3d ? 'link' : photo.no_3d ? 'far' : null;
 }

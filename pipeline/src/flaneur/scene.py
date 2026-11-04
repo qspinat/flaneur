@@ -1,25 +1,21 @@
-"""The 3D walk's scene (scene.json): today's panoramas and buildings, the ground, and the old
-photos with their cameras and old walls. Positions are metres east and north of the scene's
-origin; heights are metres above the origin's ground."""
+"""The 3D walk's scene (scene.json, see build3d): today's panoramas, and the old photos placed
+in them. And the ground and buildings of today that matching stands panoramas on (Ground,
+CameraHeights, buildings_of): metres east and north of an origin, heights above its ground."""
 
 from dataclasses import dataclass
-from pathlib import Path
 
 import numpy as np
-from PIL import Image
-from shapely.geometry import Point, Polygon, shape
+from shapely.geometry import Point, shape
 from shapely.geometry.base import BaseGeometry
 
 from flaneur import buildings, panoramas
 from flaneur.blocks import MOST_PAIRS
 from flaneur.export import WalkPhoto, image_name, panoramax_credit
-from flaneur.gazetteer import to_metres
 from flaneur.panoramax import Picture
 
 GROUND_STEP_M = 10
 NEAREST_BASES = 8
-PANORAMA_HEIGHT_M = 2.5
-CORE_INSET_M = 3  # a camera on a car's roof or a backpack
+PANORAMA_HEIGHT_M = 2.5  # a camera on a car's roof or a backpack
 
 
 @dataclass(frozen=True)
@@ -84,15 +80,6 @@ class Ground:
             + h[i + 1, j + 1] * dx * dy
         )
 
-    def for_site(self, origin: tuple[float, float, float]) -> dict:
-        return {
-            "x0": round(self.x0 - origin[0], 2),
-            "y0": round(self.y0 - origin[1], 2),
-            "step": self.step,
-            "columns": self.heights.shape[1],
-            "heights": [round(float(h - origin[2]), 2) for h in self.heights.ravel()],
-        }
-
 
 def buildings_of(features: list[dict], origin: tuple[float, float, float]) -> list[dict]:
     """Today's buildings as prisms standing on their own ground."""
@@ -105,30 +92,6 @@ def buildings_of(features: list[dict], origin: tuple[float, float, float]) -> li
         for f in features
         for prism in buildings.prisms(f, origin[:2])
     ]
-
-
-def cores_of(features: list[dict], origin: tuple[float, float, float]) -> list[dict]:
-    """Today's buildings shrunk by 3 m on every side: what hides an old photo behind it. A
-    facade of old standing a few metres behind today's (the estimate of where it stood is
-    rarely closer than that) still shows."""
-    found = []
-    for building in buildings_of(features, origin):
-        core = Polygon(building["footprint"]).buffer(-CORE_INSET_M, join_style="mitre")
-        for part in getattr(core, "geoms", [core]):
-            if part.is_empty:
-                continue
-            found.append(
-                {
-                    "footprint": [(round(x, 2), round(y, 2)) for x, y in part.exterior.coords[:-1]],
-                    "base": building["base"],
-                    "height": building["height"],
-                }
-            )
-    return found
-
-
-def _local(x: float, y: float, origin) -> tuple[float, float]:
-    return round(x - origin[0], 2), round(y - origin[1], 2)
 
 
 def panorama_z(ground: Ground, point: Point, origin_z: float) -> float:
@@ -153,130 +116,6 @@ class CameraHeights:
     def streets(self, xs: np.ndarray, ys: np.ndarray) -> np.ndarray:
         """The street's height at many points."""
         return self.ground.at_many(xs, ys) - self.origin_z
-
-
-def panoramas_of(pictures: list[Picture], ground: Ground, origin) -> list[dict]:
-    ways = panoramas.links(pictures)
-    found = []
-    for p in pictures:
-        point = p.point
-        x, y = _local(point.x, point.y, origin)
-        found.append(
-            {
-                "id": p.id,
-                "x": x,
-                "y": y,
-                "z": round(panorama_z(ground, point, origin[2]), 2),
-                "lon": round(p.lon, 7),  # exact, for the map
-                "lat": round(p.lat, 7),
-                "azimuth": round(p.azimuth or 0, 2),
-                "taken": p.taken,
-                "credit": panoramax_credit(p),
-                "url": f"https://api.panoramax.xyz/#focus=pic&pic={p.id}",
-                "image": p.sd_url,
-                "links": [[i, round(b, 1), round(d, 1)] for i, b, d in ways[p.id]],
-            }
-        )
-    return found
-
-
-def walk_of(walk: list[WalkPhoto], origin) -> list[dict]:
-    """The photo walk's photos, where the 3D walk needs them: in the scene (the way back to
-    the photos, the street's plate) and on the map (the plan)."""
-    found = []
-    for me in walk:
-        here = to_metres(Point(me.lon, me.lat))
-        x, y = _local(here.x, here.y, origin)
-        found.append(
-            {
-                "id": me.id,
-                "x": x,
-                "y": y,
-                "lon": me.lon,
-                "lat": me.lat,
-                "heading": me.heading,
-                "street": list(me.street) if me.street else None,
-                "arrondissement": me.arrondissement,
-            }
-        )
-    return found
-
-
-def photos_of(
-    proposals: list[dict],
-    walk: list[WalkPhoto],
-    data_dir: Path,
-    ground: Ground,
-    origin,
-) -> list[dict]:
-    by_id = {me.id: me for me in walk}
-    found = []
-    for proposal in proposals:  # each confirmed by the user, inside a building of today or not
-        me = by_id.get(proposal["photo_id"])
-        if me is None:
-            continue
-        with Image.open(data_dir / image_name(me.id)) as image:
-            width, height = image.size
-        pose = proposal["pose"]
-        here = Point(pose["x"], pose["y"])
-        x, y = _local(pose["x"], pose["y"], origin)
-        found.append(
-            {
-                "id": me.id,
-                "title": me.title,
-                "years": me.years,
-                "credit": f"{me.photographer}. {me.credit}",
-                "image": image_name(me.id),
-                "aspect": round(height / width, 4),
-                "pose": {
-                    **pose,
-                    "x": x,
-                    "y": y,
-                    "z": round(ground.at(here) - origin[2] + pose["z"], 2),
-                },
-                "walls": [
-                    {
-                        "line": [_local(*end, origin) for end in wall["line"]],
-                        "height": wall["height"],
-                    }
-                    for wall in proposal["walls"]
-                ],
-                "base": round(ground.at(here) - origin[2], 2),  # the street where the facades stand
-            }
-        )
-    return found
-
-
-def build(
-    pictures: list[Picture],
-    features: list[dict],
-    proposals: list[dict],
-    walk: list[WalkPhoto],
-    area: BaseGeometry,
-    data_dir: Path,
-) -> dict:
-    ground = Ground.from_buildings(features, area)
-    centre = area.centroid
-    origin = (
-        round(centre.x, -1),
-        round(centre.y, -1),
-        round(float(np.median(ground.heights)), 1),
-    )
-    return {
-        "origin": list(origin),
-        "walk": walk_of(walk, origin),
-        "ground": ground.for_site(origin),
-        "buildings": buildings_of(features, origin),
-        "cores": cores_of(features, origin),
-        "panoramas": panoramas_of(pictures, ground, origin),
-        "photos": photos_of(
-            proposals,
-            walk,
-            data_dir,
-            ground,
-            origin,
-        ),
-    }
 
 
 def build3d(

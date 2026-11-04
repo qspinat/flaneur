@@ -421,3 +421,6 @@ a.era { text-decoration: none; }
   .print-words .close { top: -10px; right: -10px; }
 
 }
+
+/* No 3D walk from this photo: said plainly, under the dates. */
+#no-3d { margin: 8px 0 0; color: var(--sepia); font: italic 14px var(--serif); }

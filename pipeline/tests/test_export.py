@@ -187,9 +187,9 @@ def test_a_photo_situated_against_today_takes_its_found_place_unless_reviewed(tm
     walk = export.photos(conn, tmp_path / "pilot", reviews, {"pm:1": found, "pm:2": found})
 
     reviewed, situated = sorted(walk, key=lambda p: p.id)
-    assert (reviewed.lon, reviewed.heading, reviewed.situated) == (2.346, 90, False)
+    assert (reviewed.lon, reviewed.heading) == (2.346, 90)
     assert (situated.lon, situated.lat, situated.heading) == (2.3465, 48.8525, 120.0)
-    assert situated.situated and not situated.reviewed
+    assert not situated.reviewed
 
 
 def test_images_of_photos_no_longer_in_the_walk_are_removed(tmp_path):

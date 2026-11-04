@@ -10,6 +10,7 @@ import {
   fitting,
   format3d,
   hashOf,
+  offerOf3d,
   json,
   largest,
   photoIdFrom,
@@ -461,9 +462,11 @@ class Walker {
             return era;
           })
         : [];
-    if (photo.in_3d) {
+    const offer = offerOf3d(photo);
+    if (offer === 'link') {
       buttons.push(Object.assign(document.createElement('a'), { href: `3d.html${in3d(photo)}`, textContent: 'En 3D', className: 'era three' }));
     }
+    $('no-3d').hidden = offer !== 'far'; // a statement, not one of the dates
     if (photo.today) {
       const today = button('era today', "Aujourd'hui", () => this.toggleToday());
       today.setAttribute('aria-pressed', String(this.showingToday));

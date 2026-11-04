@@ -23,7 +23,6 @@ from dotenv import load_dotenv
 from shapely.geometry import Point
 
 from flaneur import (
-    align,
     buildings,
     carrying,
     chain,
@@ -52,7 +51,6 @@ from flaneur import (
     review,
     scene,
     stats,
-    walls,
 )
 from flaneur.blocks import Blocks
 from flaneur.gazetteer import Gazetteer, angle, to_degrees, to_metres
@@ -260,35 +258,6 @@ def find_buildings() -> None:
     typer.echo(
         f"{s['buildings']} bâtiments ; sans hauteur : {s['no_height']} ; sans altitude du sol : "
         f"{s['no_ground']}"
-    )
-
-
-@app.command("align")
-def align_photos(street: str = "") -> None:
-    """Ancienne méthode (géométrie de la rue) : propose pour chaque photo sa direction, son
-    horizon et ses façades, dans alignments.json, que la scène 3D ne lit plus (elle prend les
-    photos situées confirmées). `--street` : seulement les photos dont la rue contient ce texte."""
-    situated = _situated()
-    with closing(db.connect(DB_PATH)) as conn:
-        walk = export.photos(conn, DATA / "pilot", REVIEWS, _places(situated))
-        area = placements.area(conn, buildings.MARGIN_M)
-        features = _buildings(area)
-    if street:
-        walk = [p for p in walk if p.street and street.lower() in " ".join(p.street).lower()]
-    today = [part for f in features for part in buildings.outlines(f)]
-    old = walls.load_vasserot(DATA / "raw" / "vasserot" / "buildings" / "BATI.shp", area)
-    # the camera found against today, for the photos whose place it gave (a reviewed place
-    # wins); the others, from their placement and their street's lines
-    guessed = align.propose([p for p in walk if not p.situated], WEB_DATA, today, old)
-    matched = [align.matched(p.id, situated[p.id]) for p in walk if p.situated]
-    out = DATA / "pilot" / "alignments.json"
-    write_json(out, guessed + matched)
-    by_lines = sum(p["status"] == "lines" for p in guessed)
-    facing = sum(len(p["walls"]) == 1 for p in guessed)
-    typer.echo(
-        f"{len(guessed) + len(matched)} photos : situées contre aujourd'hui {len(matched)} ; "
-        f"des autres, direction tirée des lignes de la rue pour {by_lines}, face à une "
-        f"façade {facing}, le long d'une rue {len(guessed) - facing} ; écrit dans {out}"
     )
 
 
