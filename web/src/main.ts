@@ -1,5 +1,5 @@
 import type { Maps, Plan } from './map';
-import { $, drawPlate, outLinks, typing } from './page';
+import { $, Years, drawPlate, outLinks, typing } from './page';
 import {
   DATA,
   FIRST_YEAR,
@@ -14,6 +14,8 @@ import {
   span,
   srcsetOf,
   richest,
+  shownIn,
+  yearsTaken,
   whenLabel,
   yearsLabel,
   type Direction,
@@ -22,6 +24,7 @@ import {
 } from './walk';
 
 const AROUND_YEARS = 5; // the 3D walk opens on the photo's years, and this many either side
+const PLAN_LAST = 1950; // the plan's years end here, or at the last year a photograph has
 
 /** The 3D walk at a photo's place, looking its way, around its years. */
 function in3d(photo: Photo): string {
@@ -86,19 +89,43 @@ function morph(from: HTMLElement, to: HTMLElement, change: () => void): void {
   void transition.finished.finally(() => (to.style.viewTransitionName = ''));
 }
 
-/** What lies over the plan, to keep clear around what it shows: the plate along the top, and
- *  the welcome or the print, a sheet along the bottom (a phone) or a panel at one side. */
+/** What lies over the plan, to keep clear around what it shows: what spans the width or is low
+ *  (the plate, the years, a phone's sheets) clears the top or the bottom; a tall panel (the
+ *  welcome, the print, on a laptop) clears its side. */
 function overlaysPadding(): { top: number; bottom: number; left: number; right: number } {
   const gap = 16;
-  const pad = { top: $('brand').getBoundingClientRect().bottom + gap, bottom: gap, left: gap, right: gap };
-  for (const id of ['welcome', 'print']) {
+  const [w, h] = [window.innerWidth, window.innerHeight];
+  const pad = { top: gap, bottom: gap, left: gap, right: gap };
+  for (const id of OVERLAYS) {
     if ($(id).hidden) continue;
     const r = $(id).getBoundingClientRect();
-    if (r.width > window.innerWidth * 0.8) pad.bottom = Math.max(pad.bottom, window.innerHeight - r.top + gap);
-    else if (r.left < window.innerWidth / 2) pad.left = Math.max(pad.left, r.right + gap);
-    else pad.right = Math.max(pad.right, window.innerWidth - r.left + gap);
+    if (isSheet(r) || r.height < h * 0.2) {
+      if (r.top + r.height / 2 < h / 2) pad.top = Math.max(pad.top, r.bottom + gap);
+      else pad.bottom = Math.max(pad.bottom, h - r.top + gap);
+    } else if (r.left + r.width / 2 < w / 2) pad.left = Math.max(pad.left, r.right + gap);
+    else pad.right = Math.max(pad.right, w - r.left + gap);
   }
   return pad;
+}
+
+const OVERLAYS = ['brand', 'plan-years', 'welcome', 'print']; // what lies over the plan
+
+/** An overlay spanning the plan's width (a phone's sheet, at the bottom; the years, at the top). */
+function isSheet(r: DOMRect): boolean {
+  return r.width > window.innerWidth * 0.6;
+}
+
+/** The plan's credit (its licence asks for it) kept above any sheet along the bottom: the
+ *  sheets are watched, so that no change to them has to remember it. */
+function keepCreditClear(): void {
+  const place = () => {
+    const h = window.innerHeight;
+    const low = OVERLAYS.map((id) => $(id).getBoundingClientRect()).filter((r) => isSheet(r) && r.top > h / 2);
+    $('home').style.setProperty('--sheet', `${h - Math.min(h, ...low.map((r) => r.top))}px`);
+  };
+  const watch = new ResizeObserver(place); // a hidden sheet shrinks to nothing: seen too
+  for (const id of ['welcome', 'print']) watch.observe($(id));
+  window.addEventListener('resize', place); // a sheet the same size, moved by the layout
 }
 
 // the home page is the plan: its code is fetched at once, beside the photographs' list
@@ -113,10 +140,18 @@ class Walker {
   private plan: Plan | null = null;
   private chosen: Photo | null = null; // the photograph shown on the plan, if any
   private moving = false;
+  private years: Years; // which photographs the plan shows
+  private yearsFrame = 0;
+  private refocus: string | null = null; // the way's selector to focus on the next photo (keyboard)
 
   constructor(photos: Photo[]) {
     this.photos = photos;
     this.byId = new Map(photos.map((p) => [p.id, p]));
+    keepCreditClear();
+    const last = Math.max(PLAN_LAST, ...yearsTaken(photos).slice(-1));
+    this.years = new Years($('plan-years'), FIRST_YEAR, last, () => this.showYears());
+    // a mark at the year each photograph was taken (where it spans decades, its first)
+    this.years.mark([...new Set(photos.flatMap((p) => span(p.years)?.[0] ?? []))]);
     // the address says what is shown: the plan (#/), or one photograph (#/<id>)
     window.addEventListener('hashchange', () => this.route());
     window.addEventListener('resize', () => !$('home').hidden && this.plan?.shown());
@@ -135,6 +170,15 @@ class Walker {
     $('about-close').addEventListener('click', () => about.close());
     about.addEventListener('click', (e) => e.target === about && about.close()); // outside its box
     document.addEventListener('keydown', (event) => this.onKey(event));
+    const wayOf = (el: EventTarget | null) => (el as HTMLElement | null)?.closest?.<HTMLElement>('.step, .onward')?.dataset.way;
+    for (const type of ['pointerover', 'focusin', 'pointerout', 'focusout'] as const) {
+      $('walk').addEventListener(type, (event) => {
+        const way = wayOf(event.target);
+        if (!way || wayOf(event.relatedTarget) === way) return; // within the same way: nothing changes
+        const on = type === 'pointerover' || type === 'focusin';
+        for (const el of $('walk').querySelectorAll<HTMLElement>(`[data-way="${way}"]`)) el.classList.toggle('lit', on);
+      });
+    }
     // a photograph first: it alone, then the maps (most of the code's weight)
     $<HTMLImageElement>('photo').addEventListener(
       'load',
@@ -191,9 +235,10 @@ class Walker {
       if ($('home').hidden) return; // the address changed meanwhile: the plan waits to be seen
       const choose = (id: string | null) => this.choose(id ? (this.byId.get(id) ?? null) : null);
       this.plan ??= new Plan($('map'), this.photos, choose, overlaysPadding());
+      this.showYears();
     }
     this.plan.shown();
-    if (photo) this.choose(photo, true);
+    if (photo && shownIn(photo.years, this.years.range, this.years.whole)) this.choose(photo, true);
     ($('print').hidden ? $('brand') : $('enter')).focus({ preventScroll: true });
   }
 
@@ -219,6 +264,18 @@ class Walker {
     }
   }
 
+  /** The plan shows only the photographs of these years (the one chosen, if it is not, set
+   *  aside); while a handle is dragged, once a frame at most. */
+  private showYears(): void {
+    if (this.yearsFrame) return;
+    this.yearsFrame = requestAnimationFrame(() => {
+      this.yearsFrame = 0;
+      const [range, whole] = [this.years.range, this.years.whole];
+      this.plan?.only(whole ? null : this.photos.filter((p) => shownIn(p.years, range, whole)).map((p) => p.id));
+      if (this.chosen && !shownIn(this.chosen.years, range, whole)) this.choose(null);
+    });
+  }
+
   /** Into a photograph from the plan: its print grows into it. */
   private enter(photo: Photo): void {
     history.pushState(null, '', hashOf(photo.id));
@@ -231,7 +288,7 @@ class Walker {
   }
 
   private showPhoto(photo: Photo): void {
-    const fromPlan = !$('home').hidden;
+    const fromPlan = !$('home').hidden; // (hidden until the address is read: see index.html)
     $('home').hidden = true;
     $('walk').hidden = false;
     if (photo !== this.here) this.arrive(photo);
@@ -243,6 +300,9 @@ class Walker {
     const link = this.here.links[way];
     const next = link && this.byId.get(link.id);
     if (!next || this.moving) return;
+    // a way taken from the keyboard: the same way stays in focus on the next photo
+    const from = document.activeElement?.closest('.step, .onward');
+    this.refocus = from ? `.${from.classList.contains('step') ? 'step' : 'onward'}[data-way="${way}"]` : null;
     if (reducedMotion.matches) {
       this.go(next);
       return;
@@ -284,6 +344,11 @@ class Walker {
     };
     drawPlate(photo);
     this.drawSteps(photo);
+    this.drawWays(photo);
+    if (this.refocus) {
+      ($('walk').querySelector<HTMLElement>(this.refocus) ?? $('to-plan')).focus({ preventScroll: true });
+      this.refocus = null;
+    }
     this.drawAbout();
     this.maps?.show(photo);
   }
@@ -302,6 +367,39 @@ class Walker {
           step.append(Object.assign(document.createElement('span'), { textContent: distanceLabel(link.distance_m) }));
         }
         return step;
+      }),
+    );
+  }
+
+  /** Where each way leads: the photograph there, small, with how far and when; laid out as
+   *  the arrows are. Pointing at an arrow lights its way, and the way its arrow. */
+  private drawWays(photo: Photo): void {
+    $('onwards').replaceChildren(
+      ...WAYS.flatMap(({ way, label }) => {
+        const link = photo.links[way];
+        const there = link && this.byId.get(link.id);
+        if (!there) return [];
+        const item = button('onward', '', () => this.step(way));
+        item.dataset.way = way;
+        const img = Object.assign(document.createElement('img'), {
+          alt: '',
+          loading: 'lazy',
+          sizes: '112px',
+          srcset: srcsetOf(there.images),
+          src: DATA + largest(there.images),
+        });
+        const words = document.createElement('span');
+        words.className = 'onward-words';
+        words.append(
+          Object.assign(document.createElement('span'), { className: 'onward-label', textContent: label }),
+          Object.assign(document.createElement('span'), {
+            className: 'onward-when',
+            textContent: `${distanceLabel(link.distance_m)}, ${yearsLabel(there.years) || 'date inconnue'}`,
+          }),
+        );
+        item.append(img, words);
+        item.setAttribute('aria-label', `${label} : ${there.title}, ${whenLabel(there.years)}, à ${distanceLabel(link.distance_m)}`);
+        return item;
       }),
     );
   }
@@ -362,6 +460,7 @@ class Walker {
 json<Walk>('walk.json')
   .then((walk) => new Walker(walk.photos))
   .catch(() => {
+    $('home').hidden = false;
     $('welcome').hidden = false;
     $('welcome-text').textContent = "Les photographies n'ont pas pu être chargées. Rechargez la page dans un instant.";
   });

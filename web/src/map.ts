@@ -236,6 +236,7 @@ function turned(image: string): maplibregl.SymbolLayerSpecification['layout'] {
 export class Plan {
   private map: MapLibre;
   private pending: Viewpoint | null = null; // chosen before the plan was ready
+  private filter: maplibregl.FilterSpecification | null = null; // the years shown (null: all)
 
   constructor(container: HTMLElement, photos: Viewpoint[], choose: (id: string | null) => void, padding: maplibregl.PaddingOptions) {
     const lons = photos.map((p) => p.lon);
@@ -270,7 +271,7 @@ export class Plan {
       }
       this.map.addSource('views', { type: 'geojson', data: viewpoints(photos) });
       this.map.addSource('chosen', { type: 'geojson', data: viewpoints(this.pending ? [this.pending] : []) });
-      this.map.addLayer({ id: 'views', type: 'symbol', source: 'views', layout: turned('view') });
+      this.map.addLayer({ id: 'views', type: 'symbol', source: 'views', layout: turned('view'), ...(this.filter && { filter: this.filter }) });
       this.map.addLayer({
         id: 'chosen-ring', // a soft ring under the photograph chosen
         type: 'circle',
@@ -297,6 +298,13 @@ export class Plan {
   /** Bring a photograph into view, in what the overlays leave clear (`padding`). */
   reveal(photo: Viewpoint, padding: maplibregl.PaddingOptions): void {
     this.map.easeTo({ center: [photo.lon, photo.lat], zoom: Math.max(this.map.getZoom(), 17.5), padding, duration: 500 });
+  }
+
+  /** Only these photographs (null: all of them). */
+  only(ids: string[] | null): void {
+    const filter: maplibregl.FilterSpecification | null = ids && ['in', ['get', 'id'], ['literal', ids]];
+    this.filter = filter;
+    if (this.map.getLayer('views')) this.map.setFilter('views', filter);
   }
 
   /** After the plan was hidden: its size may have changed meanwhile. */

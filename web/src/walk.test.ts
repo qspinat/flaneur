@@ -9,6 +9,7 @@ import {
   photoIdFrom,
   srcsetOf,
   richest,
+  shownIn,
   yearsLabel,
   type Photo,
 } from './walk';
@@ -92,5 +93,15 @@ describe('the walk', () => {
     const lone = photo('lone');
     const hub = photo('hub', { links: { forward: { id: 'lone', distance_m: 40 }, back: null, left: null, right: null } });
     expect(richest([lone, hub]).id).toBe('hub');
+  });
+});
+
+describe('the years chosen', () => {
+  it('shows a photograph whose years meet them, an undated one only when they are all chosen', () => {
+    expect(shownIn([1905, 1906], [1900, 1905], false)).toBe(true);
+    expect(shownIn([1866, 1868], [1900, 1950], false)).toBe(false);
+    expect(shownIn([1912, null], [1912, 1912], false)).toBe(true);
+    expect(shownIn([null, null], [1900, 1950], false)).toBe(false);
+    expect(shownIn([null, null], [1850, 1950], true)).toBe(true);
   });
 });

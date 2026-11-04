@@ -45,6 +45,9 @@ for (const [name, viewport] of [['portable', { width: 1440, height: 900 }], ['te
     check(await home.isVisible('#welcome'), `${name}: the plan opens with its welcome`);
     await home.waitForTimeout(1500); // map tiles
     await home.screenshot({ path: `${out}/${name}-plan.png` });
+    await home.$eval('.years-min', (e) => { e.value = '1900'; e.dispatchEvent(new Event('input', { bubbles: true })); });
+    check((await home.textContent('#plan-years .years-label')) === '1900 – 1950', `${name}: the plan's years can be narrowed`);
+    await home.$eval('.years-min', (e) => { e.value = '1850'; e.dispatchEvent(new Event('input', { bubbles: true })); });
     await home.click('#start');
     await home.waitForFunction(() => location.hash.length > 2 && !document.getElementById('walk').hidden);
     check(true, `${name}: the welcome leads into a photograph`);
@@ -66,6 +69,15 @@ for (const [name, viewport] of [['portable', { width: 1440, height: 900 }], ['te
   const hash = () => page.evaluate(() => decodeURIComponent(location.hash.slice(2)));
   check((await hash()) === start.id, `${name}: the URL names the photo shown`);
   check((await page.textContent('#credit')).includes('CC0'), `${name}: credit and licence shown`);
+
+  const ways = await page.$$eval('.onward', (els) => els.map((e) => e.dataset.way));
+  const expected = Object.entries(start.links).filter(([, l]) => l).map(([w]) => w);
+  check(expected.every((w) => ways.includes(w)), `${name}: each way shows where it leads (${ways.join(', ')})`);
+  await page.click('.onward[data-way="forward"]');
+  await page.waitForFunction((id) => decodeURIComponent(location.hash.slice(2)) === id, start.links.forward.id);
+  check(true, `${name}: a way leads to the photo its arrow leads to`);
+  await page.goto(`${base}#/${encodeURIComponent(start.id)}`);
+  await page.waitForFunction((id) => decodeURIComponent(location.hash.slice(2)) === id, start.id);
 
   await page.keyboard.press('ArrowUp');
   await page.waitForFunction((id) => decodeURIComponent(location.hash.slice(2)) === id, start.links.forward.id);
@@ -150,7 +162,7 @@ for (const [name, viewport] of [['portable', { width: 1440, height: 900 }], ['te
 // the first photo on a slow 4G connection (Lighthouse's mobile profile: 1.6 Mbit/s, 150 ms);
 // throttled through Chromium's own protocol, so measured in Chromium only
 if (engine === chromium) {
-  const page = await browser.newPage({ viewport: { width: 390, height: 844 } });
+  const page = await browser.newPage({ viewport: { width: 390, height: 844 }, bypassCSP: true }); // its waits evaluate code
   const cdp = await page.context().newCDPSession(page);
   await cdp.send('Network.enable');
   await cdp.send('Network.emulateNetworkConditions', {

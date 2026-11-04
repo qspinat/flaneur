@@ -1,4 +1,4 @@
-import { FIRST_YEAR, LAST_YEAR, span } from '../walk';
+import { yearsTaken } from '../walk';
 
 /** The 3D walk's data, as written by `flaneur scene`, and what the screen derives from it.
  * Positions are metres east (x) and north (y) of the scene's origin, z up. */
@@ -127,23 +127,9 @@ export function nearby(photos: OldPhoto[], x: number, y: number): [OldPhoto, num
     .map(({ p, distance }): [OldPhoto, number] => [p, Math.min(1, (SHOWN_M - distance) / FADE_M)]);
 }
 
-/** Whether a photo is shown for a range of years: its span overlaps it; an undated photo
- * only when the range is the whole period. */
-export function inRange(photo: OldPhoto, [min, max]: [number, number]): boolean {
-  const years = span(photo.years);
-  if (!years) return min <= FIRST_YEAR && max >= LAST_YEAR;
-  return years[0] <= max && years[1] >= min;
-}
-
 /** The years that have photos taken within `metres` of (x, y), for marks on the slider. */
 export function yearMarks(photos: OldPhoto[], x: number, y: number, metres = SHOWN_M): number[] {
-  const marks = new Set<number>();
-  for (const p of photos) {
-    const years = span(p.years);
-    if (!years || Math.hypot(p.pose.x - x, p.pose.y - y) > metres) continue;
-    for (let year = years[0]; year <= years[1]; year++) marks.add(year);
-  }
-  return [...marks].sort((a, b) => a - b);
+  return yearsTaken(photos.filter((p) => Math.hypot(p.pose.x - x, p.pose.y - y) <= metres));
 }
 
 /** The panorama nearest a point of the map. */

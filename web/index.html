@@ -10,7 +10,7 @@
   </head>
   <body>
     <!-- The plan the site opens on: every photograph where its camera stood. -->
-    <section id="home" aria-label="Le plan des photographies">
+    <section id="home" aria-label="Le plan des photographies" hidden>
       <div id="map" role="application" aria-label="Plan du quartier, chaque photographie là où l'appareil se tenait"></div>
 
       <a id="brand" class="plate" href="#/" aria-label="Flâneur, le plan">
@@ -19,6 +19,8 @@
         <span class="plate-name">Flâneur</span>
       </a>
       <button id="about-open" class="pill quiet" type="button">À propos</button>
+
+      <form id="plan-years" class="years" aria-label="Années des photographies montrées"></form>
 
       <aside id="welcome" aria-labelledby="welcome-title" hidden>
         <h1 id="welcome-title">Le vieux Paris, depuis l'endroit où se tenait le photographe</h1>
@@ -62,6 +64,7 @@
       <section id="about">
         <p id="when"></p>
         <h1 id="title"></h1>
+        <nav id="onwards" aria-label="Continuer la promenade"></nav>
         <div id="eras" role="group" aria-label="Le même endroit à d'autres dates"></div>
         <details id="notice">
           <summary>À propos de cette photographie</summary>

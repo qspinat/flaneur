@@ -38,6 +38,8 @@ ERA_M = 20
 ERA_DEG = 30
 PHOTO_SIDE = 1600
 SMALL_SIDE = 960  # for a phone's screen: about a third of the bytes
+THUMB_SIDE = 320  # for a small print: a way on, a photograph chosen on the plan
+SIZES = (THUMB_SIDE, SMALL_SIDE)  # the smaller sizes, beside the photograph's own
 TODAY_SIDE = 1200
 # How a licence is named under a photo.
 LICENSES = {
@@ -95,6 +97,9 @@ class WalkPhoto:
     moved_by_review: bool = False  # fixed by hand far from the proposed place or direction
     in_3d: bool = False  # shown in the 3D walk (its placement confirmed by the user)
     image: str | None = None  # path of the exported image, relative to the data folder
+    widths: dict[int, int] = field(
+        default_factory=dict
+    )  # each size's width as written (by its side)
     today: Today | None = None
     links: dict[str, Link | None] = field(default_factory=dict)
     eras: list[str] = field(default_factory=list)
@@ -114,9 +119,13 @@ class WalkPhoto:
             "heading": self.heading,
             "street": self.street,
             "arrondissement": self.arrondissement,
-            # each size, by its width in pixels (the site builds its srcset from them)
+            # each size, by its width in pixels (the site builds its srcset from them): a side
+            # bounds the longer edge, so a portrait is narrower than its side
             "images": self.image
-            and {str(SMALL_SIDE): small(self.image), str(PHOTO_SIDE): self.image},
+            and {
+                **{str(self.widths.get(side, side)): sized(self.image, side) for side in SIZES},
+                str(self.widths.get(PHOTO_SIDE, PHOTO_SIDE)): self.image,
+            },
             "today": self.today
             and {
                 "image": self.today.image,
@@ -308,10 +317,12 @@ def build(
     return walk
 
 
-def _save(image, side: int, path: Path) -> None:
+def _save(image, side: int, path: Path) -> int:
+    """Save `image` no larger than `side` on its longer edge; returns its width."""
     image = image.convert("RGB")
     image.thumbnail((side, side))
     save_image(image, path, quality=80)
+    return image.width
 
 
 def _today_image(client: httpx.Client, today: Today, cache_dir: Path, out: Path) -> None:
@@ -336,9 +347,9 @@ def image_name(photo_id: str) -> str:
     return f"photos/{safe_name(photo_id)}.webp"
 
 
-def small(image: str) -> str:
-    """The phone-sized version of an exported image: "photos/x.webp" → "photos/x-960.webp"."""
-    return image.removesuffix(".webp") + f"-{SMALL_SIDE}.webp"
+def sized(image: str, side: int) -> str:
+    """A smaller version of an exported image: "photos/x.webp", 960 → "photos/x-960.webp"."""
+    return image.removesuffix(".webp") + f"-{side}.webp"
 
 
 def _write_one(me: WalkPhoto, client: httpx.Client, cache_dir: Path, out_dir: Path) -> bool:
@@ -351,8 +362,9 @@ def _write_one(me: WalkPhoto, client: httpx.Client, cache_dir: Path, out_dir: Pa
         image.draft("RGB", (PHOTO_SIDE * 2, PHOTO_SIDE * 2))  # decode no larger than needed
         framed = crop.apply(image, me.crop) if me.crop else image
         me.image = image_name(me.id)
-        _save(framed, PHOTO_SIDE, out_dir / me.image)
-        _save(framed, SMALL_SIDE, out_dir / small(me.image))
+        me.widths = {PHOTO_SIDE: _save(framed, PHOTO_SIDE, out_dir / me.image)}
+        for side in SIZES:
+            me.widths[side] = _save(framed, side, out_dir / sized(me.image, side))
     except httpx.HTTPError:
         return False
     except OSError:  # not an image, or a truncated one: fetched again next time
@@ -392,7 +404,7 @@ def _remove_others(out_dir: Path, walk: list[WalkPhoto]) -> None:
     kept = set()
     for me in walk:
         image = image_name(me.id)
-        kept |= {image, small(image), f"today/{safe_name(me.id)}.webp"}
+        kept |= {image, *(sized(image, side) for side in SIZES), f"today/{safe_name(me.id)}.webp"}
     for folder in ("photos", "today"):
         for path in (out_dir / folder).glob("*"):
             if f"{folder}/{path.name}" not in kept:

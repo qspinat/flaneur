@@ -1,12 +1,11 @@
 // The 3D walk: today's street from Panoramax, the old photos on their facades, the years
 // chosen on a slider. `#<lon>,<lat>,<heading>,<min>-<max>`.
 import type { Maps } from '../map';
-import { $, drawPlate, outLinks, typing, wirePlan } from '../page';
-import { FIRST_YEAR, LAST_YEAR, format3d, hashOf, json, parse3d, whenLabel, yearsLabel, type Place3d } from '../walk';
+import { $, Years, drawPlate, outLinks, typing, wirePlan } from '../page';
+import { FIRST_YEAR, LAST_YEAR, format3d, hashOf, json, parse3d, shownIn, whenLabel, yearsLabel, type Place3d } from '../walk';
 import { Scene3D } from './scene';
 import './walk3d.css';
 import {
-  inRange,
   nearby,
   nearestPanorama,
   nearestTo,
@@ -38,7 +37,7 @@ interface Changes {
 class Walk3d {
   private view: Scene3D;
   private scene: Scene;
-  private range: [number, number] = [FIRST_YEAR, LAST_YEAR];
+  private years: Years;
   private showing = '';
   private maps: Maps | null = null;
   private stood = ''; // the panorama the page was last drawn for
@@ -51,7 +50,7 @@ class Walk3d {
     this.scene = scene;
     this.view = new Scene3D($('view'), scene);
     this.view.onChange = () => this.later({ step: this.view.here.id !== this.stood, look: true, years: false });
-    for (const id of ['range-min', 'range-max']) Object.assign($<HTMLInputElement>(id), { min: FIRST_YEAR, max: LAST_YEAR });
+    this.years = new Years($('range'), FIRST_YEAR, LAST_YEAR, () => this.later({ step: false, look: false, years: true }));
     this.planOpen = wirePlan(
       () => this.openPlan(),
       () => this.closePlan(),
@@ -68,7 +67,7 @@ class Walk3d {
   }
 
   private async goToPlace({ lon, lat, heading, range }: Place3d): Promise<void> {
-    this.setRange(range);
+    this.years.set(range);
     this.later({ step: false, look: false, years: true }); // the same place may take new years
     await this.go(nearestTo(this.scene, lon, lat).id, heading);
   }
@@ -120,15 +119,6 @@ class Walk3d {
       } else if (e.key === 'Escape') this.showCard(null);
       else if (e.key === 'm' || e.key === 'M') this.openPlan();
     });
-    for (const id of ['range-min', 'range-max']) {
-      $(id).addEventListener('input', () => {
-        const low = Number($<HTMLInputElement>('range-min').value);
-        const high = Number($<HTMLInputElement>('range-max').value);
-        // the handle moved never passes the other one
-        this.setRange(id === 'range-min' ? [Math.min(low, high), high] : [low, Math.max(low, high)]);
-        this.later({ step: false, look: false, years: true });
-      });
-    }
     $('card-close').addEventListener('click', () => this.showCard(null));
     window.addEventListener('hashchange', () => {
       const place = parse3d(location.hash);
@@ -136,17 +126,9 @@ class Walk3d {
     });
   }
 
-  private setRange([min, max]: [number, number]): void {
-    this.range = [Math.max(FIRST_YEAR, min), Math.min(LAST_YEAR, max)];
-    $<HTMLInputElement>('range-min').value = String(this.range[0]);
-    $<HTMLInputElement>('range-max').value = String(this.range[1]);
-    const whole = this.range[0] === FIRST_YEAR && this.range[1] === LAST_YEAR;
-    $('range-label').textContent = whole ? 'Toutes les années' : `${this.range[0]} – ${this.range[1]}`;
-  }
-
   private hash(): string {
     const { lon, lat } = this.view.here;
-    return format3d({ lon, lat, heading: this.view.heading, range: this.range });
+    return format3d({ lon, lat, heading: this.view.heading, range: this.years.range });
   }
 
   /** Gather what changed and draw it once, at the next frame (a drag moves many times). */
@@ -169,7 +151,7 @@ class Walk3d {
       this.stood = id;
       this.buildWays();
       this.drawCredits(); // today's panorama is credited, whatever old photos are shown
-      $('range-marks').replaceChildren(...yearMarks(this.scene.photos, x, y).map((year) => this.mark(year)));
+      this.years.mark(yearMarks(this.scene.photos, x, y));
     }
     if (step || years) void this.showPhotos();
     if (step || look) {
@@ -185,7 +167,7 @@ class Walk3d {
 
   private async showPhotos(): Promise<void> {
     const { x, y } = this.view.here;
-    const seen = nearby(this.scene.photos.filter((p) => inRange(p, this.range)), x, y);
+    const seen = nearby(this.scene.photos.filter((p) => shownIn(p.years, this.years.range, this.years.whole)), x, y);
     const ids = seen.map(([p]) => p.id).join();
     if (ids !== this.showing) {
       this.showing = ids;
@@ -194,12 +176,6 @@ class Walk3d {
     }
     const strength = new Map(seen.map(([p, s]) => [p.id, s]));
     this.view.setStrengths(this.view.photos.map((p) => strength.get(p.id) ?? 0));
-  }
-
-  private mark(year: number): HTMLElement {
-    const mark = document.createElement('span');
-    mark.style.left = `${((year - FIRST_YEAR) / (LAST_YEAR - FIRST_YEAR)) * 100}%`;
-    return mark;
   }
 
   /** The ways on from this panorama, once; placeWays puts them on the pavement. */

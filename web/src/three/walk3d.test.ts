@@ -1,7 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { FIRST_YEAR, LAST_YEAR, format3d, parse3d } from '../walk';
+import { format3d, parse3d } from '../walk';
 import {
-  inRange,
   nearby,
   nearestPanorama,
   nearestTo,
@@ -63,20 +62,6 @@ describe('the old photos around', () => {
 });
 
 describe('the date range', () => {
-  const dated = (years: OldPhoto['years']) => ({ ...photo('p', 0, 0), years });
-
-  it('shows a photo whose span overlaps it', () => {
-    expect(inRange(dated([1905, 1910]), [1908, 1930])).toBe(true);
-    expect(inRange(dated([1905, 1910]), [1880, 1906])).toBe(true);
-    expect(inRange(dated([1905, 1910]), [1911, 1930])).toBe(false);
-    expect(inRange(dated([1912, null]), [1912, 1912])).toBe(true);
-  });
-
-  it('shows an undated photo only over the whole period', () => {
-    expect(inRange(dated([null, null]), [FIRST_YEAR, LAST_YEAR])).toBe(true);
-    expect(inRange(dated([null, null]), [1900, LAST_YEAR])).toBe(false);
-  });
-
   it('marks the years that have photos near where one stands', () => {
     const photos = [
       { ...photo('a', 10, 0), years: [1902, 1902] as [number, number] },

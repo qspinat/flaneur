@@ -38,7 +38,7 @@ body.three { background: var(--mount-deep); }
   box-shadow: 0 6px 16px rgba(0, 0, 0, 0.45);
 }
 
-/* The years: two handles on one bar, marks where photos near here were taken. */
+/* The years (style.css: .years), over the street. */
 #range {
   position: fixed;
   z-index: 2;
@@ -47,46 +47,6 @@ body.three { background: var(--mount-deep); }
   transform: translateX(-50%);
   width: min(520px, calc(100vw - 560px));
   min-width: 280px;
-  padding: 8px 18px 12px;
-  border-radius: 10px;
-  background: var(--veil);
-  text-align: center;
-}
-#range-label { font-family: var(--plate); font-size: 22px; font-weight: 500; font-variant-numeric: lining-nums; }
-#range-track { position: relative; height: 28px; }
-#range-marks { position: absolute; left: 9px; right: 9px; top: 6px; height: 16px; pointer-events: none; }
-#range-marks span { position: absolute; width: 2px; height: 16px; margin-left: -1px; background: var(--sepia); }
-#range input {
-  position: absolute;
-  inset: 0;
-  width: 100%;
-  margin: 0;
-  background: none;
-  pointer-events: none;
-  appearance: none;
-}
-#range input::-webkit-slider-runnable-track { height: 4px; margin-top: 12px; border-radius: 2px; background: rgba(237, 228, 211, 0.25); }
-#range-max::-webkit-slider-runnable-track { background: none; }
-#range input::-webkit-slider-thumb {
-  appearance: none;
-  width: 18px;
-  height: 18px;
-  margin-top: -7px;
-  border-radius: 50%;
-  background: var(--albumen);
-  border: 2px solid var(--enamel);
-  pointer-events: auto;
-  cursor: pointer;
-}
-#range input::-moz-range-track { height: 4px; background: rgba(237, 228, 211, 0.25); }
-#range input::-moz-range-thumb {
-  width: 18px;
-  height: 18px;
-  border-radius: 50%;
-  background: var(--albumen);
-  border: 2px solid var(--enamel);
-  pointer-events: auto;
-  cursor: pointer;
 }
 
 #credits {

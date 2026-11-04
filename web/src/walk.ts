@@ -120,6 +120,23 @@ export function span([start, end]: [number | null, number | null]): [number, num
   return [start ?? end!, end ?? start!];
 }
 
+/** Whether a photograph is shown for the years chosen: its years meet them; an undated one
+ *  only when every year is chosen (`whole`). */
+export function shownIn(years: [number | null, number | null], [min, max]: [number, number], whole: boolean): boolean {
+  const known = span(years);
+  return known ? known[0] <= max && known[1] >= min : whole;
+}
+
+/** Every year some of these photographs were taken, once each, in order (for marks on a bar). */
+export function yearsTaken(photos: { years: [number | null, number | null] }[]): number[] {
+  const years = new Set<number>();
+  for (const p of photos) {
+    const known = span(p.years);
+    if (known) for (let year = known[0]; year <= known[1]; year++) years.add(year);
+  }
+  return [...years].sort((a, b) => a - b);
+}
+
 /** A place in the 3D walk, as its link says: where, which way, which years. */
 export interface Place3d {
   lon: number;

@@ -142,6 +142,41 @@ body {
 
 #title { margin: 10px 0 18px; font-size: 19px; font-weight: 500; line-height: 1.4; }
 
+/* Where each way leads, laid out as the arrows: ahead on top, behind below, the turns between. */
+#onwards {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  grid-template-areas: 'forward forward' 'left right' 'back back';
+  gap: 8px;
+  margin: 0 0 18px;
+}
+#onwards:empty { display: none; }
+.onward {
+  display: grid;
+  grid-template-columns: 56px 1fr;
+  gap: 9px;
+  align-items: center;
+  padding: 6px;
+  border: 1px solid rgba(237, 228, 211, 0.14);
+  border-radius: 4px;
+  background: none;
+  color: var(--albumen);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.onward[data-way='forward'] { grid-area: forward; }
+.onward[data-way='back'] { grid-area: back; }
+.onward[data-way='left'] { grid-area: left; }
+.onward[data-way='right'] { grid-area: right; }
+.onward[data-way='forward'], .onward[data-way='back'] { justify-self: center; min-width: 62%; }
+.onward img { width: 56px; height: 42px; object-fit: cover; background: var(--mount-deep); outline: 3px solid var(--albumen); outline-offset: -3px; }
+.onward-words { display: grid; line-height: 1.25; }
+.onward-label { font-family: var(--plate); font-size: 16px; font-weight: 500; }
+.onward-when { font-size: 13px; color: var(--sepia); }
+.onward.lit { border-color: var(--albumen); background: rgba(237, 228, 211, 0.06); }
+.step.lit svg { transform: scale(1.12); color: #fff; }
+
 #eras { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 18px; }
 
 .era {
@@ -216,15 +251,73 @@ a.era { text-decoration: none; }
 }
 
 
+/* The years: two handles on one bar, a mark at each year a photograph was taken. */
+.years { padding: 8px 18px 12px; border-radius: 10px; background: var(--veil); text-align: center; }
+.years-label { font-family: var(--plate); font-size: 22px; font-weight: 500; font-variant-numeric: lining-nums; }
+.years-track { position: relative; height: 28px; }
+.years-marks { position: absolute; left: 9px; right: 9px; top: 6px; height: 16px; pointer-events: none; }
+.years-marks span { position: absolute; width: 2px; height: 16px; margin-left: -1px; background: var(--sepia); opacity: 0.7; }
+.years input {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  margin: 0;
+  background: none;
+  pointer-events: none;
+  appearance: none;
+}
+.years input::-webkit-slider-runnable-track { height: 4px; margin-top: 12px; border-radius: 2px; background: rgba(237, 228, 211, 0.25); }
+.years-max::-webkit-slider-runnable-track { background: none; }
+.years input::-webkit-slider-thumb {
+  appearance: none;
+  width: 18px;
+  height: 18px;
+  margin-top: -7px;
+  border-radius: 50%;
+  background: var(--albumen);
+  border: 2px solid var(--enamel);
+  pointer-events: auto;
+  cursor: pointer;
+}
+.years input::-moz-range-track { height: 4px; background: rgba(237, 228, 211, 0.25); }
+.years-max::-moz-range-track { background: none; }
+.years input::-moz-range-thumb {
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: var(--albumen);
+  border: 2px solid var(--enamel);
+  pointer-events: auto;
+  cursor: pointer;
+}
+
 /* ---- The plan the site opens on ------------------------------------------------------- */
 
 #home { position: fixed; inset: 0; background: var(--mount); }
 #map { position: absolute; inset: 0; }
+/* the plan's credit (its licence asks for it), above any sheet along the bottom (main.ts) */
+#map .maplibregl-ctrl-bottom-right { bottom: var(--sheet, 0px); }
 
 #brand { position: absolute; top: 22px; left: 22px; z-index: 1; min-width: 0; padding: 8px 22px 10px; }
 #brand .plate-name { font-size: 34px; letter-spacing: 0.06em; }
 
 #about-open { position: absolute; top: 22px; right: 22px; z-index: 1; }
+
+/* The years of the photographs shown, at the foot of the plan between its panels. */
+#plan-years {
+  position: absolute;
+  z-index: 1;
+  left: 50%;
+  bottom: 34px;
+  transform: translateX(-50%);
+  width: min(440px, calc(100% - 860px));
+  min-width: 280px;
+  box-shadow: 0 8px 22px rgba(0, 0, 0, 0.4);
+}
+/* between the panels there is no room for it at the foot: at the top, beside the plate */
+@media (min-width: 821px) and (max-width: 1240px) {
+  #plan-years { top: 22px; bottom: auto; width: min(420px, calc(100% - 520px)); }
+}
 
 /* A quieter pill, laid over the plan or a picture. */
 .pill.quiet { background: var(--veil); color: var(--albumen); box-shadow: 0 4px 12px rgba(0, 0, 0, 0.35); }
@@ -313,6 +406,9 @@ a.era { text-decoration: none; }
 @media (max-width: 820px) {
   #brand { top: 12px; left: 12px; padding: 5px 14px 7px; }
   #brand .plate-name { font-size: 24px; }
+  /* the years under the plate, the sheets keep the bottom */
+  #plan-years { top: 90px; bottom: auto; left: 12px; right: 12px; width: auto; min-width: 0; transform: none; padding: 4px 14px 8px; }
+  #plan-years .years-label { font-size: 18px; }
   /* sheets along the bottom edge, the plan above them */
   #welcome, #print { left: 0; right: 0; bottom: 0; width: auto; border-radius: 10px 10px 0 0; padding-bottom: calc(18px + env(safe-area-inset-bottom)); }
   #welcome { padding: 20px 18px; }
@@ -323,6 +419,5 @@ a.era { text-decoration: none; }
   #print-when { font-size: 32px; }
   #print-title { margin: 4px 0 12px; font-size: 15px; display: -webkit-box; -webkit-line-clamp: 4; line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden; }
   .print-words .close { top: -10px; right: -10px; }
-  /* the plan's credit (its licence asks for it), clear of the sheets along the bottom */
-  #map .maplibregl-ctrl-bottom-right { top: 52px; bottom: auto; }
+
 }

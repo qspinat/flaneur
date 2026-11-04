@@ -197,7 +197,11 @@ def test_images_of_photos_no_longer_in_the_walk_are_removed(tmp_path):
         "pm:a", "t", None, [None, None], "p", "c", None, 0.0, 0.0, None, None, None, "u", None
     )
     image = export.image_name(me.id)
-    kept = [image, export.small(image), f"today/{export.safe_name(me.id)}.webp"]
+    kept = [
+        image,
+        *(export.sized(image, side) for side in export.SIZES),
+        f"today/{export.safe_name(me.id)}.webp",
+    ]
     for name in [*kept, "photos/gone.webp", "today/gone.webp"]:
         (tmp_path / name).parent.mkdir(exist_ok=True)
         (tmp_path / name).write_bytes(b"x")
@@ -205,3 +209,19 @@ def test_images_of_photos_no_longer_in_the_walk_are_removed(tmp_path):
     export._remove_others(tmp_path, [me])  # its download may have failed: its images stay
 
     assert sorted(str(p.relative_to(tmp_path)) for p in tmp_path.rglob("*.webp")) == sorted(kept)
+
+
+def test_each_size_is_listed_by_the_width_it_has():
+    me = WalkPhoto(
+        "pm:a", "t", None, [None, None], "p", "c", None, 0.0, 0.0, None, None, None, "u", None
+    )
+    me.image = export.image_name(me.id)
+    me.widths = {320: 213, 960: 640, 1600: 1067}  # a portrait: its widths are 2/3 of its sides
+
+    images = me.for_site()["images"]
+
+    assert images == {
+        "213": export.sized(me.image, 320),
+        "640": export.sized(me.image, 960),
+        "1067": me.image,
+    }
