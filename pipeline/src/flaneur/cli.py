@@ -39,6 +39,8 @@ from flaneur import (
     panoramas,
     pilot,
     placements,
+    placing,
+    placings,
     proposals,
     proposing,
     reconstruct,
@@ -1366,7 +1368,7 @@ def confirm_placed(port: int = 8768, open_browser: bool = True) -> None:
 
 
 PROPOSALS = DATA / "pilot" / "proposals_3d.json"  # each photo proposed in its nearest panorama
-PROPOSING_M = 40  # a panorama farther from the photo's place is not tried
+PROPOSING_M = placing.NEAR_M  # a panorama farther from the photo's place is not tried
 
 
 def _spheres() -> list[match.Panorama]:
@@ -1381,8 +1383,8 @@ def propose_in_panoramas(sheets: int = 20) -> None:
     """Propose chaque photo de la balade dans le panorama le plus proche de sa place (à moins de
     40 m), et mesure : combien en ont une, en combien de secondes ; des planches (photo, vue
     d'aujourd'hui, la photo posée dedans) dans data/pilot/proposals_3d/ pour les regarder."""
-    with closing(db.connect(DB_PATH)) as conn:
-        walk = export.photos(conn, DATA / "pilot", REVIEWS)
+    with closing(db.connect(DB_PATH)) as conn:  # where each photo is best known now
+        walk = export.photos(conn, DATA / "pilot", REVIEWS, _places(_confirmed()))
     spheres = _spheres()
     views = _views(kept=4)  # each photo is tried in one panorama, photos near one another in turn
     store = chain.Store(DATA / "raw", views.matcher)  # the photos' features, as matching reads them
@@ -1408,6 +1410,7 @@ def propose_in_panoramas(sheets: int = 20) -> None:
             times.append(time.monotonic() - started)
             found[me.id] = {
                 "panorama": home.id,
+                "inputs": _image(me.id),  # the image it was proposed on
                 "metres": round(float(np.hypot(home.x - here.x, home.y - here.y)), 1),
                 "registration": proposal and registration.to_json(proposal),
             }
@@ -1437,6 +1440,71 @@ def _proposal_sheet(
     height = max(image.shape[0] for image in row)
     cv2.imwrite(
         str(out), np.hstack([np.pad(i, ((0, height - i.shape[0]), (0, 0), (0, 0))) for i in row])
+    )
+
+
+PLACINGS = DATA / "overrides" / "placings.jsonl"  # the user's answers on the placing page
+
+
+@app.command("placer")
+def place_photos(
+    port: int = 8772, open_browser: bool = True, live: bool = True, answers: Path = PLACINGS
+) -> None:
+    """Ouvre la page pour placer les photos (locale) : sur le plan, puis dans leur panorama (la
+    proposition vérifiée, ou des points cliqués par paires), ou « trop loin ». `--no-live` :
+    seulement les propositions déjà calculées (`flaneur proposer`), sans charger le modèle ;
+    `--answers` : un autre fichier de réponses (pour essayer la page)."""
+    with closing(db.connect(DB_PATH)) as conn:  # where each photo is best known now
+        walk = export.photos(conn, DATA / "pilot", REVIEWS, _places(_confirmed()))
+    photos = {
+        me.id: {
+            "title": me.title,
+            "years": me.years,
+            "lon": me.lon,
+            "lat": me.lat,
+            "heading": me.heading,
+            "image": _exported(me.id),
+            "inputs": _image(me.id),  # answers say which image they were made on
+        }
+        for me in walk
+        if _exported(me.id).exists()
+    }
+    spheres = _spheres()
+    by_id = {p.id: p for p in spheres}
+    computed = json.loads(PROPOSALS.read_text()) if PROPOSALS.exists() else {}
+
+    @functools.cache
+    def models() -> tuple[match.Views, chain.Store]:  # loaded when first needed
+        views = _views(kept=4)
+        return views, chain.Store(DATA / "raw", views.matcher)
+
+    def proposal(photo_id: str, panorama: str) -> dict | None:
+        """Computed by `flaneur proposer` for this panorama, else (live) made now."""
+        known = computed.get(photo_id)
+        if known and (known["panorama"], known.get("inputs")) == (panorama, _image(photo_id)):
+            found = placings.registration_of(known)
+        elif live and panorama in by_id and photo_id in photos:
+            views, store = models()
+            path = photos[photo_id]["image"]
+            features = store.features(
+                photo_id, _image(photo_id), lambda: match.shrunk(cv2.imread(str(path)))
+            )
+            home = by_id[panorama]
+            found = proposing.propose(
+                features,
+                panorama,
+                home.axes,
+                views.of(home),
+                photos[photo_id]["heading"],
+                views.matcher,
+            )
+        else:
+            found = None
+        return found and {"registration": found, "carried_from": None}
+
+    sources = placing.Sources(photos, spheres, answers, proposal)
+    _serve_page(
+        lambda: placing.serve(sources, port), f"placer ({len(photos)} photos)", port, open_browser
     )
 
 

@@ -5,20 +5,22 @@ only when it is sent as JSON, which a page of another origin cannot do without a
 (a CORS preflight, never answered here)."""
 
 import json
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
 from pathlib import Path
 
-ZOOM = Path(__file__).with_name("zoom.js")
-INCLUDE = '<script src="zoom.js"></script>'  # where a page takes the shared zoom
+SHARED = ("zoom.js", "map.js")  # the zoom on a picture; the map of the pages placing photos
+INCLUDE = '<script src="zoom.js"></script>'  # every page takes the shared zoom
 
 
 def page(path: Path) -> bytes:
-    """A local page as served: the shared zoom put in where it asks for it."""
+    """A local page as served: the shared scripts put in where it asks for them."""
     text = path.read_text(encoding="utf-8")
     if INCLUDE not in text:
         raise ValueError(f"{path.name} ne demande pas le zoom partagé ({INCLUDE})")
-    zoom = ZOOM.read_text(encoding="utf-8")
-    return text.replace(INCLUDE, f"<script>\n{zoom}</script>").encode()
+    for name in SHARED:
+        script = Path(__file__).with_name(name).read_text(encoding="utf-8")
+        text = text.replace(f'<script src="{name}"></script>', f"<script>\n{script}</script>")
+    return text.encode()
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -50,5 +52,7 @@ class Handler(BaseHTTPRequestHandler):
         pass
 
 
-def server(handler: type[Handler], port: int) -> HTTPServer:
-    return HTTPServer(("127.0.0.1", port), handler)
+def server(handler: type[Handler], port: int, threaded: bool = False) -> HTTPServer:
+    """`threaded`: each request answered in its own thread (a slow one does not hold the
+    others); the page's handler then guards what it shares."""
+    return (ThreadingHTTPServer if threaded else HTTPServer)(("127.0.0.1", port), handler)

@@ -144,3 +144,12 @@ def test_a_page_not_asking_for_the_shared_zoom_is_refused(tmp_path):
 
     with pytest.raises(ValueError, match="zoom"):
         localpage.page(page)
+
+
+def test_a_page_asking_for_the_shared_map_is_served_with_it(tmp_path):
+    page = tmp_path / "page.html"
+    page.write_text('<script src="zoom.js"></script><script src="map.js"></script>')
+
+    served = localpage.page(page).decode()
+
+    assert "function cone(" in served and 'src="map.js"' not in served

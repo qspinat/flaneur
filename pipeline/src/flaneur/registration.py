@@ -14,6 +14,7 @@ import cv2
 import numpy as np
 
 from flaneur import match
+from flaneur.sources import number
 
 MIN_POINTS = 6  # clicked by hand: Smapshot, Bae et al. and IGN settle at 6 to 8
 MIN_COVER = 0.25  # share of the photo inside the hull of the points fitted: under it, bunched
@@ -183,4 +184,8 @@ def to_json(r: Registration) -> dict:
 
 
 def from_json(d: dict) -> Registration:
-    return Registration(d["panorama"], tuple(d["m"]), ViewOf(**d["view"]))
+    """A registration as written (by a page too: checked)."""
+    m = d["m"]
+    if not (isinstance(m, list | tuple) and len(m) == 9 and all(number(x) for x in m)):
+        raise ValueError("un enregistrement a 9 nombres")
+    return Registration(str(d["panorama"]), tuple(float(x) for x in m), ViewOf(**d["view"]))

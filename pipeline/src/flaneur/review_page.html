@@ -84,16 +84,13 @@
   </div>
 </footer>
 <script src="zoom.js"></script>
+<script src="map.js"></script>
 <script>
 const CONE_LENGTH_M = 45;
 // Beyond this zoom the archive photo is replaced by the source's full-size image.
 const FULL_SIZE_FROM = 1.5;
 
 const CONE_HALF_ANGLE = 30;
-const IGN = (layer, format, matrixSet = 'PM') =>
-  'https://data.geopf.fr/wmts?SERVICE=WMTS&REQUEST=GetTile&VERSION=1.0.0&STYLE=normal' +
-  `&LAYER=${layer}&TILEMATRIXSET=${matrixSet}&TILEMATRIX={z}&TILEROW={y}&TILECOL={x}` +
-  `&FORMAT=${format}`;
 
 /** Crop: a rectangle drawn on the archive photo, kept as fractions of the image (0–1), so
  *  that it fits the small and the full-size image alike. */
@@ -175,24 +172,7 @@ let shownAt = 0;
 
 const map = new maplibregl.Map({
   container: 'map',
-  style: {
-    version: 8,
-    sources: {
-      plan: { type: 'raster', tileSize: 256, maxzoom: 19,
-              tiles: [IGN('GEOGRAPHICALGRIDSYSTEMS.PLANIGNV2', 'image/png')],
-              attribution: 'IGN — Plan IGN' },
-      aerial: { type: 'raster', tileSize: 256, minzoom: 6, maxzoom: 18,
-                tiles: [IGN('ORTHOIMAGERY.EDUGEO.PARIS1949', 'image/png', 'PM_6_18')],
-                attribution: 'IGN — Paris 1949' },
-      cone: { type: 'geojson', data: { type: 'FeatureCollection', features: [] } },
-    },
-    layers: [
-      { id: 'plan', type: 'raster', source: 'plan' },
-      { id: 'aerial', type: 'raster', source: 'aerial', layout: { visibility: 'none' } },
-      { id: 'cone', type: 'fill', source: 'cone',
-        paint: { 'fill-color': '#8a3b12', 'fill-opacity': 0.35 } },
-    ],
-  },
+  style: plainStyle(),
   center: [2.3459, 48.8518],
   zoom: 17,
   keyboard: false,  // the arrow keys turn the cone, they must not pan the map
@@ -204,22 +184,9 @@ marker.on('dragend', () => {
   drawCone();
 });
 
-/** A wedge from the camera, `heading` degrees from north, as a GeoJSON polygon. */
-function cone(lon, lat, heading) {
-  const metresPerDegreeLat = 111320;
-  const metresPerDegreeLon = metresPerDegreeLat * Math.cos(lat * Math.PI / 180);
-  const ring = [[lon, lat]];
-  for (let a = heading - CONE_HALF_ANGLE; a <= heading + CONE_HALF_ANGLE; a += 5) {
-    const r = a * Math.PI / 180;
-    ring.push([lon + CONE_LENGTH_M * Math.sin(r) / metresPerDegreeLon,
-               lat + CONE_LENGTH_M * Math.cos(r) / metresPerDegreeLat]);
-  }
-  ring.push([lon, lat]);
-  return { type: 'Feature', geometry: { type: 'Polygon', coordinates: [ring] } };
-}
-
 function drawCone() {
-  const features = current.heading == null ? [] : [cone(current.lon, current.lat, current.heading)];
+  const features = current.heading == null ? []
+    : [cone(current.lon, current.lat, current.heading, CONE_HALF_ANGLE, CONE_LENGTH_M)];
   map.getSource('cone').setData({ type: 'FeatureCollection', features });
   updateLinks();
 }
@@ -232,11 +199,6 @@ function updateLinks() {
     `https://www.google.com/maps/@?api=1&map_action=pano&viewpoint=${lat},${lon}${facing}&pitch=0&fov=80`;
   document.getElementById('panoramax').href =
     `https://api.panoramax.xyz/#focus=map&map=19/${lat}/${lon}`;
-}
-
-function yearsOf(years) {
-  const known = [...new Set((years || []).filter((y) => y != null))];
-  return known.length ? ` (${known.join('–')})` : '';
 }
 
 function show() {
@@ -350,8 +312,7 @@ document.addEventListener('keydown', (event) => {
     window.open(document.getElementById('streetview').href, 'streetview');
   }
   else if (event.key === 'a' || event.key === 'A') {
-    const visible = map.getLayoutProperty('aerial', 'visibility') === 'visible';
-    map.setLayoutProperty('aerial', 'visibility', visible ? 'none' : 'visible');
+    toggleAerial(map);
   }
 });
 

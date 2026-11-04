@@ -202,3 +202,11 @@ def test_a_photo_partly_behind_the_view_is_not_drawn():
     assert (
         registration.composite(view, np.full((600, 800, 3), 255, np.uint8), r, away, TILTED) == 0
     ).all()
+
+
+@pytest.mark.parametrize(
+    "m", [[1.0] * 8, ["1"] * 9, [float("nan")] + [1.0] * 8], ids=["eight", "texts", "not a number"]
+)
+def test_a_registration_written_wrong_is_refused(m):
+    with pytest.raises(ValueError, match="9 nombres"):
+        registration.from_json({"panorama": "p1", "m": m, "view": {"heading": 0.0}})

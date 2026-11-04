@@ -1,0 +1,298 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<title>Flâneur — placer les photos</title>
+<link rel="stylesheet" href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css">
+<script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
+<style>
+  :root { --ink: #26231f; --paper: #ede4d3; --rust: #8a3b12; --enamel: #1b3a6b; }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 14px/1.4 system-ui, sans-serif; background: var(--ink); color: var(--paper);
+         display: grid; grid-template-columns: 34% 1fr; height: 100vh; }
+  #side { display: grid; grid-template-rows: auto 1fr auto; min-height: 0; border-right: 1px solid #444; }
+  #head { padding: 10px 12px; }
+  #head h1 { font-size: 15px; margin: 0 0 4px; }
+  #map { min-height: 0; }
+  #keys { padding: 8px 12px; font-size: 12px; color: #c9bfae; }
+  #keys kbd { background: #3a352e; border-radius: 3px; padding: 0 4px; color: var(--paper); }
+  #main { position: relative; display: grid; grid-template-rows: auto 1fr auto; min-height: 0; }
+  #bar { padding: 8px 12px; display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+  #message { color: #f2c14e; min-height: 1.4em; }
+  #stage { position: relative; min-height: 0; display: flex; align-items: center; justify-content: center;
+           overflow: hidden; }
+  .square { position: relative; height: 100%; aspect-ratio: 1; max-width: 100%; }
+  .square img { position: absolute; inset: 0; width: 100%; height: 100%; }
+  #laid { opacity: 0.6; }
+  #pinned { position: absolute; top: 10px; left: 10px; max-width: 22%; max-height: 30%;
+            border: 2px solid var(--paper); box-shadow: 0 2px 8px #000a; z-index: 2; }
+  #pair { display: none; grid-template-columns: 1fr 1fr; gap: 8px; height: 100%; padding: 8px; }
+  #pair.on { display: grid; }
+  #pair .box { position: relative; overflow: hidden; display: flex; align-items: center; justify-content: center; }
+  #pair .zoomed-stage { position: relative; max-width: 100%; max-height: 100%; }
+  #pair img { display: block; max-width: 100%; max-height: calc(100vh - 120px); cursor: crosshair; }
+  #view-laid { position: absolute; inset: 0; width: 100%; height: 100%; opacity: 0.5; pointer-events: none; }
+  .dot { position: absolute; width: 20px; height: 20px; margin: -10px 0 0 -10px; border-radius: 50%;
+         background: #f2c14e; color: #111; font: bold 11px/20px sans-serif; text-align: center;
+         pointer-events: none; box-shadow: 0 0 0 2px #111; }
+  .dot.waiting { background: #fff; }
+  #foot { padding: 8px 12px; display: flex; gap: 10px; align-items: center; }
+  input[type=range] { width: 220px; }
+</style>
+</head>
+<body>
+<section id="side">
+  <div id="head">
+    <h1 id="title">…</h1>
+    <div id="progress"></div>
+  </div>
+  <div id="map"></div>
+  <div id="keys">
+    Plan : glisser le point (où se tenait le photographe), <kbd>←</kbd><kbd>→</kbd> tourner
+    (<kbd>⇧</kbd> : 1°), <kbd>A</kbd> vue aérienne 1949, clic sur un panorama pour s'y rendre.<br>
+    Photo : <kbd>Entrée</kbd> elle tombe juste · <kbd>F</kbd> poser par points · <kbd>X</kbd> trop loin
+    · <kbd>S</kbd> passer · <kbd>R</kbd> retourner l'image · <kbd>[</kbd><kbd>]</kbd> tourner la vue ·
+    <kbd>,</kbd><kbd>.</kbd> panorama voisin.
+  </div>
+</section>
+<section id="main">
+  <div id="bar"><span id="where"></span><span id="message"></span></div>
+  <div id="stage">
+    <div class="square" id="square">
+      <img id="today" alt="">
+      <img id="laid" alt="">
+    </div>
+    <img id="pinned" alt="">
+    <div id="pair">
+      <div class="box" id="photo-box"><div class="zoomed-stage" id="photo-stage"><img id="photo" alt=""></div></div>
+      <div class="box" id="view-box"><div class="zoomed-stage" id="view-stage"><img id="view" alt=""><img id="view-laid" alt=""></div></div>
+    </div>
+  </div>
+  <div id="foot">
+    aujourd'hui <input id="fade" type="range" min="0" max="100" value="60"> autrefois
+    <span id="points-help"></span>
+  </div>
+</section>
+<script src="zoom.js"></script>
+<script src="map.js"></script>
+<script>
+const CONE_HALF_ANGLE = 25, CONE_LENGTH_M = 25;
+let rules = { min_points: 6, view_step: 30, near_m: 40 };  // as the server sends them
+const $ = (id) => document.getElementById(id);
+const say = (text) => { $('message').textContent = text || ''; };
+/** Show a picture made by the server in `img`, freeing the one it showed before. */
+function shown(img, url) {
+  if (img.src.startsWith('blob:')) URL.revokeObjectURL(img.src);
+  img.src = url || '';
+}
+const post = async (url, body) => {
+  const r = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' },
+                               body: JSON.stringify(body) });
+  if (!r.ok) throw new Error(await r.text());
+  return r.headers.get('Content-Type').startsWith('image/') ? URL.createObjectURL(await r.blob()) : r.json();
+};
+
+let photo = null, left = 0, shownAt = 0;
+const photoUrl = () => `/photo/${encodeURIComponent(photo.id)}?flipped=${flipped ? 1 : 0}`;
+let spot = null;         // {lon, lat, heading} set on the map
+let near = [], at = 0;   // the panoramas around, the one shown
+let view = null;         // {heading, pitch, fov} of the view shown
+let proposal = null;     // the registration shown in the view (proposed, or fitted from points)
+let carried = null;      // the old photo a proposal was carried from, if it was
+let made = 'proposal';   // how it was made: 'proposal' or 'points'
+let flipped = false, pairing = false, pairs = [], waiting = null;
+let answering = false;   // an answer on its way: no other until the next photo shows
+let asking = 0;          // the latest proposal asked for (an older one coming back is ignored)
+
+const map = new maplibregl.Map({
+  container: 'map',
+  style: plainStyle(
+    { near: { type: 'geojson', data: { type: 'FeatureCollection', features: [] } } },
+    [{ id: 'near', type: 'circle', source: 'near', paint: {
+        'circle-radius': ['case', ['get', 'shown'], 8, 5],
+        'circle-color': ['case', ['get', 'shown'], '#1b3a6b', '#ffffff'],
+        'circle-stroke-color': '#1b3a6b', 'circle-stroke-width': 2 } }]),
+  center: [2.3459, 48.8518], zoom: 18, keyboard: false,
+});
+const marker = new maplibregl.Marker({ color: '#8a3b12', draggable: true });
+marker.on('dragend', () => { const p = marker.getLngLat(); spot.lon = p.lng; spot.lat = p.lat; drawCone(); findNear(); });
+map.on('click', 'near', (e) => { const id = e.features[0].properties.id; goTo(near.findIndex((p) => p.id === id)); });
+
+function drawCone() {
+  marker.setLngLat([spot.lon, spot.lat]).addTo(map);
+  map.getSource('cone').setData({ type: 'FeatureCollection',
+    features: spot.heading == null ? [] : [cone(spot.lon, spot.lat, spot.heading, CONE_HALF_ANGLE, CONE_LENGTH_M)] });
+}
+function drawNear() {
+  map.getSource('near').setData({ type: 'FeatureCollection', features: near.map((p, i) => ({
+    type: 'Feature', properties: { id: p.id, shown: i === at },
+    geometry: { type: 'Point', coordinates: [p.lon, p.lat] } })) });
+}
+
+async function findNear() {
+  const shown = at >= 0 ? near[at]?.id : null;
+  near = await (await fetch(`/api/near?lon=${spot.lon}&lat=${spot.lat}`)).json();
+  if (!near.length) {
+    at = -1; proposal = null; carried = null; leavePairing(); drawNear(); showView();
+    say(`Aucun panorama à moins de ${rules.near_m} m : X si aucun ne voit la photo.`); return;
+  }
+  const still = near.findIndex((p) => p.id === shown);  // a small move keeps the panorama shown
+  if (still >= 0) { at = still; drawNear(); where(); } else await goTo(0);
+}
+async function goTo(i) {
+  if (i < 0 || i >= near.length) return;
+  at = i; drawNear(); leavePairing();
+  const sphere = near[at];
+  const step = rules.view_step;
+  view = { heading: Math.round((spot.heading ?? 0) / step) * step % 360 };
+  proposal = null; carried = null; made = 'proposal'; showView();
+  say('Proposition en cours…');
+  const mine = ++asking;
+  let found = null;
+  try { found = await (await fetch(`/api/proposal/${encodeURIComponent(photo.id)}/${sphere.id}`)).json(); }
+  catch { found = null; }
+  if (mine !== asking || near[at]?.id !== sphere.id) return;  // gone elsewhere meanwhile
+  if (found) { proposal = found.registration; carried = found.carried_from; view = { ...proposal.view }; showView(); say(''); }
+  else { say('Pas de proposition : F pour poser par points.'); enterPairing(); }
+}
+
+function viewUrl() {
+  const v = view, p = near[at];  // the server's view when pitch and fov are not given
+  return `/view/${p.id}?heading=${v.heading}` + (v.pitch != null ? `&pitch=${v.pitch}&fov=${v.fov}` : '');
+}
+function where() {
+  $('where').textContent = at < 0 ? '' :
+    `Panorama ${at + 1}/${near.length}, à ${near[at].metres} m · vue vers ${Math.round(view.heading)}°`;
+}
+async function showView() {
+  where();
+  $('today').src = at < 0 ? '' : viewUrl();
+  shown($('laid'), '');
+  if (proposal && at >= 0) {
+    const seen = { ...proposal, view };  // the same registration seen from the view shown
+    try { shown($('laid'), await post('/api/composite', { photo_id: photo.id, registration: seen, flipped })); }
+    catch (error) { say(error.message); }
+  }
+}
+
+// --- points clicked in pairs: the photo, then the view
+function enterPairing() {
+  if (at < 0) return;
+  pairing = true; pairs = []; waiting = null;
+  $('square').style.display = 'none'; $('pinned').style.display = 'none'; $('pair').classList.add('on');
+  $('photo').src = photoUrl();
+  $('view').src = viewUrl(); shown($('view-laid'), '');
+  drawDots(); help();
+}
+function leavePairing() {
+  pairing = false; $('pair').classList.remove('on');
+  $('square').style.display = ''; $('pinned').style.display = '';
+  document.querySelectorAll('.dot').forEach((d) => d.remove()); $('points-help').textContent = '';
+}
+function help() {
+  $('points-help').textContent = pairing
+    ? `${pairs.length} paire(s) — cliquer un détail dans la photo puis le même dans la vue ; ⌫ annuler la dernière`
+      + (pairs.length >= rules.min_points ? ' ; Entrée pour garder' : ` ; il en faut ${rules.min_points}`)
+    : '';
+}
+function pixelOf(img, event) {
+  const box = img.getBoundingClientRect();  // as shown, zoomed or not
+  return [(event.clientX - box.left) / box.width * img.naturalWidth,
+          (event.clientY - box.top) / box.height * img.naturalHeight];
+}
+function drawDots() {
+  document.querySelectorAll('.dot').forEach((d) => d.remove());
+  const place = (img, [x, y], n, wait) => {
+    const dot = document.createElement('div');
+    dot.className = 'dot' + (wait ? ' waiting' : ''); dot.textContent = n;
+    dot.style.left = `${x / img.naturalWidth * img.offsetWidth}px`;  // in the stage, unzoomed
+    dot.style.top = `${y / img.naturalHeight * img.offsetHeight}px`;
+    img.parentElement.appendChild(dot);  // the stage
+  };
+  pairs.forEach(([a, b], i) => { place($('photo'), a, i + 1); place($('view'), b, i + 1); });
+  if (waiting) place($('photo'), waiting, pairs.length + 1, true);
+}
+$('photo').addEventListener('click', (e) => { if (pairing) { waiting = pixelOf($('photo'), e); drawDots(); } });
+$('view').addEventListener('click', async (e) => {
+  if (!pairing || !waiting) return;
+  pairs.push([waiting, pixelOf($('view'), e)]); waiting = null; drawDots(); help();
+  if (pairs.length >= rules.min_points) await fitPairs();
+});
+async function fitPairs() {
+  try {
+    proposal = await post('/api/fit', { photo_id: photo.id, panorama: near[at].id, view, flipped,
+      photo_px: pairs.map((p) => p[0]), view_px: pairs.map((p) => p[1]) });
+    made = 'points'; say('Recalée : Entrée pour garder, ou continuer à ajouter des points.');
+    shown($('view-laid'), await post('/api/composite', { photo_id: photo.id, registration: proposal, flipped }));
+  } catch (error) { proposal = null; shown($('view-laid'), ''); say(error.message); }
+}
+
+// --- answers
+async function answer(kind) {
+  if (answering) return;
+  answering = true;
+  const body = { photo_id: photo.id, answer: kind, seconds: (Date.now() - shownAt) / 1000, flipped };
+  if (kind !== 'skip') Object.assign(body, { lon: spot.lon, lat: spot.lat, heading: spot.heading });
+  if (kind === 'fits' || kind === 'points') body.registration = proposal;
+  if (kind === 'fits' && carried) body.carried_from = carried;
+  try { await post('/api/answer', body); await next(); }
+  catch (error) { say(error.message); }
+  finally { answering = false; }
+}
+
+document.addEventListener('keydown', (e) => {
+  if (!photo || (e.repeat && !e.key.startsWith('Arrow'))) return;  // held keys turn the cone only
+  const turn = e.shiftKey ? 1 : 5;
+  if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
+    spot.heading = ((spot.heading ?? 0) + (e.key === 'ArrowLeft' ? -turn : turn) + 360) % 360;
+    drawCone(); e.preventDefault();
+  } else if (e.key === 'Enter') {
+    if (!proposal) say(pairing ? `Il faut ${rules.min_points} paires de points.` : 'Pas de proposition : F pour poser par points.');
+    else if (spot.heading == null) say('Tourner le cône sur le plan (← →) : la direction manque.');
+    else answer(made === 'points' ? 'points' : 'fits');
+  } else if (e.key === 'f' || e.key === 'F') { pairing ? leavePairing() : enterPairing(); }
+  else if (e.key === 'x' || e.key === 'X') answer('far');
+  else if (e.key === 's' || e.key === 'S') answer('skip');
+  else if (e.key === 'r' || e.key === 'R') {
+    flipped = !flipped; proposal = null; carried = null; $('pinned').src = photoUrl();
+    say(flipped ? 'Image retournée : la poser par points.' : ''); enterPairing();
+  }
+  else if (e.key === '[' || e.key === ']') {
+    const step = rules.view_step;
+    view = { ...view, heading: (view.heading + (e.key === '[' ? -step : step) + 360) % 360 };
+    pairing ? enterPairing() : showView();
+  } else if (e.key === ',' || e.key === '.') goTo(at + (e.key === ',' ? -1 : 1));
+  else if (e.key === 'a' || e.key === 'A') toggleAerial(map); else if (e.key === 'Backspace' && pairing) {
+    if (waiting) waiting = null; else pairs.pop();
+    drawDots(); help();
+    if (pairs.length >= rules.min_points) fitPairs(); else { proposal = null; shown($('view-laid'), ''); }
+  }
+});
+$('fade').addEventListener('input', () => {
+  $('laid').style.opacity = $('view-laid').style.opacity = $('fade').value / 100;
+});
+
+/** The next photo to place, as the server orders them now (after each answer, see queue). */
+async function next() {
+  const asked = await (await fetch('/api/queue')).json();
+  rules = asked.settings; left = asked.photos.length;
+  show(asked.photos[0] || null);
+}
+function show(next) {
+  leavePairing();
+  if (!next) { photo = null; $('title').textContent = 'Plus rien à placer.'; return; }
+  photo = next; flipped = false; proposal = null; carried = null; at = -1;
+  spot = { lon: photo.lon, lat: photo.lat, heading: photo.heading };
+  $('title').textContent = photo.title + yearsOf(photo.years);
+  $('progress').textContent = `encore ${left} à placer`;
+  $('pinned').src = photoUrl();
+  map.jumpTo({ center: [spot.lon, spot.lat] });
+  drawCone(); findNear(); shownAt = Date.now();
+}
+
+zoomable($('photo-box'), $('photo-stage'));  // the dots, in the stage, zoom with the picture
+zoomable($('view-box'), $('view-stage'));
+map.on('load', next);
+</script>
+</body>
+</html>
