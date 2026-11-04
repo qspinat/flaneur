@@ -277,3 +277,61 @@ def build(
             origin,
         ),
     }
+
+
+def build3d(
+    pictures: list[Picture],
+    shown: dict[str, dict],
+    copies: dict[str, list[dict]],
+    walk: list[WalkPhoto],
+) -> tuple[dict, set[str]]:
+    """The 3D walk on today's panoramas: every panorama (levelled by the viewer from its
+    azimuth, roll and pitch; the next ones along the street, by their index; its credit, by
+    its index in `credits`), and each photo placed in one (`shown`: the answers that hold, on
+    the image the photo has now), where it shows: its home, then its `copies` carried to the
+    neighbours. And the panoramas that hold a photo, to copy onto the site."""
+    by_id = {me.id: me for me in walk}
+    known = {p.id for p in pictures}  # a photo or a copy on a panorama gone is left out
+    photos, holding = [], set()
+    for photo_id, row in shown.items():
+        me = by_id.get(photo_id)
+        if me is None or row["registration"]["panorama"] not in known:
+            continue
+        home = {"panorama": row["registration"]["panorama"], "registration": row["registration"]}
+        where = [{**home, "strength": 1.0}] + [
+            {"panorama": c["registration"]["panorama"], **c}
+            for c in copies.get(photo_id, [])
+            if c["registration"]["panorama"] in known
+        ]
+        holding |= {w["panorama"] for w in where}
+        credit = f"{me.photographer}. {me.credit}" + ("; image retournée" if row["flipped"] else "")
+        photos.append(
+            {
+                "id": me.id,
+                "title": me.title,
+                "years": me.years,
+                "credit": credit,
+                "image": image_name(me.id),
+                "flipped": row["flipped"],
+                "shown": where,
+            }
+        )
+    ways = panoramas.links(pictures)
+    index = {p.id: n for n, p in enumerate(pictures)}
+    credits: dict[str, int] = {}
+    spheres = [
+        {
+            "id": p.id,
+            "lon": round(p.lon, 7),
+            "lat": round(p.lat, 7),
+            "azimuth": round(p.azimuth or 0, 2),
+            "roll": round(p.roll, 2),
+            "pitch": round(p.pitch, 2),
+            "taken": p.taken,
+            "credit": credits.setdefault(panoramax_credit(p), len(credits)),
+            "image": f"panoramas/{p.id}.jpg" if p.id in holding else p.sd_url,
+            "links": [[index[i], round(b, 1), round(d, 1)] for i, b, d in ways[p.id]],
+        }
+        for p in pictures
+    ]
+    return {"credits": list(credits), "panoramas": spheres, "photos": photos}, holding

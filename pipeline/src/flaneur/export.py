@@ -95,7 +95,8 @@ class WalkPhoto:
     reviewed: bool = False  # its place was confirmed or fixed by hand (not exported)
     situated: bool = False  # its place was found against today's panoramas (not exported)
     moved_by_review: bool = False  # fixed by hand far from the proposed place or direction
-    in_3d: bool = False  # shown in the 3D walk (its placement confirmed by the user)
+    in_3d: bool = False  # shown in the 3D walk (placed in its panorama by the user)
+    no_3d: bool = False  # no panorama sees it (answered so on the placing page)
     image: str | None = None  # path of the exported image, relative to the data folder
     # each size's width as written, by its side
     widths: dict[int, int] = field(default_factory=dict)
@@ -139,6 +140,7 @@ class WalkPhoto:
             },
             "eras": self.eras,
             "in_3d": self.in_3d,
+            "no_3d": self.no_3d,
         }
 
 
@@ -174,12 +176,15 @@ def photos(
     pilot_dir: Path,
     reviews_path: Path,
     situated: dict[str, dict] | None = None,
+    placed: dict[str, dict] | None = None,
 ) -> list[WalkPhoto]:
     """The walk's photos, with the last decision of the review applied: a photo judged not a
     street view is left out, a confirmed or fixed one takes the reviewed place and direction;
     the others take the place where their camera was found against today's panoramas
-    (`situated`: lon, lat, heading; see flaneur.match), else the proposed placement."""
-    situated = situated or {}
+    (`situated`: lon, lat, heading; see flaneur.match), else the proposed placement. A place
+    set on the placing page (`placed`: lon, lat, heading, at, by print; on any print of the
+    negative) wins over a review made before it."""
+    situated, placed = situated or {}, placed or {}
     negatives = dedup.negatives(conn)
     decisions = review.decisions_by_photo(reviews_path, negatives)
     walk = []
@@ -191,8 +196,16 @@ def photos(
         if decided and decided["decision"] == "not_a_street_view":
             continue
         reviewed = bool(decided and decided["decision"] in ("confirm", "fix"))
-        found = None if reviewed else situated.get(r["photo_id"])
-        place = decided if reviewed else found or r
+        prints = {r["photo_id"], *negatives.get(r["photo_id"], ())}
+        set_here = max(
+            (placed[i] for i in prints if i in placed), key=lambda p: p["at"], default=None
+        )
+        if set_here and (not reviewed or set_here["at"] >= decided["at"]):
+            by_hand = set_here  # the placing page's, the latest
+        else:
+            by_hand = decided if reviewed else None
+        found = None if by_hand else situated.get(r["photo_id"])
+        place = by_hand or found or r
         # the crop drawn or accepted by hand on this very print, else the one proposed
         own = decided if decided and decided["id"] == f"photo:{r['photo_id']}" else {}
         frame = own.get("crop") or info.get("suggested_crop")
@@ -212,9 +225,9 @@ def photos(
                 arrondissement=(json.loads(r["arrondissements"] or "[]") or [None])[0],
                 image_url=r["image_url"],
                 crop=None if frame == [0, 0, 1, 1] else frame,
-                reviewed=reviewed,
+                reviewed=by_hand is not None,
                 situated=found is not None,
-                moved_by_review=bool(decided) and _moved(r, decided),
+                moved_by_review=bool(by_hand) and _moved(r, by_hand),
             )
         )
     return walk
@@ -226,7 +239,8 @@ TURNED_DEG = 30
 
 
 def _moved(proposed, decided: dict) -> bool:
-    if decided["decision"] != "fix":
+    """Whether a place set by hand (a review's fix, or the placing page's) moved the photo."""
+    if decided.get("decision", "fix") != "fix":  # the placing page sets a place: a fix
         return False
     here = to_metres(Point(proposed["lon"], proposed["lat"]))
     there = to_metres(Point(decided["lon"], decided["lat"]))
@@ -299,15 +313,10 @@ def choose_today(me: WalkPhoto, matched: str | None, tiles: dict[str, dict]) -> 
 def build(
     conn: sqlite3.Connection,
     pilot_dir: Path,
-    reviews_path: Path,
-    situated: dict[str, dict] | None = None,
-    in_3d: Collection[str] = (),
+    walk: list[WalkPhoto],
 ) -> list[WalkPhoto]:
-    """The walk, linked, each photo with its view of today chosen (images not yet written);
-    `in_3d`: the photos the 3D walk shows."""
-    walk = photos(conn, pilot_dir, reviews_path, situated)
-    for me in walk:
-        me.in_3d = me.id in in_3d and not me.reviewed  # a place set by hand wins (see cli.scene)
+    """The walk (its photos where each is best known: see photos), linked, each photo with its
+    view of today chosen (images not yet written)."""
     link(walk)
     tiles = _tiles(pilot_dir)
     matched = dict(conn.execute("SELECT photo_id, match_panoramax_id FROM placements"))
@@ -381,12 +390,31 @@ def _write_one(me: WalkPhoto, client: httpx.Client, cache_dir: Path, out_dir: Pa
     return True
 
 
+def mark_3d(
+    walk: list[WalkPhoto], out_dir: Path, in_3d: dict[str, str], no_3d: Collection[str]
+) -> None:
+    """Which photos the 3D walk shows: those placed in their panorama on the image written
+    now (`in_3d`: the hash of the image each was placed on), and which no panorama sees."""
+    from flaneur.landmarks import image_hash  # here: landmarks loads the matcher's module
+
+    for me in walk:
+        placed_on = in_3d.get(me.id)
+        written = out_dir / image_name(me.id)
+        me.in_3d = bool(placed_on) and written.exists() and image_hash(written) == placed_on
+        me.no_3d = me.id in no_3d
+
+
 def write(
-    walk: list[WalkPhoto], client: httpx.Client, cache_dir: Path, out_dir: Path
+    walk: list[WalkPhoto],
+    client: httpx.Client,
+    cache_dir: Path,
+    out_dir: Path,
+    in_3d: dict[str, str] | None = None,
+    no_3d: Collection[str] = (),
 ) -> list[WalkPhoto]:
     """Write the images (cropped and resized) and walk.json into `out_dir`; downloads are
-    kept in `cache_dir`. Returns the photos written: a failed download leaves one out, and
-    the links to it."""
+    kept in `cache_dir`; the 3D walk marked on the images written (see mark_3d). Returns the
+    photos written: a failed download leaves one out, and the links to it."""
     with ThreadPoolExecutor(DOWNLOADS_AT_ONCE) as pool:
         written = list(pool.map(lambda p: _write_one(p, client, cache_dir, out_dir), walk))
     exported = [p for p, ok in zip(walk, written, strict=True) if ok]
@@ -394,6 +422,7 @@ def write(
     for me in exported:
         me.links = {k: v if v and v.id in ids else None for k, v in me.links.items()}
         me.eras = [i for i in me.eras if i in ids]
+    mark_3d(exported, out_dir, in_3d or {}, no_3d)
     write_json(out_dir / "walk.json", {"photos": [p.for_site() for p in exported]})
     _remove_others(out_dir, walk)
     return exported

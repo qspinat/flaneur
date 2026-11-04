@@ -2,7 +2,7 @@
 
 import json
 
-from flaneur import export
+from flaneur import export, landmarks
 from flaneur.export import WalkPhoto
 
 NORTH_PER_M = 1 / 111_200  # degrees of latitude per metre
@@ -228,3 +228,68 @@ def test_each_size_is_listed_by_the_width_it_has():
         "640": export.sized(me.image, 960),
         "1067": me.image,
     }
+
+
+def test_the_3d_walk_is_marked_on_the_images_as_written_and_too_far_on_answers(tmp_path):
+    def photo(n):
+        return WalkPhoto(
+            n, "t", None, [None, None], "p", "c", None, 0.0, 0.0, None, None, None, "u", None
+        )
+
+    walk = [photo("pm:a"), photo("pm:b"), photo("pm:c")]
+    for me in walk:
+        (tmp_path / export.image_name(me.id)).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / export.image_name(me.id)).write_bytes(me.id.encode())
+    now = landmarks.image_hash(tmp_path / export.image_name("pm:a"))
+
+    export.mark_3d(walk, tmp_path, {"pm:a": now, "pm:b": "an image it had before"}, {"pm:c"})
+
+    assert [(me.in_3d, me.no_3d) for me in walk] == [(True, False), (False, False), (False, True)]
+
+
+def _reviewed(tmp_path, at):
+    reviews = tmp_path / "reviews.jsonl"
+    fix = {
+        "id": "photo:pm:1",
+        "decision": "fix",
+        "lon": 2.346,
+        "lat": 48.852,
+        "heading": 90,
+        "at": at,
+    }
+    reviews.write_text(json.dumps(fix) + "\n")
+    return reviews
+
+
+PLACED = {"pm:1": {"lon": 2.3462, "lat": 48.8523, "heading": 75.0, "at": "2026-11-04T10:00:00"}}
+
+
+def test_a_place_set_on_the_placing_page_after_the_review_wins_over_it(tmp_path):
+    conn = two_photos(tmp_path)
+
+    walk = export.photos(
+        conn, tmp_path / "pilot", _reviewed(tmp_path, "2026-10-29T10:00:00"), {}, PLACED
+    )
+
+    me = next(p for p in walk if p.id == "pm:1")
+    assert (me.lon, me.lat, me.heading, me.reviewed) == (2.3462, 48.8523, 75.0, True)
+
+
+def test_a_review_made_after_the_placing_page_wins_over_it(tmp_path):
+    conn = two_photos(tmp_path)
+
+    walk = export.photos(
+        conn, tmp_path / "pilot", _reviewed(tmp_path, "2026-11-05T10:00:00"), {}, PLACED
+    )
+
+    me = next(p for p in walk if p.id == "pm:1")
+    assert (me.lon, me.heading) == (2.346, 90)
+
+
+def test_a_photo_moved_on_the_placing_page_loses_the_view_of_today_of_its_old_place(tmp_path):
+    conn = two_photos(tmp_path)
+    far = {"pm:1": {"lon": 2.3475, "lat": 48.8525, "heading": 270.0, "at": "2026-11-04T10:00:00"}}
+
+    walk = export.photos(conn, tmp_path / "pilot", tmp_path / "none.jsonl", {}, far)
+
+    assert next(p for p in walk if p.id == "pm:1").moved_by_review

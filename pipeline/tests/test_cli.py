@@ -1,6 +1,7 @@
 import json
 
 import pytest
+import typer
 from typer.testing import CliRunner
 
 from flaneur import cli, confirming, match
@@ -83,3 +84,10 @@ def test_the_photos_chained_from_one_are_found_through_every_round():
 
     assert cli._chained_from(results, "a") == {"b", "c", "d"}
     assert cli._chained_from(results, "c") == {"d"}
+
+
+def test_the_panoramas_are_not_used_when_their_tilts_were_measured_otherwise(monkeypatch):
+    monkeypatch.setattr(cli.level, "current", lambda path: False)
+
+    with pytest.raises(typer.BadParameter, match="flaneur level"):
+        cli._lined_up([])

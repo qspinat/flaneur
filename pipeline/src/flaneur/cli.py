@@ -3,6 +3,7 @@
 import functools
 import hashlib
 import json
+import shutil
 import time
 from collections import Counter
 from collections.abc import Callable, Iterable
@@ -67,6 +68,7 @@ REVIEWS = DATA / "overrides" / "reviews.jsonl"
 SIGHTS = DATA / "overrides" / "sights.jsonl"  # the landmarks marked in photos, by hand
 CORRECTIONS = DATA / "pilot" / "panorama_corrections.json"  # on the buildings (register): unused
 FIXES = DATA / "pilot" / "panorama_fixes.json"  # panoramas placed with each other (reconstruct)
+PLACINGS = DATA / "overrides" / "placings.jsonl"  # the user's answers on the placing page
 TILTS = DATA / "pilot" / "panorama_tilts.json"  # how each one's camera leaned (level)
 PANORAMAS = DATA / "raw" / "panoramas"  # their pictures
 
@@ -177,15 +179,47 @@ def import_placements() -> None:
             )
 
 
+def _placing_answers(
+    path: Path = PLACINGS,
+) -> tuple[dict[str, dict], dict[str, dict], set[str]]:
+    """From the placing page's answers: where each photo answered stands (lon, lat, heading),
+    the answers placing a photo in its panorama (on the image it had then), and the photos no
+    panorama sees."""
+    held = placings.holding(path)
+    places = {i: {k: r[k] for k in ("lon", "lat", "heading", "at")} for i, r in held.items()}
+    in_3d = {i: r for i, r in held.items() if r["answer"] in placings.PLACED}
+    return places, in_3d, {i for i, r in held.items() if r["answer"] == "far"}
+
+
+def _walk(conn, places: dict[str, dict] | None = None) -> list[export.WalkPhoto]:
+    """The walk's photos where each is best known now: the placing page (`places`, else read),
+    the review, a match confirmed, the caption."""
+    places = _placing_answers()[0] if places is None else places
+    return export.photos(conn, DATA / "pilot", REVIEWS, _places(_confirmed()), places)
+
+
+def _on_image_now(placed: dict[str, dict]) -> dict[str, dict]:
+    """The answers placing a photo in its panorama made on the image it has now."""
+    return {i: r for i, r in placed.items() if _exported(i).exists() and r["inputs"] == _image(i)}
+
+
+def _carried(placed: dict[str, dict]) -> dict[str, dict]:
+    """The copies carried to the neighbouring panoramas (`flaneur porter`) still made from
+    the answer that holds (`placed`)."""
+    kept = json.loads(CARRIED.read_text()) if CARRIED.exists() else {}
+    return {i: c for i, c in kept.items() if i in placed and c["made"] == _answered_as(placed[i])}
+
+
 @app.command("export")
 def export_walk(images: bool = True) -> None:
     """Écrit la balade (photos relues appliquées, liens, vue d'aujourd'hui) pour le site."""
-    confirmed = _confirmed()
+    places, in_3d, no_3d = _placing_answers()
     with closing(db.connect(DB_PATH)) as conn:
-        walk = export.build(conn, DATA / "pilot", REVIEWS, _places(confirmed), in_3d=confirmed)
+        walk = export.build(conn, DATA / "pilot", _walk(conn, places))
     if images:
+        placed_on = {i: r["inputs"] for i, r in in_3d.items()}
         with httpx.Client(timeout=120, follow_redirects=True) as client:
-            walk = export.write(walk, client, DATA / "raw" / "images", WEB_DATA)
+            walk = export.write(walk, client, DATA / "raw" / "images", WEB_DATA, placed_on, no_3d)
         typer.echo(f"écrit dans {WEB_DATA}")
     s = export.summary(walk)
     typer.echo(
@@ -1383,7 +1417,7 @@ def propose_in_panoramas(sheets: int = 20) -> None:
     40 m), et mesure : combien en ont une, en combien de secondes ; des planches (photo, vue
     d'aujourd'hui, la photo posée dedans) dans data/pilot/proposals_3d/ pour les regarder."""
     with closing(db.connect(DB_PATH)) as conn:  # where each photo is best known now
-        walk = export.photos(conn, DATA / "pilot", REVIEWS, _places(_confirmed()))
+        walk = _walk(conn)
     spheres = _spheres()
     views = _views(kept=4)  # each photo is tried in one panorama, photos near one another in turn
     store = chain.Store(DATA / "raw", views.matcher)  # the photos' features, as matching reads them
@@ -1442,7 +1476,6 @@ def _proposal_sheet(
     )
 
 
-PLACINGS = DATA / "overrides" / "placings.jsonl"  # the user's answers on the placing page
 CARRIED = DATA / "pilot" / "carried.json"  # each photo placed, on its neighbouring panoramas
 
 
@@ -1467,9 +1500,8 @@ def carry_placed() -> None:
     mêmes façades, de proche en proche le long de la rue, s'estompant au loin
     (data/pilot/carried.json) ; seules les photos répondues depuis la dernière fois sont
     refaites."""
-    held = {i: r for i, r in placings.holding(PLACINGS).items() if r["answer"] in placings.PLACED}
-    before = json.loads(CARRIED.read_text()) if CARRIED.exists() else {}
-    carried = {i: c for i, c in before.items() if i in held and c["made"] == _answered_as(held[i])}
+    held = _on_image_now(_placing_answers()[1])  # those placed on another image: not exported
+    carried = _carried(held)
     todo = [i for i in held if i not in carried]
     if todo:
         with closing(db.connect(DB_PATH)) as conn:
@@ -1489,6 +1521,19 @@ def carry_placed() -> None:
         f"{len(carried)} photos placées ({len(todo)} refaites) portées sur {sum(counts)} "
         f"panoramas voisins ({np.median(counts) if counts else 0:.0f} par photo, médiane)"
     )
+
+
+def _copy_panoramas(holding: set[str], folder: Path) -> None:
+    """The panoramas holding a photo, copied onto the site (again when changed); the others
+    copied before, removed."""
+    folder.mkdir(parents=True, exist_ok=True)
+    for panorama in holding:
+        source, copy = PANORAMAS / f"{panorama}.jpg", folder / f"{panorama}.jpg"
+        if not copy.exists() or copy.stat().st_mtime < source.stat().st_mtime:
+            shutil.copy2(source, copy)
+    for old in folder.glob("*.jpg"):
+        if old.stem not in holding:
+            old.unlink()
 
 
 def _to_neighbours(
@@ -1563,7 +1608,7 @@ def place_photos(
     placée, sans charger le modèle ; `--answers` : un autre fichier de réponses (pour essayer
     la page)."""
     with closing(db.connect(DB_PATH)) as conn:  # where each photo is best known now
-        walk = export.photos(conn, DATA / "pilot", REVIEWS, _places(_confirmed()))
+        walk = _walk(conn, _placing_answers(answers)[0])
     photos = {
         me.id: {
             "title": me.title,
@@ -1651,22 +1696,32 @@ def place_photos(
 
 @app.command("scene")
 def write_scene() -> None:
-    """Écrit la scène de la balade en 3D (panoramas, bâtiments, sol, et les photos situées que
-    l'utilisateur a confirmées)."""
-    confirmed = _confirmed()
+    """Écrit la scène de la balade en 3D : les panoramas d'aujourd'hui, et les photos que
+    l'utilisateur a placées dans l'un d'eux, avec leurs copies portées sur les voisins
+    (`flaneur porter`) ; copie sur le site les panoramas qui portent une photo."""
+    places, in_3d, _ = _placing_answers()
     with closing(db.connect(DB_PATH)) as conn:
-        walk = export.photos(conn, DATA / "pilot", REVIEWS, _places(confirmed))
-        area = placements.area(conn, buildings.MARGIN_M)
-        features = _buildings(area)
-        pictures = panoramas.load(conn)
-    reviewed = {me.id for me in walk if me.reviewed}  # a place set by hand wins, as in the walk
-    proposals = [align.matched(k, m) for k, m in confirmed.items() if k not in reviewed]
-    pictures = _lined_up(pictures)
-    built = scene.build(pictures, features, proposals, walk, area, WEB_DATA)
+        walk = _walk(conn, places)
+        pictures = _lined_up(panoramas.load(conn))  # refused when tilts were measured otherwise
+    site = json.loads((WEB_DATA / "walk.json").read_text())
+    marked = {p["id"] for p in site["photos"] if p["in_3d"]}  # by the export, on its images
+    shown = {i: r for i, r in in_3d.items() if i in marked}
+    copies = {i: c["copies"] for i, c in _carried(shown).items()}
+    built, holding = scene.build3d(
+        [p for p in pictures if (PANORAMAS / f"{p.id}.jpg").exists()], shown, copies, walk
+    )
+    _copy_panoramas(holding, WEB_DATA / "panoramas")
+    in_scene = {p["id"] for p in built["photos"]}
+    if in_scene != marked:  # a photo whose panorama is gone: no "En 3D" leading nowhere
+        for p in site["photos"]:
+            p["in_3d"] = p["id"] in in_scene
+        write_json(WEB_DATA / "walk.json", site)
     write_json(WEB_DATA / "scene.json", built)
+    weight = sum(f.stat().st_size for f in WEB_DATA.rglob("*") if f.is_file()) / 2**20
     typer.echo(
-        f"{len(built['panoramas'])} panoramas, {len(built['buildings'])} bâtiments, "
-        f"{len(built['photos'])} photos ; écrit dans {WEB_DATA / 'scene.json'}"
+        f"{len(built['panoramas'])} panoramas, {len(built['photos'])} photos, "
+        f"{len(holding)} panoramas copiés ; données du site : {weight:.0f} Mo ; "
+        f"écrit dans {WEB_DATA / 'scene.json'}"
     )
 
 
