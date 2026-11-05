@@ -234,3 +234,23 @@ def test_a_proposal_says_where_its_source_was_placed(placed):
     )
 
     assert (found["b"]["lon"], found["b"]["lat"], found["b"]["heading"]) == (2.3467, 48.8521, 40.0)
+
+
+def test_old_photos_near_each_other_are_compared_once_and_never_copies_of_one_negative():
+    where = {
+        "a": (0.0, 0.0),
+        "a2": (1.0, 0.0),
+        "b": (50.0, 0.0),
+        "c": (0.0, 59.0),
+        "far": (200.0, 0.0),
+    }
+    copies = {"a": {"a", "a2"}, "a2": {"a", "a2"}}
+    kept = {("a", "c")}
+
+    found = carrying.to_compare(where, 60.0, copies, lambda a, b: (a, b) in kept)
+
+    assert found == [("a", "b"), ("a2", "b"), ("a2", "c")]  # b and c: 77 m apart
+
+
+def test_no_photos_have_no_pairs_to_compare():
+    assert carrying.to_compare({}, 60.0, {}, lambda a, b: False) == []

@@ -1468,6 +1468,51 @@ def _answered_as(row: dict) -> str:
     return hashlib.sha1(made.encode()).hexdigest()[:16]
 
 
+def _uncompared(
+    walk: list[export.WalkPhoto],
+    images: dict[str, str],
+    copies: dict[str, list[str]],
+    radius_m: float = MATCH_RADIUS_M,
+) -> list[tuple[str, str]]:
+    """The pairs of the walk's photos `flaneur voisins` compares that were never compared
+    (`images`: each photo's image's hash; `copies`: the prints of each negative)."""
+    kept = {path.name for path in (DATA / "raw").glob("old_pairs_*/*.npy")}  # any precision
+    return carrying.to_compare(
+        {me.id: _place_of(me) for me in walk},
+        radius_m,
+        copies,
+        lambda a, b: chain.pair_name((a, images[a]), (b, images[b])) in kept,
+    )
+
+
+@app.command("voisins")
+def compare_neighbours(radius_m: float = MATCH_RADIUS_M) -> None:
+    """Compare une fois chaque paire de photos anciennes à moins de `radius-m` l'une de l'autre
+    (à leur meilleure place connue, jamais deux tirages d'un négatif) : une photo placée
+    propose alors aussitôt toutes celles qui partagent assez de détails avec elle, et la file
+    met d'abord celles qui en portent le plus. Chaque paire est gardée aussitôt comparée ; à
+    relancer quand des photos ont été placées (elles ont bougé), le placeur le signale."""
+    with closing(db.connect(DB_PATH)) as conn:
+        walk = [me for me in _walk(conn) if _exported(me.id).exists()]
+        copies = dedup.negatives(conn)
+    images = {me.id: _image(me.id) for me in walk}
+    raw = DATA / "raw"
+    todo = _uncompared(walk, images, copies, radius_m)
+    typer.echo(f"{len(todo)} paires à comparer")
+    if todo:
+        store = chain.Store(raw, _views(kept=1).matcher)
+        started = time.monotonic()
+        for n, (a, b) in enumerate(todo, 1):
+            store.pairs((a, images[a]), (b, images[b]), lambda i: _features(store, i))
+            if n % 500 == 0 or n == len(todo):
+                typer.echo(f"{n} / {len(todo)} ({(time.monotonic() - started) / n:.3f} s la paire)")
+    graph = chain.old_neighbours(raw, images, queueing.MIN_SHARED)
+    typer.echo(
+        f"{len(graph)} photos sur {len(images)} partagent au moins {queueing.MIN_SHARED} "
+        f"détails avec une autre ({sum(map(len, graph.values())) // 2} paires)"
+    )
+
+
 @app.command("porter")
 def carry_placed() -> None:
     """Porte chaque photo placée dans son panorama sur les panoramas voisins qui voient les
@@ -1583,6 +1628,7 @@ def place_photos(
     la page)."""
     with closing(db.connect(DB_PATH)) as conn:  # where each photo is best known now
         walk = _walk(conn, _placing_answers(answers)[0])
+        copies = dedup.negatives(conn)
     photos = {
         me.id: {
             "title": me.title,
@@ -1601,9 +1647,14 @@ def place_photos(
     computed = json.loads(PROPOSALS.read_text()) if PROPOSALS.exists() else {}
     store = chain.Store(DATA / "raw", None)  # the photos' features: a matcher once one is loaded
     raw = DATA / "raw"
-    graph = chain.old_neighbours(
-        raw, {i: p["inputs"] for i, p in photos.items()}, queueing.MIN_SHARED
-    )
+    images = {i: p["inputs"] for i, p in photos.items()}
+    graph = chain.old_neighbours(raw, images, queueing.MIN_SHARED)
+    left = _uncompared([me for me in walk if me.id in photos], images, copies)
+    if left:  # their proposals and their place in the queue wait on them
+        typer.echo(
+            f"{len(left)} paires de photos proches jamais comparées : `flaneur voisins` pour "
+            "que chaque photo placée propose aussitôt toutes ses voisines"
+        )
 
     @functools.cache
     def models() -> match.Views:  # loaded when first needed
@@ -1611,7 +1662,6 @@ def place_photos(
         store.matcher = views.matcher
         return views
 
-    images = {i: p["inputs"] for i, p in photos.items()}
     made: dict[tuple[str, str], dict[str, dict]] = {}  # by source and the answer it holds
 
     def from_source(source: str, row: dict, *rest) -> dict[str, dict]:  # kept while it holds

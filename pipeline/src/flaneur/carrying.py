@@ -7,6 +7,8 @@ from collections.abc import Callable
 
 import cv2
 import numpy as np
+from shapely import STRtree
+from shapely.geometry import Point
 
 from flaneur import match, placings, queueing, registration
 from flaneur.registration import Registration, ViewOf
@@ -180,3 +182,23 @@ def outward(
                 found.append((there, copy))
                 frontier.append(there)
     return found
+
+
+def to_compare(
+    where: dict[str, tuple[float, float]],
+    radius: float,
+    copies: dict[str, list[str]],
+    kept: Callable[[str, str], bool],
+) -> list[tuple[str, str]]:
+    """The pairs of old photos (`where`: their x, y in metres) standing within `radius` of each
+    other, not prints of one negative (`copies`), not compared yet (`kept(a, b)`), each once."""
+    ids = sorted(where)
+    if not ids:  # the tree takes no empty query
+        return []
+    points = [Point(where[i]) for i in ids]
+    a, b = STRtree(points).query(points, predicate="dwithin", distance=radius)
+    return [
+        (ids[i], ids[j])
+        for i, j in sorted(zip(a.tolist(), b.tolist(), strict=True))
+        if i < j and ids[j] not in copies.get(ids[i], ()) and not kept(ids[i], ids[j])
+    ]
