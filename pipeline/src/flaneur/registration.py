@@ -18,6 +18,8 @@ from flaneur.sources import number
 
 MIN_POINTS = 6  # clicked by hand: Smapshot, Bae et al. and IGN settle at 6 to 8
 MIN_COVER = 0.25  # share of the photo inside the hull of the points fitted: under it, bunched
+MIN_CLICKED_COVER = 0.05  # clicked by hand, the user sees the photo laid: only a corner (0.03)
+# or a line refused, not a band across a print's middle (0.12) on its mount
 MIN_FRAME = 0.10  # share of the view the warped photo covers (Blanc, Produit, Ingensand 2018)
 MIN_MATCHED = 15  # matched automatically: as many agreeing (match.MIN_MATCHES for a view)
 MATCHED_PX = 3.0  # a matched pair farther than this from the others' homography is left out
@@ -93,7 +95,8 @@ def fit(
         raise NotFitted(f"il faut au moins {MIN_MATCHED} points qui s'accordent")
     if kept.sum() < MIN_POINTS:
         raise NotFitted(f"il faut au moins {MIN_POINTS} paires de points")
-    if cv2.contourArea(cv2.convexHull(photo[kept].astype(np.float32))) < MIN_COVER:
+    cover = cv2.contourArea(cv2.convexHull(photo[kept].astype(np.float32)))
+    if cover < (MIN_COVER if robust else MIN_CLICKED_COVER):
         raise NotFitted("points trop groupés : les répartir sur toute la photo")
     if h is None:
         raise NotFitted("ces points ne donnent aucune déformation de la photo")

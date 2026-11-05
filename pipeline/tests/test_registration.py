@@ -64,6 +64,23 @@ def test_points_that_cover_too_little_of_the_photo_are_refused(points):
         _fit(points)
 
 
+def test_points_clicked_across_the_middle_of_a_mounted_print_are_fitted():
+    # a print on its card: the details one can match lie in a band across its middle
+    band = np.array([[0.3, 0.35], [0.7, 0.35], [0.7, 0.65], [0.3, 0.65], [0.5, 0.45], [0.4, 0.6]])
+
+    r, kept = _fit(band)
+
+    assert kept.all()
+    assert np.allclose(registration.in_view(r, VIEW, TILTED), H, atol=1e-6)
+
+
+def test_points_matched_in_that_band_alone_are_still_refused():
+    band = np.random.default_rng(2).uniform([0.3, 0.35], [0.7, 0.65], (20, 2))
+
+    with pytest.raises(registration.NotFitted, match="groupés"):
+        _fit(band, robust=True)
+
+
 def test_matched_points_are_fitted_robustly_and_their_outliers_left_out():
     points = np.vstack([SPREAD, np.random.default_rng(1).uniform(0.05, 0.95, (30, 2))])
     view = _onto(points) * SIDE
