@@ -101,7 +101,7 @@ let view = null;         // {heading, pitch, fov} of the view shown
 let proposal = null;     // the registration shown in the view (proposed, or fitted from points)
 let carried = null;      // the old photo a proposal was carried from, if it was
 let made = 'proposal';   // how it was made: 'proposal' or 'points'
-let flipped = false, pairing = false, pairs = [], waiting = null;
+let flipped = false, pairing = false, pairs = [], waiting = null, refused = '';  // why the pairs gave no fit
 let answering = false;   // an answer on its way: no other until the next photo shows
 let reopenedWith = null; // a photo reopened: the registration it had, shown first
 let asking = 0;          // the latest proposal asked for (an older one coming back is ignored)
@@ -178,7 +178,7 @@ async function goTo(i) {
     if (mine !== asking || near[at]?.id !== sphere.id) return;  // gone elsewhere meanwhile
   }
   if (found) { proposal = found.registration; carried = found.carried_from; view = { ...proposal.view }; showView(); say(''); }
-  else { say('Pas de proposition : F pour poser par points.'); enterPairing(); }
+  else { say('Pas de proposition : la poser par points (F revient au panorama).'); enterPairing(); }
 }
 
 function viewUrl() {
@@ -262,12 +262,13 @@ function pairsChanged() {
   if (pairs.length >= rules.min_points) fitPairs(); else { proposal = null; shown($('view-laid'), ''); }
 }
 async function fitPairs() {
+  refused = '';
   try {
     proposal = await post('/api/fit', { photo_id: photo.id, panorama: near[at].id, view, flipped,
       photo_px: pairs.map((p) => p[0]), view_px: pairs.map((p) => p[1]) });
     made = 'points'; say('Recalée : Entrée pour garder, ou continuer à ajouter des points.');
     shown($('view-laid'), await post('/api/composite', { photo_id: photo.id, registration: proposal, flipped }));
-  } catch (error) { proposal = null; shown($('view-laid'), ''); say(error.message); }
+  } catch (error) { proposal = null; shown($('view-laid'), ''); refused = error.message; say(refused); }
 }
 
 // --- answers
@@ -291,7 +292,8 @@ document.addEventListener('keydown', (e) => {
     drawCone(); e.preventDefault();
   } else if (e.key === 'Enter') {
     // placing by points keeps only a warp from the pairs clicked, never the one set out to correct
-    if (!proposal || (pairing && pairs.length < rules.min_points)) say(pairing ? `Il faut ${rules.min_points} paires de points.` : 'Pas de proposition : F pour poser par points.');
+    if (pairing && pairs.length < rules.min_points) say(`Il faut ${rules.min_points} paires de points.`);
+    else if (!proposal) say(pairing ? refused || 'Recalage en cours…' : 'Pas de proposition : F pour poser par points.');
     else if (spot.heading == null) say('Tourner le cône sur le plan (← →) : la direction manque.');
     else answer(made === 'points' ? 'points' : 'fits');
   } else if (e.key === 'f' || e.key === 'F') { pairing ? leavePairing() : enterPairing(); }
