@@ -1,0 +1,152 @@
+"""How far today's details stand from a panorama: its views matched with those of its nearest
+panoramas, each detail found in both placed where the two rays meet (the panoramas where
+they were taken, see cli._spheres). They agree with the panoramas by construction; measured on
+2026-11-06: hundreds of details a view, the rays passing within a few centimetres."""
+
+from dataclasses import dataclass
+
+import cv2
+import numpy as np
+from scipy.interpolate import LinearNDInterpolator, NearestNDInterpolator
+from scipy.spatial import QhullError
+
+from flaneur import match, registration
+from flaneur.registration import ViewOf
+
+NEAR_M = (1.0, 12.0)  # a neighbour this far: nearer sees the same, farther fewer of the same
+MOST_NEIGHBOURS = 4
+REACH_DEG = 1.5  # a direction takes the depth of the details this near it
+MOST_SPREAD = 1.5  # unless they disagree: the farther of them this much farther than the nearer
+COARSE = 4  # depth over a view is made at a quarter of its side, then enlarged
+COLUMNS = 40  # where the sky begins, found in this many columns of a view
+MIN_IN_VIEW = 10  # details seen in a view for a depth all over it
+
+
+@dataclass(frozen=True)
+class Depths:
+    panorama: str
+    directions: np.ndarray  # (n, 3) from the panorama, in the world (east, north, up), unit
+    metres: np.ndarray  # (n,) how far along each
+    seen_from: np.ndarray  # (n,) the neighbour each was found with
+    fixed: np.ndarray  # (n,) whether COLMAP placed that neighbour itself
+
+
+def neighbours(
+    home: match.Panorama, spheres: list[match.Panorama], fixed: set[str]
+) -> list[match.Panorama]:
+    """The panoramas NEAR_M from `home`, at most MOST_NEIGHBOURS: those COLMAP placed itself
+    (`fixed`) first, then the nearest."""
+    near = [
+        (p.id not in fixed, np.hypot(p.x - home.x, p.y - home.y), p)
+        for p in spheres
+        if p.id != home.id and NEAR_M[0] <= np.hypot(p.x - home.x, p.y - home.y) <= NEAR_M[1]
+    ]
+    return [p for *_, p in sorted(near, key=lambda n: n[:2])][:MOST_NEIGHBOURS]
+
+
+def triangulated(
+    home: match.Panorama, other: match.Panorama, views: match.Views
+) -> tuple[np.ndarray, np.ndarray]:
+    """The details of each view of `home` found in the views of `other` facing the same way or
+    a step either side (a near wall turns tens of degrees between two panoramas): their
+    directions from `home` and how far along, where the two rays meet by match.placed's
+    rules."""
+    a, b = np.array([home.x, home.y, home.z]), np.array([other.x, other.y, other.z])
+    headings = list(match.VIEW_HEADINGS)
+    mine, theirs = views.of(home), views.of(other)
+    if len(mine) != len(headings) or len(theirs) != len(headings):  # a picture not read
+        return np.empty((0, 3)), np.empty(0)
+    rays_a, rays_b = [], []
+    for k, heading in enumerate(headings):
+        for step in (-1, 0, 1):
+            j = (k + step) % len(headings)
+            ia, ib = views.matcher.match(mine[k], theirs[j])
+            side_a, side_b = mine[k].size[1], theirs[j].size[1]
+            rays_a.append(match.view_directions(mine[k].keypoints[ia], heading, side=side_a))
+            rays_b.append(match.view_directions(theirs[j].keypoints[ib], headings[j], side=side_b))
+    da, db = np.vstack(rays_a), np.vstack(rays_b)
+    n = len(da)
+    if not n:
+        return np.empty((0, 3)), np.empty(0)
+    points, _, _, _ = match.placed(
+        np.tile(np.arange(n), 2),
+        np.repeat([home.id, other.id], n),
+        np.vstack([np.tile(a, (n, 1)), np.tile(b, (n, 1))]),
+        np.vstack([da, db]),
+        np.full((2 * n, 3), np.nan),  # never cast onto a wall
+    )
+    metres = np.linalg.norm(points - a, axis=1)
+    return (points - a) / metres[:, None], metres
+
+
+def of_panorama(
+    home: match.Panorama, spheres: list[match.Panorama], fixed: set[str], views: match.Views
+) -> Depths | None:
+    """The details around `home` with their depth, from its neighbours; none without any."""
+    near = neighbours(home, spheres, fixed)
+    if not near:
+        return None
+    found = [(p, *triangulated(home, p, views)) for p in near]
+    if not any(len(m) for *_, m in found):
+        return None
+    return Depths(
+        home.id,
+        np.vstack([d for _, d, _ in found]),
+        np.concatenate([m for *_, m in found]),
+        np.concatenate([[p.id] * len(m) for p, _, m in found]),
+        np.concatenate([[p.id in fixed] * len(m) for p, _, m in found]).astype(bool),
+    )
+
+
+def at(depths: Depths, directions: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """How far along each direction (world, unit): the median of the details within REACH_DEG
+    of it; NaN when there are none, or when they disagree (MOST_SPREAD: a corner, a near
+    wall's edge against the street beyond: no depth rather than one in the air between); and
+    whether those came only from neighbours COLMAP did not place itself."""
+    near = directions @ depths.directions.T >= np.cos(np.radians(REACH_DEG))
+    metres = np.full(len(directions), np.nan)
+    only_unfixed = np.zeros(len(directions), bool)
+    for i, row in enumerate(near):
+        found = depths.metres[row]
+        if len(found):
+            low, high = np.percentile(found, [20, 80])
+            metres[i] = np.median(found) if high <= MOST_SPREAD * low else np.nan
+            only_unfixed[i] = not depths.fixed[row].any()
+    return metres, only_unfixed
+
+
+def in_view(depths: Depths, view: ViewOf, axes: np.ndarray, side: int) -> np.ndarray:
+    """How far along each pixel's ray of a view (side × side): the details seen in it
+    interpolated (as inverse depth, which is linear across a flat wall in a picture), the
+    nearest beyond them; infinitely far above each column's highest details (the sky). Made
+    at a quarter of the side (depth is smooth), the sky's edge at full size. NaN all over when
+    fewer than MIN_IN_VIEW details are seen in it: unknown, not sky."""
+    px = registration.view_pixels(depths.directions @ axes.T, view, axes, side)
+    seen = np.all(np.isfinite(px) & (px >= 0) & (px < side), axis=1)
+    px, inverse = px[seen], 1 / depths.metres[seen]
+    if len(px) < MIN_IN_VIEW:
+        return np.full((side, side), np.nan)
+    small = max(side // COARSE, 1)
+    at = (np.mgrid[0:small, 0:small][::-1].reshape(2, -1).T + 0.5) * side / small
+    try:
+        found = LinearNDInterpolator(px, inverse)(at)
+    except QhullError:  # all in a line: no triangle to spread them over
+        found = np.full(len(at), np.nan)
+    beyond = np.isnan(found)
+    found[beyond] = NearestNDInterpolator(px, inverse)(at[beyond])
+    filled = cv2.resize(found.reshape(small, small), (side, side), interpolation=cv2.INTER_LINEAR)
+    # the sky: above the highest details of each column (a few, not one stray)
+    width = max(side // COLUMNS, 1)
+    bins = np.minimum((px[:, 0] // width).astype(int), COLUMNS - 1)
+    top = np.full(COLUMNS, np.nan)
+    for b in range(COLUMNS):
+        rows = px[bins == b, 1]
+        if len(rows) >= 2:
+            top[b] = np.percentile(rows, 5)
+    known = ~np.isnan(top)
+    if known.any():
+        centres = (np.arange(COLUMNS) + 0.5) * width
+        tops = np.interp(np.arange(side), centres[known], top[known])
+        filled[np.arange(side)[:, None] < tops[None, :]] = 0.0
+    with np.errstate(divide="ignore"):
+        return 1 / filled
