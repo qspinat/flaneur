@@ -2,6 +2,7 @@
 
 import functools
 import hashlib
+import io
 import json
 import shutil
 import time
@@ -20,6 +21,7 @@ import httpx
 import numpy as np
 import typer
 from dotenv import load_dotenv
+from PIL import Image
 from shapely.geometry import Point
 
 from flaneur import (
@@ -38,6 +40,7 @@ from flaneur import (
     match,
     outlines,
     panoramas,
+    panoramax,
     pilot,
     placements,
     placing,
@@ -1712,10 +1715,44 @@ def place_photos(
     def ahead() -> dict[str, str]:  # earlier yes verdicts, then photos carried from placed ones
         return {**revisit, **{i: "portée" for i in carried_now() if i not in revisit}}
 
-    sources = placing.Sources(photos, spheres, answers, proposal, ahead, graph, carried_now)
-    _serve_page(
-        lambda: placing.serve(sources, port), f"placer ({len(photos)} photos)", port, open_browser
+    def full(panorama: str) -> np.ndarray | None:
+        """The panorama's picture at most placing.FULL_WIDTH px around, from its original
+        (each instance of Panoramax keeps it its own way: asked), decoded straight at the
+        smallest scale at least that large; none offline or once no longer on Panoramax."""
+        try:
+            url = panoramax.by_id(client, panorama).hd_url
+            data = client.get(url).raise_for_status().content if url else b""
+            with Image.open(io.BytesIO(data)) as original:
+                original.draft("RGB", (placing.FULL_WIDTH, placing.FULL_WIDTH // 2))
+                rgb = np.asarray(original.convert("RGB"))
+        # offline, gone from Panoramax, an answer not as expected, no picture or one too large
+        # in what came: the page shows the panorama's own picture
+        except (
+            httpx.HTTPError,
+            IndexError,
+            KeyError,
+            ValueError,
+            OSError,
+            Image.DecompressionBombError,
+        ):
+            return None
+        if rgb.shape[1] != 2 * rgb.shape[0]:  # not all around: never stretched into it
+            return None
+        if rgb.shape[1] > placing.FULL_WIDTH:
+            size = (placing.FULL_WIDTH, placing.FULL_WIDTH // 2)
+            rgb = cv2.resize(rgb, size, interpolation=cv2.INTER_AREA)
+        return np.ascontiguousarray(rgb[:, :, ::-1])  # as OpenCV reads pictures
+
+    sources = placing.Sources(
+        photos, spheres, answers, proposal, ahead, graph, carried_now, full=full
     )
+    with httpx.Client(timeout=10, follow_redirects=True) as client:
+        _serve_page(
+            lambda: placing.serve(sources, port),
+            f"placer ({len(photos)} photos)",
+            port,
+            open_browser,
+        )
 
 
 @app.command("scene")

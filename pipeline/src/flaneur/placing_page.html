@@ -34,7 +34,8 @@
   #view-laid { position: absolute; inset: 0; width: 100%; height: 100%; opacity: 0.5; pointer-events: none; }
   .dot { position: absolute; width: 20px; height: 20px; margin: -10px 0 0 -10px; border-radius: 50%;
          background: #f2c14e; color: #111; font: bold 11px/20px sans-serif; text-align: center;
-         pointer-events: none; box-shadow: 0 0 0 2px #111; }
+         pointer-events: none; box-shadow: 0 0 0 2px #111;
+         transform: scale(calc(1 / var(--zoom, 1))); }  /* its size, the picture zoomed */
   .dot.waiting { background: #fff; }
   #foot { padding: 8px 12px; display: flex; gap: 10px; align-items: center; }
   #fade:disabled { opacity: 0.35; }
@@ -356,8 +357,11 @@ function show(next) {
   drawCone(); findNear(); shownAt = Date.now();
 }
 
-zoomable($('photo-box'), $('photo-stage'));  // the dots, in the stage, zoom with the picture
-zoomable($('view-box'), $('view-stage'));
+// the dots, in the stage, move with the picture zoomed, and keep their size (see .dot)
+for (const name of ['photo', 'view']) {
+  const stage = $(`${name}-stage`);
+  zoomable($(`${name}-box`), stage, { onZoom: (scale) => stage.style.setProperty('--zoom', scale) });
+}
 map.on('load', next);
 </script>
 </body>

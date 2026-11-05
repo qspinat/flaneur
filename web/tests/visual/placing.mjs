@@ -55,6 +55,15 @@ await page.waitForTimeout(800);
 check(answers.length === 0, `one pair and Entrée save nothing (${answers.map((a) => a.answer)})`);
 check((await page.textContent('#message')).includes('paires'), 'the page says pairs are missing');
 
+// zoomed in, a pair's dots keep their size on screen
+await page.mouse.move(photo.x + photo.width / 2, photo.y + photo.height / 2);
+await page.mouse.wheel(0, -600);
+await page.waitForTimeout(300);
+const dot = await page.locator('#photo-stage .dot').first().boundingBox();
+check(Math.abs(dot.width - 20) < 1, `zoomed in, a dot keeps its size (${dot.width.toFixed(1)} px)`);
+await page.locator('#photo-box').dispatchEvent('dblclick'); // back to the whole photo, no click on it
+await page.waitForTimeout(300);
+
 // two more that the server will not fit: Entrée gives its reason, not a count already reached
 await page.route('**/api/fit', (route) => route.fulfill({ status: 400, body: 'points trop groupés' }));
 await clickPairs([[0.9, 0.1], [0.5, 0.8]]);

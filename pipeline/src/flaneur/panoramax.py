@@ -31,6 +31,7 @@ class Picture:
     producer: str | None = None  # who took it, for the credit
     sequence: str | None = None  # the series it was taken in, one after the other
     rank: int | None = None  # its place in that series
+    hd_url: str | None = None  # the original, full size (as the search gives it, not kept)
     roll: float = 0.0  # degrees its camera leaned to its right (a 360° picture: see level)
     pitch: float = 0.0  # degrees it raised its nose
 
@@ -73,6 +74,7 @@ def _parse(feature: dict) -> Picture:
         ),
         sequence=feature.get("collection"),
         rank=p.get("geovisio:rank_in_collection"),
+        hd_url=feature["assets"].get("hd", {}).get("href"),
     )
 
 

@@ -5,7 +5,9 @@ data/overrides/placings.jsonl (see placings). Local use only (see localpage)."""
 
 import sys
 import threading
+import time
 import traceback
+from collections import defaultdict
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from functools import lru_cache
@@ -23,8 +25,11 @@ from flaneur.registration import ViewOf
 
 PAGE = Path(__file__).with_name("placing_page.html")
 NEAR_M = queueing.NEAR_M  # the panoramas offered around a photo's spot (where proposals are made)
-SIDE = match.VIEW_SIDE
-KEPT_PICTURES = 8  # 360° pictures kept decoded (6 MB each)
+SHOWN = 2 * match.VIEW_SIDE  # a view's side as the page shows it: 1280 px, what 75° of a
+# panorama 6144 px around holds (see Sources.full)
+FULL_WIDTH = round(SHOWN * 360 / match.VIEW_FOV)  # 6144 px around: SHOWN px in a 75° view
+KEPT_PICTURES = 6  # 360° pictures kept decoded (57 MB each at FULL_WIDTH)
+RETRY_S = 60.0  # a larger picture not had (offline...) is asked for again after this
 
 
 @dataclass
@@ -39,6 +44,9 @@ class Sources:
     graph: dict[str, set[str]] = field(default_factory=dict)  # old neighbours, by photo
     # the photos proposed from the placed ones: {registration, carried_from}, by photo
     carried: Callable[[], dict[str, dict]] = dict
+    # a panorama's picture larger than its own (see SHOWN), the views shown cut from it; none to
+    # be had, its own
+    full: Callable[[str], np.ndarray | None] = lambda _: None
 
 
 class Around:
@@ -186,9 +194,31 @@ def serve(sources: Sources, port: int) -> HTTPServer:
                 }
             return proposals[photo_id, panorama]
 
+    fetching = defaultdict(threading.Lock)  # each larger picture fetched once at a time
+    missed: dict[str, float] = {}  # when one could not be had
+
     @lru_cache(maxsize=KEPT_PICTURES)
-    def picture(panorama: str) -> np.ndarray:
+    def larger(panorama: str) -> np.ndarray:  # only those had: one not had is asked again
+        found = sources.full(panorama)
+        if found is None or found.shape[1] != 2 * found.shape[0]:  # none, or not all around
+            missed[panorama] = time.monotonic()
+            raise LookupError(panorama)
+        return found
+
+    @lru_cache(maxsize=KEPT_PICTURES)
+    def own(panorama: str) -> np.ndarray:
         return cv2.imread(str(spheres[panorama].path))
+
+    def picture(panorama: str) -> np.ndarray:
+        """The panorama's larger picture, else its own (asked for the larger again RETRY_S
+        after it could not be had); one fetched never holds up the views of another."""
+        with fetching[panorama]:
+            if time.monotonic() - missed.get(panorama, -np.inf) >= RETRY_S:
+                try:
+                    return larger(panorama)
+                except LookupError:
+                    pass
+            return own(panorama)
 
     def photo_image(photo_id: str, flipped: bool) -> np.ndarray:
         image = cv2.imread(str(sources.photos[photo_id]["image"]))
@@ -197,7 +227,7 @@ def serve(sources: Sources, port: int) -> HTTPServer:
     def cut(panorama: str, view: ViewOf) -> np.ndarray:
         sphere = spheres[panorama]
         return match.perspective(
-            picture(panorama), sphere.axes, view.heading, view.fov, SIDE, view.pitch
+            picture(panorama), sphere.axes, view.heading, view.fov, SHOWN, view.pitch
         )
 
     def known(body: dict) -> tuple[str, match.Panorama | None]:
@@ -272,7 +302,7 @@ def serve(sources: Sources, port: int) -> HTTPServer:
                         np.array(body["photo_px"], float),
                         np.array(body["view_px"], float),
                         image.shape[:2],
-                        SIDE,
+                        SHOWN,
                         sphere.id,
                         ViewOf(**body["view"]),
                         sphere.axes,

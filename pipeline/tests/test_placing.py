@@ -102,7 +102,7 @@ def test_points_bunched_are_refused_with_the_reason(page, one):
         "panorama": "p1",
         "view": {"heading": 140.0},
         "photo_px": [[x * 80, y * 60] for x, y in bunched],
-        "view_px": [[x * SIDE, y * SIDE] for x, y in bunched],
+        "view_px": [[x * placing.SHOWN, y * placing.SHOWN] for x, y in bunched],
     }
 
     status, reason = one(sources, "POST", "/api/fit", body)
@@ -118,7 +118,7 @@ def test_points_clicked_give_the_registration_back(page, one):
         "panorama": "p1",
         "view": {"heading": 140.0},
         "photo_px": (SPREAD * [80, 60]).tolist(),
-        "view_px": (seen * SIDE).tolist(),
+        "view_px": (seen * placing.SHOWN).tolist(),  # clicked in the view as shown
     }
 
     status, answer = one(sources, "POST", "/api/fit", body)
@@ -142,7 +142,32 @@ def test_a_view_of_a_panorama_is_served_as_a_picture(page, one):
 
     status, jpeg = one(sources, "GET", "/view/p1?heading=140&pitch=5&fov=75")
 
-    assert status == 200 and cv2.imdecode(np.frombuffer(jpeg, np.uint8), 1).shape == (640, 640, 3)
+    assert status == 200
+    assert cv2.imdecode(np.frombuffer(jpeg, np.uint8), 1).shape == (placing.SHOWN, placing.SHOWN, 3)
+
+
+def test_a_view_is_cut_from_the_panoramas_picture_at_full_size_when_there_is_one(page, one):
+    sources, _ = page
+    sources.full = lambda panorama: np.zeros((1024, 2048, 3), np.uint8)  # black, unlike its own
+
+    _, jpeg = one(sources, "GET", "/view/p1?heading=140&pitch=5&fov=75")
+
+    assert cv2.imdecode(np.frombuffer(jpeg, np.uint8), 1).max() == 0
+
+
+def test_a_larger_picture_not_had_is_asked_again_and_its_own_shown_meanwhile(
+    page, ask, monkeypatch
+):
+    sources, _ = page
+    monkeypatch.setattr(placing, "RETRY_S", 0.0)  # asked again at once
+    had = iter([None, np.zeros((1024, 2048, 3), np.uint8)])  # offline, then back
+    sources.full = lambda panorama: next(had)
+    view = ("GET", "/view/p1?heading=140&pitch=5&fov=75", None)
+
+    (_, first), (_, second) = ask(placing.serve(sources, 0), view, view)
+
+    assert cv2.imdecode(np.frombuffer(first, np.uint8), 1).max() > 0  # its own
+    assert cv2.imdecode(np.frombuffer(second, np.uint8), 1).max() == 0
 
 
 def test_the_queue_leaves_out_photos_answered_and_puts_skipped_ones_last(page, tmp_path, one):
@@ -423,3 +448,23 @@ def test_a_photo_placed_on_an_image_it_no_longer_has_comes_back_to_be_seen_again
 
     head = json.loads(queue)["photo"]
     assert (head["id"], head["why"]) == ("pm:1", "revoir")
+
+
+def test_a_larger_picture_not_had_is_not_asked_again_at_once(page, ask):
+    sources, _ = page
+    asked = []
+    sources.full = lambda panorama: asked.append(panorama)  # never had: None
+    view = ("GET", "/view/p1?heading=140&pitch=5&fov=75", None)
+
+    ask(placing.serve(sources, 0), view, view, view)
+
+    assert asked == ["p1"]
+
+
+def test_a_picture_not_a_whole_sphere_is_not_taken_for_one(page, one):
+    sources, _ = page
+    sources.full = lambda panorama: np.zeros((800, 2048, 3), np.uint8)  # not 2:1: cut off
+
+    _, jpeg = one(sources, "GET", "/view/p1?heading=140&pitch=5&fov=75")
+
+    assert cv2.imdecode(np.frombuffer(jpeg, np.uint8), 1).max() > 0  # its own

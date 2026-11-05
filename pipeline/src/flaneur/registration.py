@@ -20,7 +20,8 @@ from flaneur.sources import number
 MIN_POINTS = 2  # clicked by hand: a camera's direction and zoom; each pair more refines it
 SHIFTED_FROM = 4  # pairs clicked from which the lens's shift off the print's middle is fitted
 MIN_SPREAD = 0.1  # share of the photo's diagonal the points clicked span: under it, bunched
-CLICKED_PX = 10.0  # a clicked pair farther than this from the others' fit counts for less
+CLICKED_OFF = 1 / 64  # a clicked pair farther than this (a share of the view's side: 10 px
+# of 640) from the others' fit counts for less, whatever size the view is shown at
 MIN_COVER = 0.25  # share of the photo inside the hull of the points matched: under it, bunched
 MIN_FRAME = 0.10  # share of the view the warped photo covers (Blanc, Produit, Ingensand 2018)
 MIN_MATCHED = 15  # matched automatically: as many agreeing (match.MIN_MATCHES for a view)
@@ -97,13 +98,14 @@ def _clicked(
     if len(photo_px) >= SHIFTED_FROM:
         start = np.append(start, [0.0, 0.0])
 
-    def off(x: np.ndarray) -> np.ndarray:  # in the view's pixels
+    clicked = view_px / side
+
+    def off(x: np.ndarray) -> np.ndarray:  # in shares of the view's side
         return (
-            cv2.perspectiveTransform(photo_px[None], _camera(x, photo_size, view))[0] * side
-            - view_px
+            cv2.perspectiveTransform(photo_px[None], _camera(x, photo_size, view))[0] - clicked
         ).ravel()
 
-    found = least_squares(off, start, loss="soft_l1", f_scale=CLICKED_PX, xtol=1e-12, ftol=1e-12)
+    found = least_squares(off, start, loss="soft_l1", f_scale=CLICKED_OFF, xtol=1e-12, ftol=1e-12)
     return np.diag([side, side, 1.0]) @ _camera(found.x, photo_size, view)
 
 
