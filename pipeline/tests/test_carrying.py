@@ -16,9 +16,13 @@ VIEW = ViewOf(heading=150.0)
 
 
 @pytest.fixture
-def placed():
-    seen = cv2.perspectiveTransform(SPREAD[None], H)[0] * SIDE
-    return registration.fit(SPREAD * [800, 600], seen, (600, 800), SIDE, "home", VIEW, HOME)[0]
+def placed():  # matched, any flat warp
+    grid = np.stack(np.meshgrid(np.linspace(0.1, 0.9, 6), np.linspace(0.1, 0.9, 6)), -1)
+    points = grid.reshape(-1, 2)
+    seen = cv2.perspectiveTransform(points[None], H)[0] * SIDE
+    return registration.fit(
+        points * [800, 600], seen, (600, 800), SIDE, "home", VIEW, HOME, robust=True
+    )[0]
 
 
 def _onto(points: np.ndarray, h: np.ndarray) -> np.ndarray:

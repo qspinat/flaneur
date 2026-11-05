@@ -49,27 +49,26 @@ const clickPairs = async (points) => {  // each point in the photo, then the sam
     await page.mouse.click(view.x + x * view.width, view.y + y * view.height);
   }
 };
-await clickPairs([[0.1, 0.1], [0.9, 0.1], [0.5, 0.8]]);
-await page.keyboard.press('Enter'); // three pairs only
+await clickPairs([[0.1, 0.1]]);
+await page.keyboard.press('Enter'); // one pair only
 await page.waitForTimeout(800);
-check(answers.length === 0, `three pairs and Entrée save nothing (${answers.map((a) => a.answer)})`);
+check(answers.length === 0, `one pair and Entrée save nothing (${answers.map((a) => a.answer)})`);
 check((await page.textContent('#message')).includes('paires'), 'the page says pairs are missing');
 
-// three more, six in all, that the server will not fit: Entrée gives its reason, not a count
-// already reached
+// two more that the server will not fit: Entrée gives its reason, not a count already reached
 await page.route('**/api/fit', (route) => route.fulfill({ status: 400, body: 'points trop groupés' }));
-await clickPairs([[0.1, 0.9], [0.9, 0.9], [0.5, 0.3]]);
+await clickPairs([[0.9, 0.1], [0.5, 0.8]]);
 await page.waitForTimeout(800);
 await page.locator('#message').evaluate((m) => { m.textContent = ''; }); // as if read and gone
 await page.keyboard.press('Enter');
 await page.waitForTimeout(800);
 const reason = await page.textContent('#message');
-check(answers.length === 0 && reason.includes('groupés'), `six refused pairs and Entrée give the reason (« ${reason} »)`);
+check(answers.length === 0 && reason.includes('groupés'), `refused pairs and Entrée give the reason (« ${reason} »)`);
 
-// a seventh pair that breaks the fit: the page says how to take it back
+// one pair more that breaks the fit: the page says how to take it back
 await clickPairs([[0.3, 0.6]]);
 await page.waitForTimeout(800);
 const back = await page.textContent('#message');
-check(back.includes('⌫'), `a seventh pair refused says ⌫ takes it back (« ${back} »)`);
+check(back.includes('⌫'), `a pair more refused says ⌫ takes it back (« ${back} »)`);
 await browser.close();
 process.exit(failed ? 1 : 0);

@@ -14,20 +14,58 @@ H = np.array([[0.6, 0.05, 0.2], [-0.02, 0.55, 0.25], [0.0001, 0.0002, 1.0]])
 SPREAD = np.array([[0.1, 0.1], [0.9, 0.1], [0.9, 0.9], [0.1, 0.9], [0.5, 0.4], [0.3, 0.7]])
 
 
-def _onto(points: np.ndarray, h: np.ndarray = H) -> np.ndarray:
+def _camera(turn, focal: float, centre=(400.0, 300.0), size=(600, 800)) -> np.ndarray:
+    """From the photo's [0, 1]² to VIEW's: a camera at the panorama turned by `turn` (a rotation
+    vector) from the view's, of `focal` pixels, its lens centred on `centre` (pixels)."""
+    h, w = size
+    rays = np.array([[1.0, 0.0, -centre[0]], [0.0, 1.0, -centre[1]], [0.0, 0.0, focal]])
+    view = np.array([[1.0, 0.0, -0.5], [0.0, 1.0, -0.5], [0.0, 0.0, match.focal(VIEW.fov, 1.0)]])
+    m = np.linalg.inv(view) @ cv2.Rodrigues(np.array(turn, float))[0] @ rays @ np.diag([w, h, 1])
+    return m / m[2, 2]
+
+
+CAMERA = _camera([0.05, -0.1, 0.03], 900.0)  # looking a little aside, the lens centred
+RAISED = _camera([0.05, -0.1, 0.03], 900.0, (430.0, 380.0))  # its lens raised and to the side
+
+
+def _onto(points: np.ndarray, h: np.ndarray = CAMERA) -> np.ndarray:
     return cv2.perspectiveTransform(points[None], h)[0]
 
 
-def _fit(points: np.ndarray, axes: np.ndarray = TILTED, view: ViewOf = VIEW, **kw):
+def _fit(points: np.ndarray, axes: np.ndarray = TILTED, view: ViewOf = VIEW, h=CAMERA, **kw):
     return registration.fit(
-        points * [800, 600], _onto(points) * SIDE, (600, 800), SIDE, "p1", view, axes, **kw
+        points * [800, 600], _onto(points, h) * SIDE, (600, 800), SIDE, "p1", view, axes, **kw
     )
 
 
-def test_a_known_warp_is_found_back_from_its_points():
-    r, _ = _fit(SPREAD)
+def _seen(r: registration.Registration) -> np.ndarray:
+    h = registration.in_view(r, VIEW, TILTED)
+    return h / h[2, 2]
 
-    assert np.allclose(registration.in_view(r, VIEW, TILTED), H, atol=1e-6)
+
+def test_a_camera_is_found_back_from_points_clicked():
+    r, kept = _fit(SPREAD, h=RAISED)
+
+    assert kept.all()
+    assert np.allclose(_seen(r), RAISED, atol=1e-6)
+
+
+def test_two_pairs_place_a_photo_by_its_direction_and_zoom():
+    r, _ = _fit(np.array([[0.2, 0.3], [0.8, 0.6]]))
+
+    assert np.allclose(_seen(r), CAMERA, atol=1e-6)
+
+
+def test_a_pair_clicked_off_moves_the_photo_but_never_folds_it():
+    # a detail near the camera shifts against those far away: its pair agrees with none
+    points = np.vstack([SPREAD, [[0.6, 0.8]]])
+    seen = _onto(points) * SIDE
+    seen[-1] += [70.0, -50.0]
+
+    r, _ = registration.fit(points * [800, 600], seen, (600, 800), SIDE, "p1", VIEW, TILTED)
+
+    assert registration.frame_ok(_seen(r))
+    assert np.abs(_onto(SPREAD, _seen(r)) - _onto(SPREAD)).max() * SIDE < 40
 
 
 def test_the_registration_does_not_depend_on_how_the_panorama_was_levelled():
@@ -46,32 +84,24 @@ def test_the_registration_does_not_depend_on_how_the_panorama_was_levelled():
     assert not np.allclose(in_new_view, seen * SIDE)  # the views did differ
 
 
-def test_fewer_than_six_points_are_refused():
-    with pytest.raises(registration.NotFitted, match="6"):
-        _fit(SPREAD[:5])
+def test_one_pair_is_refused():
+    with pytest.raises(registration.NotFitted, match="2"):
+        _fit(SPREAD[:1])
 
 
-@pytest.mark.parametrize(
-    "points",
-    [
-        np.array([[0.02, 0.02], [0.2, 0.03], [0.18, 0.2], [0.04, 0.17], [0.1, 0.1], [0.15, 0.06]]),
-        np.column_stack([np.linspace(0.1, 0.9, 6), np.linspace(0.2, 0.8, 6)]),  # on one line
-    ],
-    ids=["bunched in a corner", "on one line"],
-)
-def test_points_that_cover_too_little_of_the_photo_are_refused(points):
+def test_pairs_too_close_together_are_refused():
     with pytest.raises(registration.NotFitted, match="groupés"):
-        _fit(points)
+        _fit(np.array([[0.5, 0.5], [0.53, 0.52], [0.51, 0.55]]))
 
 
 def test_points_clicked_across_the_middle_of_a_mounted_print_are_fitted():
     # a print on its card: the details one can match lie in a band across its middle
     band = np.array([[0.3, 0.35], [0.7, 0.35], [0.7, 0.65], [0.3, 0.65], [0.5, 0.45], [0.4, 0.6]])
 
-    r, kept = _fit(band)
+    r, kept = _fit(band, h=RAISED)
 
     assert kept.all()
-    assert np.allclose(registration.in_view(r, VIEW, TILTED), H, atol=1e-6)
+    assert np.allclose(_seen(r), RAISED, atol=1e-6)
 
 
 def test_points_matched_in_that_band_alone_are_still_refused():
@@ -83,7 +113,7 @@ def test_points_matched_in_that_band_alone_are_still_refused():
 
 def test_matched_points_are_fitted_robustly_and_their_outliers_left_out():
     points = np.vstack([SPREAD, np.random.default_rng(1).uniform(0.05, 0.95, (30, 2))])
-    view = _onto(points) * SIDE
+    view = _onto(points, H) * SIDE  # matched points: any flat warp
     view[:4] += 80  # four wrong matches
 
     r, kept = registration.fit(

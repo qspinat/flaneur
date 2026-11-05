@@ -12,14 +12,16 @@ from dataclasses import asdict, dataclass
 
 import cv2
 import numpy as np
+from scipy.optimize import least_squares
 
 from flaneur import match
 from flaneur.sources import number
 
-MIN_POINTS = 6  # clicked by hand: Smapshot, Bae et al. and IGN settle at 6 to 8
-MIN_COVER = 0.25  # share of the photo inside the hull of the points fitted: under it, bunched
-MIN_CLICKED_COVER = 0.05  # clicked by hand, the user sees the photo laid: only a corner (0.03)
-# or a line refused, not a band across a print's middle (0.12) on its mount
+MIN_POINTS = 2  # clicked by hand: a camera's direction and zoom; each pair more refines it
+SHIFTED_FROM = 4  # pairs clicked from which the lens's shift off the print's middle is fitted
+MIN_SPREAD = 0.1  # share of the photo's diagonal the points clicked span: under it, bunched
+CLICKED_PX = 10.0  # a clicked pair farther than this from the others' fit counts for less
+MIN_COVER = 0.25  # share of the photo inside the hull of the points matched: under it, bunched
 MIN_FRAME = 0.10  # share of the view the warped photo covers (Blanc, Produit, Ingensand 2018)
 MIN_MATCHED = 15  # matched automatically: as many agreeing (match.MIN_MATCHES for a view)
 MATCHED_PX = 3.0  # a matched pair farther than this from the others' homography is left out
@@ -54,8 +56,55 @@ class NotFitted(ValueError):
 def _to_camera(view: ViewOf, axes: np.ndarray) -> np.ndarray:
     """From a view's [0, 1]² to directions in the frame of the 360° picture of these `axes`:
     the rays of match.view_directions, whatever the view's size (in units of its side)."""
-    local = np.array([[1.0, 0.0, -0.5], [0.0, 1.0, -0.5], [0.0, 0.0, match.focal(view.fov, 1.0)]])
-    return axes @ match._view_axes(view.heading, view.pitch).T @ local
+    return axes @ match._view_axes(view.heading, view.pitch).T @ _rays(view)
+
+
+def _rays(view: ViewOf) -> np.ndarray:
+    """From a view's [0, 1]² to directions in its own camera's frame (x right, y down)."""
+    return np.array([[1.0, 0.0, -0.5], [0.0, 1.0, -0.5], [0.0, 0.0, match.focal(view.fov, 1.0)]])
+
+
+def _camera(x: np.ndarray, photo_size: tuple[int, int], view: ViewOf) -> np.ndarray:
+    """From the photo's pixels to the view's [0, 1]²: a camera standing at the panorama, turned
+    from the view's by the rotation vector x[:3], of focal length exp(x[3]) pixels, its lens
+    shifted off the photo's middle by x[4:6] (shares of its width and height), else centred."""
+    h, w = photo_size
+    shift = x[4:6] if len(x) > 4 else (0.0, 0.0)
+    cx, cy = (0.5 + np.asarray(shift)) * [w, h]
+    rays = np.array([[1.0, 0.0, -cx], [0.0, 1.0, -cy], [0.0, 0.0, np.exp(x[3])]])
+    return np.linalg.inv(_rays(view)) @ cv2.Rodrigues(x[:3])[0] @ rays
+
+
+def _clicked(
+    photo_px: np.ndarray, view_px: np.ndarray, photo_size: tuple[int, int], side: int, view: ViewOf
+) -> np.ndarray:
+    """The camera (see _camera) through pairs clicked by hand, from the photo's pixels to the
+    view's: its lens shift fitted from SHIFTED_FROM pairs; a pair far from the others' fit (a
+    detail near the camera, which shifts against those far off) counts for less."""
+    h, w = photo_size
+    seen = np.column_stack([view_px / side, np.ones(len(view_px))]) @ _rays(view).T
+    seen /= np.linalg.norm(seen, axis=1, keepdims=True)
+
+    def turned(focal: float) -> tuple[float, np.ndarray]:  # the rotation best for a focal
+        rays = np.column_stack([photo_px - [w / 2, h / 2], np.full(len(photo_px), focal)])
+        rays /= np.linalg.norm(rays, axis=1, keepdims=True)
+        u, _, vt = np.linalg.svd(seen.T @ rays)
+        r = u @ np.diag([1.0, 1.0, np.linalg.det(u @ vt)]) @ vt
+        return float(np.sum((seen - rays @ r.T) ** 2)), r
+
+    focal = min(np.geomspace(0.2, 5.0, 25) * max(w, h), key=lambda f: turned(f)[0])
+    start = np.append(cv2.Rodrigues(turned(focal)[1])[0].ravel(), np.log(focal))
+    if len(photo_px) >= SHIFTED_FROM:
+        start = np.append(start, [0.0, 0.0])
+
+    def off(x: np.ndarray) -> np.ndarray:  # in the view's pixels
+        return (
+            cv2.perspectiveTransform(photo_px[None], _camera(x, photo_size, view))[0] * side
+            - view_px
+        ).ravel()
+
+    found = least_squares(off, start, loss="soft_l1", f_scale=CLICKED_PX, xtol=1e-12, ftol=1e-12)
+    return np.diag([side, side, 1.0]) @ _camera(found.x, photo_size, view)
 
 
 def of(panorama: str, m: np.ndarray, view: ViewOf, axes: np.ndarray) -> Registration:
@@ -78,28 +127,33 @@ def fit(
 ) -> tuple[Registration, np.ndarray]:
     """The registration through pairs of points, in the photo (`photo_px`, of `photo_size`:
     height, width) and in a view (`view_px`, `side` pixels square) cut from a panorama of these
-    `axes`; and which pairs it kept. Clicked by hand, every pair as the user meant it; matched
-    (`robust`), those that agree, the others left out."""
+    `axes`; and which pairs it kept. Clicked by hand, a camera turned and zoomed through all of
+    them (see _clicked), which never folds the photo; matched (`robust`), any flat warp through
+    those that agree, the others left out."""
     photo_px, view_px = np.asarray(photo_px, float), np.asarray(view_px, float)
     photo = photo_px / [photo_size[1], photo_size[0]]
     if np.any((photo < 0) | (photo > 1)) or np.any((view_px < 0) | (view_px > side)):
         raise NotFitted("des points tombent hors de la photo ou de la vue")
     kept = np.ones(len(photo), bool)
-    h = None
-    if len(photo) >= 4:  # fitted in pixels: MAGSAC's threshold is in pixels
-        method = cv2.USAC_MAGSAC if robust else 0
-        h, mask = cv2.findHomography(photo_px, view_px, method, MATCHED_PX)
-        if robust and mask is not None:
-            kept = mask.ravel().astype(bool)
-    if robust and kept.sum() < MIN_MATCHED:
-        raise NotFitted(f"il faut au moins {MIN_MATCHED} points qui s'accordent")
-    if kept.sum() < MIN_POINTS:
-        raise NotFitted(f"il faut au moins {MIN_POINTS} paires de points")
-    cover = cv2.contourArea(cv2.convexHull(photo[kept].astype(np.float32)))
-    if cover < (MIN_COVER if robust else MIN_CLICKED_COVER):
-        raise NotFitted("points trop groupés : les répartir sur toute la photo")
-    if h is None:
-        raise NotFitted("ces points ne donnent aucune déformation de la photo")
+    if robust:
+        h = None
+        if len(photo) >= 4:  # fitted in pixels: MAGSAC's threshold is in pixels
+            h, mask = cv2.findHomography(photo_px, view_px, cv2.USAC_MAGSAC, MATCHED_PX)
+            if mask is not None:
+                kept = mask.ravel().astype(bool)
+        if kept.sum() < MIN_MATCHED:
+            raise NotFitted(f"il faut au moins {MIN_MATCHED} points qui s'accordent")
+        if cv2.contourArea(cv2.convexHull(photo[kept].astype(np.float32))) < MIN_COVER:
+            raise NotFitted("points trop groupés : les répartir sur toute la photo")
+        if h is None:
+            raise NotFitted("ces points ne donnent aucune déformation de la photo")
+    else:
+        if len(photo) < MIN_POINTS:
+            raise NotFitted(f"il faut au moins {MIN_POINTS} paires de points")
+        apart = np.linalg.norm(photo_px[:, None] - photo_px[None], axis=2).max()
+        if apart < MIN_SPREAD * np.hypot(*photo_size):
+            raise NotFitted("points trop groupés : les écarter sur la photo")
+        h = _clicked(photo_px, view_px, photo_size, side, view)
     in_unit = np.diag([1 / side, 1 / side, 1.0]) @ h @ np.diag([photo_size[1], photo_size[0], 1.0])
     if not frame_ok(in_unit):
         raise NotFitted("la photo se replie, se retourne ou sort presque de la vue")

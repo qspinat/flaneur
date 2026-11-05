@@ -96,7 +96,7 @@ def test_a_fit_without_a_registration_is_refused_with_the_reason(page, one):
 
 def test_points_bunched_are_refused_with_the_reason(page, one):
     sources, _ = page
-    bunched = (SPREAD * 0.15).tolist()
+    bunched = (SPREAD * 0.05).tolist()
     body = {
         "photo_id": "pm:1",
         "panorama": "p1",

@@ -15,6 +15,7 @@ dependencies = [
     "pycolmap>=4.2.1",
     "pyproj>=3.8.0",
     "python-dotenv>=1.2.4",
+    "scipy>=1.18.1",
     "shapely>=2.2.0",
     "torch>=2.15.0",
     "typer>=0.27.3",
