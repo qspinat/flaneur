@@ -8,6 +8,7 @@ facade) or a photographer standing at the panorama; a street in depth lines up o
 Points are in pixels with a pixel's corners at whole numbers (as a browser's clicks are), and
 normalised to [0, 1] by the picture's width and height, x right, y down."""
 
+from collections.abc import Callable
 from dataclasses import asdict, dataclass
 
 import cv2
@@ -23,6 +24,13 @@ MIN_SPREAD = 0.1  # share of the photo's diagonal the points clicked span: under
 CLICKED_OFF = 1 / 64  # a clicked pair farther than this (a share of the view's side: 10 px
 # of 640) from the others' fit counts for less, whatever size the view is shown at
 MIN_COVER = 0.25  # share of the photo inside the hull of the points matched: under it, bunched
+MIN_STANDING = 4  # pairs with a depth a camera standing off the panorama is fitted from
+STANDING_SHIFTED_FROM = 6  # and its lens shift too
+STANDING_OFF = 0.01  # a pair this far (share of the photo's diagonal: 10 px of 1000) counts less
+STANDING_FOCAL = (0.2, 5.0)  # times the photo's longer side, as the flat fit's: beyond, the
+# camera slid along its axis (a longer lens traded for a farther stand)
+PANORAMA_HEIGHT_M = 2.5  # a panorama's camera above the street (Panoramax cars): the ground
+TRIPOD_M = 1.5  # a standing camera is first looked for this high above the street
 MIN_FRAME = 0.10  # share of the view the warped photo covers (Blanc, Produit, Ingensand 2018)
 MIN_MATCHED = 15  # matched automatically: as many agreeing (match.MIN_MATCHES for a view)
 MATCHED_PX = 3.0  # a matched pair farther than this from the others' homography is left out
@@ -65,13 +73,17 @@ def _rays(view: ViewOf) -> np.ndarray:
     return np.array([[1.0, 0.0, -0.5], [0.0, 1.0, -0.5], [0.0, 0.0, match.focal(view.fov, 1.0)]])
 
 
+def _centre(shift, size: tuple[int, int]) -> np.ndarray:
+    """Where a lens shifted by `shift` (shares of the photo's width, height) centres the photo
+    of `size` (height, width), in its pixels."""
+    return (0.5 + np.asarray(shift, float)) * [size[1], size[0]]
+
+
 def _camera(x: np.ndarray, photo_size: tuple[int, int], view: ViewOf) -> np.ndarray:
     """From the photo's pixels to the view's [0, 1]²: a camera standing at the panorama, turned
     from the view's by the rotation vector x[:3], of focal length exp(x[3]) pixels, its lens
     shifted off the photo's middle by x[4:6] (shares of its width and height), else centred."""
-    h, w = photo_size
-    shift = x[4:6] if len(x) > 4 else (0.0, 0.0)
-    cx, cy = (0.5 + np.asarray(shift)) * [w, h]
+    cx, cy = _centre(x[4:6] if len(x) > 4 else (0.0, 0.0), photo_size)
     rays = np.array([[1.0, 0.0, -cx], [0.0, 1.0, -cy], [0.0, 0.0, np.exp(x[3])]])
     return np.linalg.inv(_rays(view)) @ cv2.Rodrigues(x[:3])[0] @ rays
 
@@ -160,6 +172,206 @@ def fit(
     if not frame_ok(in_unit):
         raise NotFitted("la photo se replie, se retourne ou sort presque de la vue")
     return of(panorama, _to_camera(view, axes) @ in_unit, view, axes), kept
+
+
+@dataclass(frozen=True)
+class Standing:
+    """An old photo's camera where the photographer stood (not at the panorama): its position
+    (Lambert-93 x, y, and height as the panoramas', see cli._spheres), its turn (a rotation
+    vector, from the world, east-north-up, to the camera: x right, y down, z ahead), its focal
+    length (photo pixels), its lens shifted off the photo's middle (shares of its width,
+    height), for a photo of `size` (height, width)."""
+
+    position: tuple[float, float, float]
+    turn: tuple[float, float, float]
+    focal: float
+    shift: tuple[float, float]
+    size: tuple[int, int]
+
+    def _lens(self) -> np.ndarray:
+        cx, cy = _centre(self.shift, self.size)
+        return np.array([[self.focal, 0.0, cx], [0.0, self.focal, cy], [0.0, 0.0, 1.0]])
+
+    def project(self, world: np.ndarray) -> np.ndarray:
+        """Where points of the world fall in the photo (pixels; behind it, NaN)."""
+        seen = (world - self.position) @ cv2.Rodrigues(np.array(self.turn))[0].T @ self._lens().T
+        with np.errstate(divide="ignore", invalid="ignore"):
+            return np.where(seen[:, 2:] > 0, seen[:, :2] / seen[:, 2:], np.nan)
+
+    def rays(self, pixels: np.ndarray) -> np.ndarray:
+        """The world directions (unit) of pixels of the photo."""
+        local = np.column_stack([pixels, np.ones(len(pixels))]) @ np.linalg.inv(self._lens()).T
+        world = local @ cv2.Rodrigues(np.array(self.turn))[0]
+        return world / np.linalg.norm(world, axis=1, keepdims=True)
+
+
+def standing_to_json(s: Standing) -> dict:
+    return asdict(s)
+
+
+def standing_from_json(d: dict) -> Standing:
+    """A standing camera as written (by a page too: checked)."""
+    numbers = [*d["position"], *d["turn"], d["focal"], *d["shift"]]
+    sizes = (len(d["position"]), len(d["turn"]), len(d["shift"]), len(d["size"]))
+    whole = all(isinstance(n, int) and n > 0 for n in d["size"])
+    if sizes != (3, 3, 2, 2) or not all(map(number, numbers)) or not whole:
+        raise ValueError("une caméra debout a une position, une orientation, une focale, un cadre")
+    return Standing(
+        tuple(float(x) for x in d["position"]),
+        tuple(float(x) for x in d["turn"]),
+        float(d["focal"]),
+        tuple(float(x) for x in d["shift"]),
+        tuple(d["size"]),
+    )
+
+
+def start_of(r: Registration, axes: np.ndarray, size: tuple[int, int]) -> tuple:
+    """The camera a flat registration is (standing at the panorama): its turn (rotation vector,
+    world to camera), focal length and lens shift, as Standing keeps them."""
+    h, w = size
+    to_world = axes.T @ r.matrix @ np.diag([1 / w, 1 / h, 1.0])  # photo pixels to world rays
+    _, lens, turn, *_ = cv2.RQDecomp3x3(np.linalg.inv(to_world))  # (angles, R, Q, ...)
+    signs = np.diag(np.sign(np.diag(lens)))  # a positive focal length and depth
+    lens, turn = lens @ signs, signs @ turn
+    turn = turn * np.sign(np.linalg.det(turn))  # a rotation, not a mirror (lens: scaled below)
+    lens = lens / lens[2, 2]
+    focal = (lens[0, 0] + lens[1, 1]) / 2
+    shift = (lens[0, 2] / w - 0.5, lens[1, 2] / h - 0.5)
+    return cv2.Rodrigues(turn)[0].ravel(), float(focal), np.array(shift)
+
+
+def fit_standing(
+    photo_px: np.ndarray,
+    world: np.ndarray,
+    size: tuple[int, int],
+    start: Registration,
+    axes: np.ndarray,
+    pin: tuple[float, float],
+    ground: float,
+) -> tuple[Standing, np.ndarray]:
+    """The camera where the photographer stood, through pairs clicked by hand whose panorama
+    point has a depth (`world`: those points; NaN rows, none: left out), and which pairs it
+    used. It starts from the flat fit `start`, at the user's `pin` on a tripod; it stands within
+    match.MOST_MOVED_M of the pin, match.STREET_HEIGHT_M above the `ground`; its lens shift is
+    fitted from STANDING_SHIFTED_FROM pairs; a pair far from the others counts for less
+    (STANDING_OFF of the photo's diagonal)."""
+    photo_px, world = np.asarray(photo_px, float), np.asarray(world, float)
+    inside = (photo_px >= 0) & (photo_px <= [size[1], size[0]])
+    if not inside.all():
+        raise NotFitted("des points tombent hors de la photo")
+    used = ~np.isnan(world).any(axis=1)
+    if used.sum() < MIN_STANDING:
+        raise NotFitted(f"il faut au moins {MIN_STANDING} paires avec une profondeur")
+    clicked, points = photo_px[used], world[used]
+    diagonal = np.hypot(*size)
+    turn, focal, shift = start_of(start, axes, size)
+    low_z, high_z = (ground + m for m in match.STREET_HEIGHT_M)
+    low_f, high_f = (np.log(k * max(size)) for k in STANDING_FOCAL)
+    x0 = [*turn, np.clip(np.log(focal), low_f + 0.01, high_f - 0.01), *pin, ground + TRIPOD_M]
+    low = [-np.inf] * 3 + [low_f, pin[0] - match.MOST_MOVED_M, pin[1] - match.MOST_MOVED_M, low_z]
+    high = [np.inf] * 3 + [high_f, pin[0] + match.MOST_MOVED_M, pin[1] + match.MOST_MOVED_M, high_z]
+    shifted = used.sum() >= STANDING_SHIFTED_FROM
+    if shifted:
+        x0, low, high = [*x0, *np.clip(shift, -0.45, 0.45)], [*low, -0.5, -0.5], [*high, 0.5, 0.5]
+
+    def camera(x: np.ndarray) -> Standing:
+        return Standing(
+            tuple(x[4:7]),
+            tuple(x[:3]),
+            float(np.exp(x[3])),
+            tuple(x[7:9]) if shifted else (0.0, 0.0),
+            size,
+        )
+
+    def off(x: np.ndarray) -> np.ndarray:  # in shares of the photo's diagonal
+        seen = camera(x).project(points)
+        return (np.nan_to_num(seen, nan=1e6) - clicked).ravel() / diagonal
+
+    found = least_squares(
+        off, x0, bounds=(low, high), loss="soft_l1", f_scale=STANDING_OFF, xtol=1e-12, ftol=1e-12
+    )
+    at_limit = np.minimum(found.x[3:7] - low[3:7], np.array(high[3:7]) - found.x[3:7]) < 0.01
+    if at_limit[0]:
+        raise NotFitted("la focale trouvée bute sur ses limites : vérifier les paires")
+    if at_limit[1:].any():
+        raise NotFitted("la position trouvée bute sur ses limites : vérifier les paires")
+    return camera(found.x), used
+
+
+def errors_flat(
+    r: Registration,
+    photo_px: np.ndarray,
+    view_px: np.ndarray,
+    size: tuple[int, int],
+    side: int,
+    view: ViewOf,
+    axes: np.ndarray,
+) -> np.ndarray:
+    """For each pair, how far from its photo point the flat fit puts its view point (shares of
+    the photo's diagonal)."""
+    h, w = size
+    back = np.linalg.inv(in_view(r, view, axes))  # the view's [0, 1]² to the photo's
+    seen = cv2.perspectiveTransform((np.asarray(view_px, float) / side)[None], back)[0] * [w, h]
+    return np.linalg.norm(seen - photo_px, axis=1) / np.hypot(*size)
+
+
+def errors_standing(s: Standing, photo_px: np.ndarray, world: np.ndarray) -> np.ndarray:
+    """For each pair, how far from its photo point the standing camera sees its panorama point
+    (shares of the photo's diagonal; NaN for a pair without depth)."""
+    return np.linalg.norm(s.project(world) - photo_px, axis=1) / np.hypot(*s.size)
+
+
+def _held_out(pairs: np.ndarray, refit: Callable, error: Callable) -> np.ndarray:
+    """Each pair's error (`error(fitted, i)`) by the fit made without it (`refit(i)`): NaN for
+    pairs not in `pairs`, infinite where that fit is refused (the worst, never left out)."""
+    found = np.full(len(pairs), np.nan)
+    for i in np.flatnonzero(pairs):
+        try:
+            found[i] = error(refit(i), i)
+        except NotFitted:
+            found[i] = np.inf
+    return found
+
+
+def held_out_flat(
+    photo_px: np.ndarray,
+    view_px: np.ndarray,
+    size: tuple[int, int],
+    side: int,
+    view: ViewOf,
+    axes: np.ndarray,
+) -> np.ndarray:
+    """Each pair's error by the flat fit made without it (infinite when it is refused)."""
+    others = ~np.eye(len(photo_px), dtype=bool)
+    return _held_out(
+        np.ones(len(photo_px), bool),
+        lambda i: fit(photo_px[others[i]], view_px[others[i]], size, side, "", view, axes)[0],
+        lambda r, i: errors_flat(r, photo_px[[i]], view_px[[i]], size, side, view, axes)[0],
+    )
+
+
+def held_out_standing(
+    photo_px: np.ndarray,
+    world: np.ndarray,
+    size: tuple[int, int],
+    start: Registration,
+    axes: np.ndarray,
+    pin: tuple[float, float],
+    ground: float,
+) -> np.ndarray:
+    """Each pair's error by the standing camera fitted without it (NaN without depth, infinite
+    when that fit is refused)."""
+
+    def without(i: int) -> Standing:
+        rest = world.copy()
+        rest[i] = np.nan
+        return fit_standing(photo_px, rest, size, start, axes, pin, ground)[0]
+
+    return _held_out(
+        ~np.isnan(world).any(axis=1),
+        without,
+        lambda s, i: errors_standing(s, photo_px[[i]], world[[i]])[0],
+    )
 
 
 def in_view(r: Registration, view: ViewOf, axes: np.ndarray) -> np.ndarray:

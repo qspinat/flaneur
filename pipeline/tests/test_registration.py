@@ -257,3 +257,146 @@ def test_a_photo_partly_behind_the_view_is_not_drawn():
 def test_a_registration_written_wrong_is_refused(m):
     with pytest.raises(ValueError, match="9 nombres"):
         registration.from_json({"panorama": "p1", "m": m, "view": {"heading": 0.0}})
+
+
+# --- a camera standing where the photographer stood, off the panorama
+
+SIZE = (600, 800)  # the photo: height, width
+GROUND = -2.5  # the street, under the panorama's camera
+NORTH = ViewOf(heading=0.0)  # the panorama's view up the street
+LEVEL = match.camera_axes(0.0)  # the panorama, level and facing north
+FACING_NORTH = np.array([[1.0, 0.0, 0.0], [0.0, 0.0, -1.0], [0.0, 1.0, 0.0]])  # world to camera
+TILT = cv2.Rodrigues(np.array([0.03, -0.05, 0.02]))[0]  # and turned a little
+STANDING = registration.Standing(
+    position=(1.0, -2.0, GROUND + 1.5),  # 3 m from the panorama, on a tripod
+    turn=tuple(cv2.Rodrigues(TILT @ FACING_NORTH)[0].ravel()),
+    focal=500.0,  # a wide lens: 77° across
+    shift=(0.02, -0.08),  # its lens raised
+    size=SIZE,
+)
+
+
+def _street_points() -> np.ndarray:
+    """Details on walls 8 m apart, from 6 to 40 m up the street, from the street to 8 m."""
+    rows = [[x, y, z] for x in (-4.0, 4.0) for y in (6.0, 12.0, 25.0, 40.0) for z in (-1.5, 2.0)]
+    return np.array(rows + [[-2.0, 40.0, 6.0], [2.0, 40.0, 1.0]])
+
+
+def _clicked_both(world: np.ndarray):
+    """The details as clicked: in the photo, and in the panorama's view up the street."""
+    photo_px = STANDING.project(world)
+    own = (world / np.linalg.norm(world, axis=1, keepdims=True)) @ LEVEL.T
+    return photo_px, registration.view_pixels(own, NORTH, LEVEL, SIDE)
+
+
+def _standing_fit(world: np.ndarray, pin=(1.5, -1.0)):
+    """The standing camera through the details clicked (those with no depth too)."""
+    usable = ~np.isnan(world).any(axis=1)
+    photo_px = np.full((len(world), 2), 400.0)  # clicked, though no depth is known
+    photo_px[usable], view_px = _clicked_both(world[usable])
+    flat, _ = registration.fit(photo_px[usable], view_px, SIZE, SIDE, "p", NORTH, LEVEL)
+    return registration.fit_standing(photo_px, world, SIZE, flat, LEVEL, pin, GROUND)
+
+
+def test_a_camera_standing_off_the_panorama_is_found_back():
+    found, used = _standing_fit(_street_points())
+
+    assert used.all()
+    assert np.allclose(found.position, STANDING.position, atol=0.05)
+    turned = cv2.Rodrigues(np.array(found.turn))[0].T @ cv2.Rodrigues(np.array(STANDING.turn))[0]
+    assert np.degrees(np.arccos((np.trace(turned) - 1) / 2)) < 0.1
+    assert found.focal == pytest.approx(STANDING.focal, rel=0.005)
+
+
+def test_the_flat_fit_cannot_line_up_near_and_far_where_the_standing_one_does():
+    world = _street_points()
+    axes = LEVEL
+    photo_px, view_px = _clicked_both(world)
+    flat, _ = registration.fit(photo_px, view_px, SIZE, SIDE, "p", NORTH, axes)
+
+    flat_off = registration.held_out_flat(photo_px, view_px, SIZE, SIDE, NORTH, axes)
+    standing_off = registration.held_out_standing(
+        photo_px, world, SIZE, flat, axes, (1.5, -1.0), GROUND
+    )
+
+    assert np.nanmedian(flat_off) > 5 * np.nanmedian(standing_off)
+
+
+def test_pairs_without_depth_are_left_out_and_counted():
+    world = _street_points()
+    world[[0, 5]] = np.nan  # a click on the sky, a detail no neighbour sees
+
+    _, used = _standing_fit(world)
+
+    assert not used[[0, 5]].any() and used.sum() == len(world) - 2
+
+
+def test_too_few_pairs_with_depth_are_refused():
+    world = _street_points()
+    world[3:] = np.nan
+
+    with pytest.raises(registration.NotFitted, match="4"):
+        _standing_fit(world)
+
+
+def test_a_position_at_its_limits_is_refused():
+    with pytest.raises(registration.NotFitted, match="limites"):
+        _standing_fit(_street_points(), pin=(81.0, -2.0))
+
+
+def test_a_flat_fit_gives_back_its_camera():
+    at_panorama = registration.Standing((0.0, 0.0, 0.0), STANDING.turn, 500.0, (0.02, -0.08), SIZE)
+    world = _street_points()
+    photo_px = at_panorama.project(world)
+    axes = LEVEL
+    view_px = _clicked_both(world)[1]
+    flat, _ = registration.fit(photo_px, view_px, SIZE, SIDE, "p", NORTH, axes)
+
+    turn, focal, shift = registration.start_of(flat, axes, SIZE)
+
+    assert np.allclose(turn, at_panorama.turn, atol=1e-4)
+    assert focal == pytest.approx(500.0, rel=1e-4) and np.allclose(shift, (0.02, -0.08), atol=1e-4)
+
+
+def test_a_standing_camera_survives_json():
+    assert registration.standing_from_json(registration.standing_to_json(STANDING)) == STANDING
+
+
+def test_a_focal_length_at_its_limits_is_refused_for_what_it_is(monkeypatch):
+    monkeypatch.setattr(registration, "STANDING_FOCAL", (0.2, 0.4))  # 500 px is out of reach
+
+    with pytest.raises(registration.NotFitted, match="focale"):
+        _standing_fit(_street_points())
+
+
+def test_a_refit_refused_counts_as_the_worst_not_as_no_depth():
+    world = _street_points()
+    world[[0, 5]] = np.nan
+    usable = ~np.isnan(world).any(axis=1)
+    photo_px = np.full((len(world), 2), 400.0)
+    photo_px[usable], view_px = _clicked_both(world[usable])
+    flat, _ = registration.fit(photo_px[usable], view_px, SIZE, SIDE, "p", NORTH, LEVEL)
+
+    off = registration.held_out_standing(photo_px, world, SIZE, flat, LEVEL, (81.0, -2.0), GROUND)
+
+    assert np.isnan(off[~usable]).all() and np.isinf(off[usable]).all()  # no depth / refused
+
+
+@pytest.mark.parametrize(
+    "written",
+    [{"shift": [float("nan"), 0.0]}, {"size": [0, 0]}, {"size": [599.9, 800]}],
+    ids=["shift not a number", "no size", "size not whole"],
+)
+def test_a_standing_camera_written_wrong_is_refused(written):
+    with pytest.raises(ValueError):
+        registration.standing_from_json({**registration.standing_to_json(STANDING), **written})
+
+
+def test_a_click_outside_the_photo_is_refused():
+    world = _street_points()
+    photo_px, view_px = _clicked_both(world)
+    flat, _ = registration.fit(photo_px, view_px, SIZE, SIDE, "p", NORTH, LEVEL)
+    photo_px[0] = [-50.0, 10.0]
+
+    with pytest.raises(registration.NotFitted, match="hors"):
+        registration.fit_standing(photo_px, world.tolist(), SIZE, flat, LEVEL, (1.5, -1.0), GROUND)
