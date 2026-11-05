@@ -37,6 +37,7 @@
          pointer-events: none; box-shadow: 0 0 0 2px #111; }
   .dot.waiting { background: #fff; }
   #foot { padding: 8px 12px; display: flex; gap: 10px; align-items: center; }
+  #fade:disabled { opacity: 0.35; }
   input[type=range] { width: 220px; }
 </style>
 </head>
@@ -85,6 +86,15 @@ const say = (text) => { $('message').textContent = text || ''; };
 function shown(img, url) {
   if (img.src.startsWith('blob:')) URL.revokeObjectURL(img.src);
   img.src = url || '';
+  fadeable();
+}
+/** The slider fades the old photo laid on today's view: until there is one, it says so. */
+function fadeable() {
+  const none = !$(pairing ? 'view-laid' : 'laid').getAttribute('src');
+  $('fade').disabled = none;
+  $('fade').title = !none ? ''
+    : pairing ? refused || `Rien à superposer avant ${rules.min_points} paires de points`
+    : 'Rien à superposer : pas de proposition (F pour poser par points)';
 }
 const post = async (url, body) => {
   const r = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -213,6 +223,7 @@ function leavePairing() {
   pairing = false; $('pair').classList.remove('on');
   $('square').style.display = ''; $('pinned').style.display = '';
   document.querySelectorAll('.dot').forEach((d) => d.remove()); $('points-help').textContent = '';
+  fadeable();
 }
 function help() {
   $('points-help').textContent = pairing
@@ -268,7 +279,11 @@ async function fitPairs() {
       photo_px: pairs.map((p) => p[0]), view_px: pairs.map((p) => p[1]) });
     made = 'points'; say('Recalée : Entrée pour garder, ou continuer à ajouter des points.');
     shown($('view-laid'), await post('/api/composite', { photo_id: photo.id, registration: proposal, flipped }));
-  } catch (error) { proposal = null; shown($('view-laid'), ''); refused = error.message; say(refused); }
+  } catch (error) {
+    proposal = null;
+    refused = error.message + (pairs.length > rules.min_points ? ' — ⌫ reprend la dernière paire' : '');
+    shown($('view-laid'), ''); say(refused);
+  }
 }
 
 // --- answers

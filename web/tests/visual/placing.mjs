@@ -29,6 +29,7 @@ check(await page.locator('#pair.on').waitFor({ timeout: 15000 }).then(() => true
   'with no proposal, the page opens on points');
 const told = await page.textContent('#message');
 check(!told.includes('F pour'), `and does not send the user away from them (« ${told} »)`);
+check(await page.locator('#fade').isDisabled(), 'and its slider says there is nothing to fade yet');
 await page.unroute('**/api/proposal/**');
 
 // every panorama offers a proposal (as matching would), on the photo shown
@@ -64,5 +65,11 @@ await page.keyboard.press('Enter');
 await page.waitForTimeout(800);
 const reason = await page.textContent('#message');
 check(answers.length === 0 && reason.includes('groupés'), `six refused pairs and Entrée give the reason (« ${reason} »)`);
+
+// a seventh pair that breaks the fit: the page says how to take it back
+await clickPairs([[0.3, 0.6]]);
+await page.waitForTimeout(800);
+const back = await page.textContent('#message');
+check(back.includes('⌫'), `a seventh pair refused says ⌫ takes it back (« ${back} »)`);
 await browser.close();
 process.exit(failed ? 1 : 0);
