@@ -3,7 +3,7 @@
 import pytest
 
 from flaneur import placings
-from flaneur.registration import Registration, ViewOf
+from flaneur.registration import Registration, Standing, ViewOf, standing_to_json
 
 R = Registration("p1", (1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0), ViewOf(heading=40.0))
 SPOT = {"lon": 2.346, "lat": 48.852, "heading": 40.0}
@@ -123,3 +123,185 @@ def test_only_an_accepted_proposal_is_carried_from_another_photo(tmp_path, answe
             registration=r,
             carried_from=carried_from,
         )
+
+
+# --- the pairs clicked, and the camera standing where the photographer stood
+
+PAIRS = {
+    "photo_px": [[100.0, 80.0], [500.0, 90.0], [300.0, 400.0], [120.0, 380.0], [400.0, 300.0]],
+    "own": [[0.1, 0.0, 1.0], [0.4, 0.0, 1.0], [0.25, 0.3, 1.0], [0.1, 0.3, 1.0], [0.3, 0.2, 1.0]],
+    "view": {"heading": 40.0, "pitch": 5.0, "fov": 75.0},
+    "side": 1280,
+}
+CAMERA = Standing((652_000.0, 6_861_000.0, -1.0), (0.1, 0.2, 0.3), 700.0, (0.0, -0.05), (600, 800))
+STANDING = {
+    "camera": standing_to_json(CAMERA),
+    "metres": [12.0, 30.5, None, 8.2, 15.0],
+    "from": [["p2"], ["p2", "p3"], None, ["p3"], ["p2"]],
+}
+
+
+def test_pairs_are_kept_with_an_answer_by_points(tmp_path):
+    path = tmp_path / "placings.jsonl"
+    placings.record(path, "pm:1", "points", 30.0, **SPOT, registration=R, pairs=PAIRS)
+
+    row = placings.holding(path)["pm:1"]
+
+    assert row["pairs"] == PAIRS and row["fit"] == "flat" and placings.standing_of(row) is None
+
+
+@pytest.mark.parametrize("answer", ["fits", "far"])
+def test_pairs_are_refused_on_an_answer_that_is_not_by_points(tmp_path, answer):
+    registration = R if answer == "fits" else None
+    with pytest.raises(ValueError, match="paires"):
+        placings.record(
+            tmp_path / "p.jsonl",
+            "pm:1",
+            answer,
+            3.0,
+            **SPOT,
+            registration=registration,
+            pairs=PAIRS,
+        )
+
+
+@pytest.mark.parametrize(
+    "pairs",
+    [
+        {**PAIRS, "own": PAIRS["own"][:3]},  # not as many on each side
+        {**PAIRS, "photo_px": [[1.0, 2.0]], "own": [[0.0, 0.0, 1.0]]},  # one pair
+        {**PAIRS, "photo_px": [[1.0, "a"]] * 4},  # not numbers
+        {k: v for k, v in PAIRS.items() if k != "view"},  # where they were clicked
+        {**PAIRS, "view": {"heading": 40.0, "pitch": 5.0, "fov": 0.0}},
+        {**PAIRS, "side": True},
+        ["not", "a", "dict"],
+    ],
+    ids=["uneven", "one pair", "not numbers", "no view", "no field of view", "no size", "a list"],
+)
+def test_pairs_written_wrong_are_refused(tmp_path, pairs):
+    with pytest.raises(ValueError, match="paires"):
+        placings.record(
+            tmp_path / "p.jsonl", "pm:1", "points", 3.0, **SPOT, registration=R, pairs=pairs
+        )
+
+
+def test_a_parallax_answer_keeps_its_camera_and_its_flat_registration(tmp_path):
+    path = tmp_path / "placings.jsonl"
+    placings.record(
+        path,
+        "pm:1",
+        "points",
+        30.0,
+        **SPOT,
+        registration=R,
+        pairs=PAIRS,
+        standing=STANDING,
+    )
+
+    row = placings.holding(path)["pm:1"]
+
+    assert placings.registration_of(row) == R and row["fit"] == "parallax"
+    assert placings.standing_of(row) == CAMERA and row["standing"]["metres"][2] is None
+
+
+@pytest.mark.parametrize(
+    "standing",
+    [
+        {"metres": STANDING["metres"], "from": STANDING["from"]},
+        {**STANDING, "camera": {"focal": 1}},
+    ],
+    ids=["no camera", "a camera half written"],
+)
+def test_a_parallax_camera_written_wrong_is_refused(tmp_path, standing):
+    with pytest.raises(ValueError):
+        placings.record(
+            tmp_path / "p.jsonl",
+            "pm:1",
+            "points",
+            3.0,
+            **SPOT,
+            registration=R,
+            pairs=PAIRS,
+            standing=standing,
+        )
+
+
+def test_a_camera_whose_depths_do_not_match_the_pairs_is_refused(tmp_path):
+    with pytest.raises(ValueError, match="paire"):
+        placings.record(
+            tmp_path / "p.jsonl",
+            "pm:1",
+            "points",
+            3.0,
+            **SPOT,
+            registration=R,
+            pairs=PAIRS,
+            standing={**STANDING, "metres": [12.0]},
+        )
+
+
+def test_answers_written_before_pairs_still_load(tmp_path):
+    path = tmp_path / "placings.jsonl"
+    path.write_text(
+        '{"photo_id": "pm:1", "answer": "points", "seconds": 5.0, "lon": 2.3, "lat": 48.8, '
+        '"heading": 10.0, "registration": {"panorama": "p1", "m": [1, 0, 0, 0, 1, 0, 0, 0, 1], '
+        '"view": {"heading": 40.0}}, "flipped": false, "carried_from": null, "inputs": "x"}\n'
+    )
+
+    row = placings.holding(path)["pm:1"]
+
+    assert placings.registration_of(row) == R and placings.standing_of(row) is None
+
+
+@pytest.mark.parametrize(
+    "standing",
+    [
+        {
+            **STANDING,
+            "metres": [12.0, None, None, None, 3.0],
+            "from": [["p2"], None, None, None, ["p2"]],
+        },
+        {**STANDING, "from": [["p2"], None, None, ["p3"], ["p2"]]},  # a depth with no source
+        {**STANDING, "from": [["p2"], [3], None, ["p3"], ["p2"]]},  # a source not a panorama
+        {**STANDING, "camera": {**STANDING["camera"], "size": [60, 80]}},  # clicks off its photo
+    ],
+    ids=["too few depths", "a depth with no source", "a source not a panorama", "photo too small"],
+)
+def test_a_parallax_camera_that_does_not_go_with_its_pairs_is_refused(tmp_path, standing):
+    with pytest.raises(ValueError):
+        placings.record(
+            tmp_path / "p.jsonl",
+            "pm:1",
+            "points",
+            3.0,
+            **SPOT,
+            registration=R,
+            pairs=PAIRS,
+            standing=standing,
+        )
+
+
+@pytest.mark.parametrize(
+    "pairs",
+    [
+        {**PAIRS, "own": [[0.0, 0.0, 0.0]] + PAIRS["own"][1:]},
+        {**PAIRS, "view": {"heading": 40.0, "pitch": 120.0, "fov": 75.0}},
+    ],
+    ids=["no direction", "pitch past the vertical"],
+)
+def test_pairs_with_impossible_directions_are_refused(tmp_path, pairs):
+    with pytest.raises(ValueError):
+        placings.record(
+            tmp_path / "p.jsonl", "pm:1", "points", 3.0, **SPOT, registration=R, pairs=pairs
+        )
+
+
+def test_only_an_answer_by_points_says_which_fit_it_kept(tmp_path):
+    path = tmp_path / "placings.jsonl"
+    placings.record(path, "pm:1", "far", 3.0, **SPOT)
+
+    assert placings.holding(path)["pm:1"]["fit"] is None
+
+
+def test_a_row_with_an_empty_camera_has_none(tmp_path):
+    assert placings.standing_of({"standing": {}}) is None
