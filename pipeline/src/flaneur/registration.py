@@ -30,6 +30,7 @@ STANDING_OFF = 0.01  # a pair this far (share of the photo's diagonal: 10 px of 
 STANDING_FOCAL = (0.2, 5.0)  # times the photo's longer side, as the flat fit's: beyond, the
 # camera slid along its axis (a longer lens traded for a farther stand)
 PANORAMA_HEIGHT_M = 2.5  # a panorama's camera above the street (Panoramax cars): the ground
+HIDDEN = 1.1  # a point this much farther from the camera than the nearest it sees there
 TRIPOD_M = 1.5  # a standing camera is first looked for this high above the street
 MIN_FRAME = 0.10  # share of the view the warped photo covers (Blanc, Produit, Ingensand 2018)
 MIN_MATCHED = 15  # matched automatically: as many agreeing (match.MIN_MATCHES for a view)
@@ -433,6 +434,53 @@ def composite(
     laid = view_bgr.copy()
     cv2.copyTo(warped, lands, laid)
     return laid
+
+
+def composite_standing(
+    view_bgr: np.ndarray,
+    photo_bgr: np.ndarray,
+    s: Standing,
+    origin: np.ndarray,
+    view: ViewOf,
+    metres: np.ndarray,
+) -> np.ndarray:
+    """The view (square, cut from the panorama at `origin`) with the photo laid in through
+    depth: each pixel's point of today (`metres` along its ray; the sky infinitely far) seen by
+    the standing camera, unless a nearer point hides it from the camera (HIDDEN times farther
+    than the nearest seen in that part of the photo, as wide as a pixel of the view). Where the
+    photo does not reach, or the depth is unknown (NaN), the view as it was."""
+    side = view_bgr.shape[0]
+    if view_bgr.shape[1] != side:
+        raise ValueError("une vue est carrée")
+    h, w = s.size
+    pixels = match.pixels_of((side, side))
+    world = match.view_directions(pixels, view.heading, view.fov, side, view.pitch)
+    world = world.astype(np.float32)
+    lens = (s._lens() @ cv2.Rodrigues(np.array(s.turn))[0]).astype(np.float32)
+    step = np.asarray(origin, float) - s.position  # from the camera to the panorama
+    far = np.asarray(metres, float).ravel()
+    with np.errstate(divide="ignore"):
+        nearness = (1 / far).astype(np.float32)  # the sky 0, unknown NaN
+    # each pixel's point, from the camera, its distance along the panorama's ray divided out
+    seen = world @ lens.T + nearness[:, None] * (lens @ step).astype(np.float32)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        at = seen[:, :2] / seen[:, 2:]
+    inside = (seen[:, 2] > 0) & np.all((at >= 0) & (at < [w, h]), axis=1)
+    # what the camera sees in each part of its photo is the nearest point there
+    away = np.full(len(far), np.inf)
+    finite = np.isfinite(far)
+    away[finite] = np.linalg.norm(world[finite] * far[finite, None] + step, axis=1)
+    cell = max(1, int(np.ceil(s.focal / match.focal(view.fov, side))))  # a view pixel, in it
+    part = np.where(inside[:, None], at // cell, 0).astype(int)
+    key = part[:, 1] * (w // cell + 1) + part[:, 0]
+    nearest = np.full((h // cell + 1) * (w // cell + 1), np.inf)
+    np.minimum.at(nearest, key[inside], away[inside])
+    inside &= ~(away > HIDDEN * nearest[key])
+    maps = np.where(inside[:, None], at - 0.5, -1.0).astype(np.float32).reshape(side, side, 2)
+    warped = cv2.remap(
+        photo_bgr, maps[..., 0], maps[..., 1], cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE
+    )
+    return np.where(inside.reshape(side, side, *[1] * (view_bgr.ndim - 2)), warped, view_bgr)
 
 
 def carried(

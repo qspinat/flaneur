@@ -400,3 +400,105 @@ def test_a_click_outside_the_photo_is_refused():
 
     with pytest.raises(registration.NotFitted, match="hors"):
         registration.fit_standing(photo_px, world.tolist(), SIZE, flat, LEVEL, (1.5, -1.0), GROUND)
+
+
+# --- the photo laid on the view through depth
+
+
+def _coordinates() -> np.ndarray:
+    """A photo whose every pixel holds its own column and row: what lands where can be read."""
+    rows, columns = np.mgrid[0 : SIZE[0], 0 : SIZE[1]].astype(np.float32)
+    return np.dstack([columns, rows, np.ones_like(rows)])
+
+
+def _view_rays() -> np.ndarray:
+    """The world direction of every pixel of NORTH, from the level panorama (side × side × 3)."""
+    pixels = match.pixels_of((SIDE, SIDE))
+    return match.view_directions(pixels, NORTH.heading, NORTH.fov, SIDE, NORTH.pitch).reshape(
+        SIDE, SIDE, 3
+    )
+
+
+def _within(at: np.ndarray) -> np.ndarray:
+    """Points of the photo a pixel or more inside its edge (at the edge, its pixels repeat)."""
+    return np.all((at >= 1) & (at <= [SIZE[1] - 1, SIZE[0] - 1]), axis=-1)
+
+
+def test_the_photo_is_laid_where_its_camera_sees_the_walls():
+    rays = _view_rays()
+    metres = np.full((SIDE, SIDE), 10.0 / np.maximum(rays[..., 1], 1e-6))  # a wall 10 m north
+    blank = np.zeros((SIDE, SIDE, 3), np.float32)
+
+    laid = registration.composite_standing(
+        blank, _coordinates(), STANDING, np.zeros(3), NORTH, metres
+    )
+
+    expected = STANDING.project((rays * metres[..., None]).reshape(-1, 3)).reshape(SIDE, SIDE, 2)
+    hit = (laid[..., 2] > 0) & _within(expected)  # pixels the photo reaches, off its very edge
+    assert hit.mean() > 0.2
+    assert np.abs(laid[..., :2][hit] - (expected[hit] - 0.5)).max() < 0.1  # pixel centres
+
+
+def test_the_sky_is_laid_by_the_camera_turn_alone():
+    rays = _view_rays()
+    blank = np.zeros((SIDE, SIDE, 3), np.float32)
+
+    laid = registration.composite_standing(
+        blank, _coordinates(), STANDING, np.zeros(3), NORTH, np.full((SIDE, SIDE), np.inf)
+    )
+
+    far = (rays * 1e7).reshape(-1, 3)  # as far as the sky: the position no longer counts
+    expected = STANDING.project(far + STANDING.position).reshape(SIDE, SIDE, 2)
+    hit = (laid[..., 2] > 0) & _within(expected)
+    assert hit.any() and np.abs(laid[..., :2][hit] - (expected[hit] - 0.5)).max() < 0.1
+
+
+def test_a_view_of_unknown_depth_is_left_as_it_was():
+    view = np.full((SIDE, SIDE, 3), 7.0, np.float32)
+    metres = np.full((SIDE, SIDE), 30.0)
+    metres[:, : SIDE // 2] = np.nan  # depth unknown on the left
+
+    laid = registration.composite_standing(
+        view, _coordinates(), STANDING, np.zeros(3), NORTH, metres
+    )
+
+    assert (laid[:, : SIDE // 2] == 7.0).all() and (laid[:, SIDE // 2 :] != 7.0).any()
+
+
+def test_a_view_the_photo_does_not_reach_is_left_as_it_was():
+    view = np.full((SIDE, SIDE, 3), 7.0, np.float32)
+
+    laid = registration.composite_standing(
+        view,
+        _coordinates(),
+        STANDING,
+        np.zeros(3),
+        ViewOf(heading=180.0),
+        np.full((SIDE, SIDE), 10.0),
+    )
+
+    assert (laid == 7.0).all()  # facing away from the photo
+
+
+def _hidden(camera: registration.Standing, monkeypatch, hidden: float) -> int:
+    """How many view pixels of near posts before a far wall the photo is laid on."""
+    columns = np.arange(SIDE)[None, :].repeat(SIDE, axis=0)
+    metres = np.where((columns // 40) % 2 == 0, 5.0, 40.0)
+    monkeypatch.setattr(registration, "HIDDEN", hidden)
+    photo = np.ones((*camera.size, 3), np.float32)
+    blank = np.zeros((SIDE, SIDE, 3), np.float32)
+    laid = registration.composite_standing(blank, photo, camera, np.zeros(3), NORTH, metres)
+    return int((laid[..., 0] > 0).sum())
+
+
+@pytest.mark.parametrize("scale", [1, 4], ids=["photo as fine as the view", "a scan 4 times finer"])
+def test_a_near_wall_hides_what_stands_behind_it_from_the_photo(monkeypatch, scale):
+    camera = registration.Standing(
+        STANDING.position, STANDING.turn, 500.0 * scale, STANDING.shift, (600 * scale, 800 * scale)
+    )
+
+    seen_all = _hidden(camera, monkeypatch, np.inf)
+    seen = _hidden(camera, monkeypatch, 1.1)
+    fine = _hidden(STANDING, monkeypatch, np.inf) - _hidden(STANDING, monkeypatch, 1.1)
+
+    assert seen_all - seen > 0.8 * fine > 0  # as much hidden whatever the photo's resolution
