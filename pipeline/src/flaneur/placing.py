@@ -104,6 +104,41 @@ def flat(
     return found, fitted
 
 
+@dataclass
+class _Standing:
+    """A camera fitted where the photographer stood, and what it was fitted from."""
+
+    camera: registration.Standing
+    used: np.ndarray  # the pairs with a depth
+    world: np.ndarray  # their points of today (NaN without depth)
+    metres: np.ndarray
+    only_unfixed: np.ndarray
+    came: list
+    ground: float
+    fitting: tuple  # what registration.fit_standing was given: refitted to hold pairs out
+
+
+def _standing(
+    photo_px: np.ndarray,
+    view_px: np.ndarray,
+    view: ViewOf,
+    sphere: match.Panorama,
+    size: tuple,
+    depths: depth.Depths,
+    pin: tuple[float, float],
+    start: registration.Registration,
+) -> _Standing:
+    """The camera where the photographer stood: from the pairs whose panorama point has a
+    depth (see depth), started from the flat fit `start` and the user's `pin`."""
+    rays = registration.own_directions(view_px, view, sphere.axes, SHOWN) @ sphere.axes
+    metres, only_unfixed, came = depth.at(depths, rays)
+    world = np.array([sphere.x, sphere.y, sphere.z]) + metres[:, None] * rays
+    ground = sphere.z - PANORAMA_HEIGHT_M  # under the panorama (see scene)
+    fitting = (photo_px, world, size, start, sphere.axes, pin, ground)
+    camera, used = registration.fit_standing(*fitting)
+    return _Standing(camera, used, world, metres, only_unfixed, came, ground, fitting)
+
+
 def parallax(
     photo_px: np.ndarray,
     view_px: np.ndarray,
@@ -114,37 +149,31 @@ def parallax(
     pin: tuple[float, float],
     held_out: bool = True,
 ) -> dict:
-    """The photo's camera where the photographer stood: from the pairs whose panorama point has
-    a depth (see depth), started from the flat fit and the user's `pin`; where it stood, each
-    pair's depth and the neighbours it came from, and its error, fitted and held out (both;
-    `held_out` False, none: when only the camera is wanted)."""
+    """The photo's camera where the photographer stood (see _standing), as the page has it:
+    where it stood, each pair's depth and the neighbours it came from, and its error, fitted
+    and held out (both fits; `held_out` False, none: when only the camera is wanted)."""
     if held_out:
         shown, start = flat(photo_px, view_px, view, sphere, size)
     else:
         start, _ = registration.fit(photo_px, view_px, size, SHOWN, sphere.id, view, sphere.axes)
-    rays = registration.own_directions(view_px, view, sphere.axes, SHOWN) @ sphere.axes
-    metres, only_unfixed, came = depth.at(depths, rays)
-    world = np.array([sphere.x, sphere.y, sphere.z]) + metres[:, None] * rays
-    ground = sphere.z - PANORAMA_HEIGHT_M  # under the panorama (see scene)
-    fitting = (photo_px, world, size, start, sphere.axes, pin, ground)
-    found, used = registration.fit_standing(*fitting)
-    stood = to_degrees(Point(found.position[0], found.position[1]))
+    s = _standing(photo_px, view_px, view, sphere, size, depths, pin, start)
+    stood = to_degrees(Point(s.camera.position[0], s.camera.position[1]))
     return {
         "registration": registration.to_json(start),  # the flat fit, which an answer keeps too
-        "standing": registration.standing_to_json(found),
+        "standing": registration.standing_to_json(s.camera),
         "lon": stood.x,
         "lat": stood.y,
-        "height_above_ground": found.position[2] - ground,
-        "heading": round(found.heading, 1),
-        "used": used.tolist(),
-        "metres": _listed(metres),
-        "from": came,
-        "only_unfixed": only_unfixed.tolist(),
-        "errors": _listed(registration.errors_standing(found, photo_px, world)),
+        "height_above_ground": s.camera.position[2] - s.ground,
+        "heading": round(s.camera.heading, 1),
+        "used": s.used.tolist(),
+        "metres": _listed(s.metres),
+        "from": s.came,
+        "only_unfixed": s.only_unfixed.tolist(),
+        "errors": _listed(registration.errors_standing(s.camera, photo_px, s.world)),
         "held_out": held_out
         and {
             "flat": shown["held_out"],
-            "parallax": _listed(registration.held_out_standing(*fitting)),
+            "parallax": _listed(registration.held_out_standing(*s.fitting)),
         },
     }
 
@@ -159,6 +188,50 @@ def kept_pairs(pairs: dict, sphere: match.Panorama) -> dict:
         "own": own.tolist(),
         "view": {"heading": view.heading, "pitch": view.pitch, "fov": view.fov},
         "side": SHOWN,
+    }
+
+
+def compared(row: dict, sphere: match.Panorama, size: tuple, depths: depth.Depths) -> dict:
+    """An answer's two fits made again from its saved pairs: the flat one, and the camera where
+    the photographer stood (started from the pin its parallax fit started from, else from the
+    answer's place). For each, the median of each pair's error held out (shares of the
+    photo's diagonal), on the same pairs, those with a depth; a refit refused counts as the
+    worst, and a camera refused outright as infinitely bad. How far it stood from its start."""
+    pairs = row["pairs"]
+    view = ViewOf(**pairs["view"])
+    photo_px = np.array(pairs["photo_px"], float)
+    view_px = registration.view_pixels(np.array(pairs["own"], float), view, sphere.axes, SHOWN)
+    started = (row.get("standing") or {}).get("start") or row
+    pin = _metres(started["lon"], started["lat"])
+    found = {"photo_id": row["photo_id"], "fit": row.get("fit") or "flat", "pairs": len(photo_px)}
+    rays = registration.own_directions(view_px, view, sphere.axes, SHOWN) @ sphere.axes
+    same = ~np.isnan(depth.at(depths, rays)[0])  # both fits on these pairs, those with depth
+    flat_off = registration.held_out_flat(
+        photo_px[same], view_px[same], size, SHOWN, view, sphere.axes
+    )
+    found |= {"with_depth": int(same.sum()), "refused": {"flat": int(np.isinf(flat_off).sum())}}
+    try:
+        start = registration.fit(photo_px, view_px, size, SHOWN, sphere.id, view, sphere.axes)[0]
+        s = _standing(photo_px, view_px, view, sphere, size, depths, pin, start)
+    except registration.NotFitted as refused:
+        flat_median = float(np.median(flat_off)) if len(flat_off) else np.inf
+        return {
+            **found,
+            "flat": flat_median,
+            "parallax": np.inf,
+            "moved_m": None,
+            "refused": {**found["refused"], "parallax": int(same.sum())},
+            "why": str(refused),
+        }
+    standing_off = registration.held_out_standing(*s.fitting)[same]
+    standing_off[np.isnan(standing_off)] = np.inf  # a point it cannot see: the worst
+    return {
+        **found,
+        "flat": float(np.median(flat_off)),
+        "parallax": float(np.median(standing_off)),
+        "refused": {**found["refused"], "parallax": int(np.isinf(standing_off).sum())},
+        "moved_m": float(np.hypot(s.camera.position[0] - pin[0], s.camera.position[1] - pin[1])),
+        "why": "",
     }
 
 
@@ -374,7 +447,12 @@ def serve(sources: Sources, port: int) -> HTTPServer:
         start = _metres(body["parallax"]["lon"], body["parallax"]["lat"])
         depths = depths_of(sphere, view.heading)
         found = parallax(photo_px, view_px, view, sphere, size, depths, start, held_out=False)
-        return {"camera": found["standing"], "metres": found["metres"], "from": found["from"]}
+        return {
+            "camera": found["standing"],
+            "metres": found["metres"],
+            "from": found["from"],
+            "start": body["parallax"],  # where the fit started (a fair comparison starts there)
+        }
 
     class Handler(localpage.Handler):
         def do_GET(self) -> None:  # noqa: N802 (http.server's naming)

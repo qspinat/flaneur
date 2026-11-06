@@ -170,6 +170,11 @@ def _check_standing(standing: dict, pairs: dict | None) -> None:
     )
     if not named:
         raise ValueError("une profondeur va avec les panoramas voisins d'où elle vient")
+    start = standing.get("start")
+    if start is not None and not (
+        isinstance(start, dict) and number(start.get("lon")) and number(start.get("lat"))
+    ):
+        raise ValueError("une caméra en parallaxe : le point d'où son recalage est parti")
     if sum(m is not None for m in metres) < MIN_STANDING:
         raise ValueError(f"une caméra en parallaxe vient de {MIN_STANDING} paires avec profondeur")
     h, w = camera.size

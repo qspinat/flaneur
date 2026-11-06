@@ -305,3 +305,20 @@ def test_only_an_answer_by_points_says_which_fit_it_kept(tmp_path):
 
 def test_a_row_with_an_empty_camera_has_none(tmp_path):
     assert placings.standing_of({"standing": {}}) is None
+
+
+@pytest.mark.parametrize(
+    "start", [{"lon": "a", "lat": 48.8}, {"lon": 2.3}], ids=["not a number", "no lat"]
+)
+def test_a_parallax_camera_s_starting_pin_written_wrong_is_refused(tmp_path, start):
+    with pytest.raises(ValueError):
+        placings.record(
+            tmp_path / "p.jsonl",
+            "pm:1",
+            "points",
+            3.0,
+            **SPOT,
+            registration=R,
+            pairs=PAIRS,
+            standing={**STANDING, "start": start},
+        )

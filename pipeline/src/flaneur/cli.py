@@ -5,6 +5,7 @@ import hashlib
 import io
 import json
 import shutil
+import threading
 import time
 from collections import Counter, OrderedDict
 from collections.abc import Callable, Iterable
@@ -335,6 +336,43 @@ def _placed(pictures: list[Picture]) -> list[Picture]:
     fixes = register.load(FIXES)
     found = {i: tuple(fixes[i]["fix"]) for i in _fixed_by_colmap(pictures, fixes)}
     return register.applied(pictures, reconstruct.borrowed(found, pictures))
+
+
+class _Depths:
+    """Today's details with their depth around panoramas, per view (see depth.around): made
+    with the matcher (`lock` held while it runs; asked twice at once, made once), kept for
+    KEPT_DEPTHS views; one that cannot be made is asked again next time."""
+
+    def __init__(
+        self,
+        spheres: list[match.Panorama],
+        fixed: set[str],
+        views: Callable[[], match.Views],
+        lock: threading.Lock,
+    ):
+        self.by_id = {p.id: p for p in spheres}
+        self.spheres, self.fixed, self.views, self.lock = spheres, fixed, views, lock
+        self.made: OrderedDict[tuple[str, int], depth.Depths] = OrderedDict()  # 1.4 MB each
+
+    def toward(self, panorama: str, k: int) -> depth.Depths | None:
+        if (panorama, k) in self.made:
+            self.made.move_to_end((panorama, k))  # used lately: kept longest
+        else:
+            with self.lock:  # the matcher, one thing at a time
+                if (panorama, k) not in self.made:
+                    home = self.by_id[panorama]
+                    found = depth.of_panorama(home, self.spheres, self.fixed, self.views(), [k])
+                    if found is None:
+                        return None
+                    self.made[panorama, k] = found
+                    while len(self.made) > KEPT_DEPTHS:
+                        self.made.popitem(last=False)
+        return self.made.get((panorama, k))
+
+    def around(self, panorama: str, heading: float) -> depth.Depths | None:
+        if panorama not in self.by_id:
+            return None
+        return depth.around(heading, lambda k: self.toward(panorama, k))
 
 
 def _fixed_by_colmap(pictures: list[Picture], fixes: dict) -> set[str]:
@@ -1625,6 +1663,57 @@ def _to_neighbours(
     ]
 
 
+@app.command("parallaxe")
+def compare_parallax(answers: Path = PLACINGS) -> None:
+    """Compare, sur les photos posées par points (leurs paires gardées), les deux recalages
+    refaits : à plat (l'appareil au panorama) et en parallaxe (l'appareil où se tenait le
+    photographe, cherché depuis là où son recalage était parti). Pour chacune, l'erreur médiane
+    des paires avec profondeur, chacune refaite sans elle (part de la diagonale de la photo ;
+    un recalage refusé compte comme le pire), et l'écart entre la place trouvée et le départ.
+    Avec le modèle (profondeur des panoramas voisins)."""
+    rows = [r for r in placings.holding(answers).values() if r.get("pairs") and r["registration"]]
+    if not rows:
+        typer.echo("aucune réponse par points avec ses paires")
+        return
+    spheres = _spheres()
+    with closing(db.connect(DB_PATH)) as conn:
+        fixed = _fixed_by_colmap(panoramas.load(conn), register.load(FIXES))
+    views = _views(kept=8)  # a panorama and its neighbours
+    made = _Depths(spheres, fixed, lambda: views, threading.Lock())
+    found, skipped = [], 0
+    for row in sorted(rows, key=lambda r: r["registration"]["panorama"]):  # its views kept
+        panorama, image = row["registration"]["panorama"], _exported(row["photo_id"])
+        try:
+            if not image.exists() or row.get("inputs") != _image(row["photo_id"]):
+                raise ValueError("son image a changé depuis (recadrée) : à refaire")
+            depths = made.around(panorama, row["pairs"]["view"]["heading"])
+            if depths is None:
+                raise ValueError("pas de panorama voisin")
+            with Image.open(image) as photo:
+                size = photo.size[::-1]  # height, width
+            one = placing.compared(row, made.by_id[panorama], size, depths)
+        except Exception as error:  # the matcher, a fit refused: this photo, not the others
+            typer.echo(f"{row['photo_id']} : laissée de côté ({error})")
+            skipped += 1
+            continue
+        found.append(one)
+        stood = "refusée" if one["moved_m"] is None else f"à {one['moved_m']:.1f} m du départ"
+        typer.echo(
+            f"{one['photo_id']} (gardée {one['fit']}) : {one['with_depth']}/{one['pairs']} "
+            f"paires avec profondeur, à plat {one['flat']:.1%}, en parallaxe "
+            f"{one['parallax']:.1%} ; la caméra {stood} {one['why']}".rstrip()
+        )
+    if found:
+        flat, deep = (np.median([f[k] for f in found]) for k in ("flat", "parallax"))
+        typer.echo(
+            f"{len(found)} photos ({skipped} laissées de côté) : médiane à plat {flat:.1%} "
+            f"({flat * 1000:.0f} px sur 1000 de diagonale), en parallaxe {deep:.1%} "
+            f"({deep * 1000:.0f} px) ; parallaxe meilleure sur "
+            f"{sum(f['parallax'] < f['flat'] for f in found)}, refusée sur "
+            f"{sum(f['moved_m'] is None for f in found)}"
+        )
+
+
 @app.command("placer")
 def place_photos(
     port: int = 8772, open_browser: bool = True, live: bool = True, answers: Path = PLACINGS
@@ -1667,7 +1756,7 @@ def place_photos(
 
     @functools.cache
     def models() -> match.Views:  # loaded when first needed
-        views = _views(kept=4)
+        views = _views(kept=8)  # a panorama and its neighbours, whose depth is made together
         store.matcher = views.matcher
         return views
 
@@ -1749,33 +1838,27 @@ def place_photos(
             rgb = cv2.resize(rgb, size, interpolation=cv2.INTER_AREA)
         return np.ascontiguousarray(rgb[:, :, ::-1])  # as OpenCV reads pictures
 
-    made: OrderedDict[tuple[str, int], depth.Depths] = OrderedDict()  # 1.4 MB each
-
-    def depth_toward(panorama: str, k: int) -> depth.Depths | None:
-        """One view's details with their depth, made once (asked twice at once: made once,
-        the second waiting), kept for KEPT_DEPTHS views; none made is asked again next time."""
-        if (panorama, k) not in made:
-            with sources.matching:  # the matcher, with the proposals
-                if (panorama, k) not in made:
-                    found = depth.of_panorama(by_id[panorama], spheres, fixed, models(), [k])
-                    if found is None:
-                        return None
-                    made[panorama, k] = found
-                    while len(made) > KEPT_DEPTHS:
-                        made.popitem(last=False)
-        return made.get((panorama, k))
+    matching = threading.Lock()  # the matcher: proposals, and depth when it must be made
+    depths_made = _Depths(spheres, fixed, models, matching)
 
     def depths(panorama: str, heading: float) -> depth.Depths | None:
-        """The depth of today's details around a panorama the way a view faces (see
-        depth.around), made with the matcher, kept per view as the view turns."""
+        """The depth of today's details around a panorama the way a view faces, kept per view
+        as the view turns (see _Depths); live only."""
         if not live:
             raise ValueError("pas de parallaxe sans le modèle : relancer sans --no-live")
-        if panorama not in by_id:
-            return None
-        return depth.around(heading, lambda k: depth_toward(panorama, k))
+        return depths_made.around(panorama, heading)
 
     sources = placing.Sources(
-        photos, spheres, answers, proposal, ahead, graph, carried_now, full=full, depths=depths
+        photos,
+        spheres,
+        answers,
+        proposal,
+        ahead,
+        graph,
+        carried_now,
+        full=full,
+        depths=depths,
+        matching=matching,
     )
     with httpx.Client(timeout=10, follow_redirects=True) as client:
         _serve_page(

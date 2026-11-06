@@ -754,3 +754,91 @@ def test_a_photo_reopened_says_which_fit_it_kept(page, one):
     _, found = one(sources, "GET", "/api/reopen/pm:1")
 
     assert json.loads(found)["fit"] is None  # placed before pairs were kept
+
+
+def _saved(sphere, photo_px, view_px, proposal, start=None):
+    """An answer by points as saved: its pairs, its place, in parallax the pin it started from."""
+    pin = _parallax_body(sphere, photo_px, view_px)
+    pairs = placing.kept_pairs(
+        {"photo_px": photo_px.tolist(), "view_px": view_px.tolist(), "view": pin["view"]}, sphere
+    )
+    row = {
+        "photo_id": "pm:1",
+        "lon": pin["lon"],
+        "lat": pin["lat"],
+        "pairs": pairs,
+        "registration": registration.to_json(proposal),
+        "fit": "flat",
+        "standing": None,
+    }
+    if start:
+        row.update(fit="parallax", standing={"start": start}, lon=0.0, lat=0.0)  # place accepted
+    return row, pin
+
+
+def test_an_answer_s_two_fits_are_compared_from_its_saved_pairs(page):
+    sources, proposal = page
+    sphere = sources.spheres[0]
+    _, _, photo_px, view_px, depths = _street(sphere)
+    row, _ = _saved(sphere, photo_px, view_px, proposal)
+
+    found = placing.compared(row, sphere, (60, 80), depths)
+
+    assert found["pairs"] == found["with_depth"] == len(photo_px)
+    assert found["refused"] == {"flat": 0, "parallax": 0} and found["fit"] == "flat"
+    assert found["parallax"] < found["flat"]  # a street in depth, seen from 2 m off
+    assert found["moved_m"] == pytest.approx(np.hypot(1.0, 1.0), abs=0.3)  # from the pin
+
+
+def test_both_fits_are_compared_on_the_same_pairs_those_with_depth(page):
+    sources, proposal = page
+    sphere = sources.spheres[0]
+    _, _, photo_px, view_px, depths = _street(sphere)
+    keep = np.arange(len(depths.metres)) != 0  # the first detail: no depth
+    depths = depth.Depths(
+        depths.panorama,
+        depths.directions[keep],
+        depths.metres[keep],
+        depths.seen_from[keep],
+        depths.fixed[keep],
+    )
+    row, _ = _saved(sphere, photo_px, view_px, proposal)
+
+    found = placing.compared(row, sphere, (60, 80), depths)
+
+    assert found["with_depth"] == len(photo_px) - 1
+
+
+def test_a_photo_whose_parallax_fit_is_refused_counts_as_the_worst(page):
+    sources, proposal = page
+    sphere = sources.spheres[0]
+    _, _, photo_px, view_px, depths = _street(sphere)
+    few = np.arange(len(depths.metres)) < 3  # three details with a depth: under four
+    depths = depth.Depths(
+        depths.panorama,
+        depths.directions[few],
+        depths.metres[few],
+        depths.seen_from[few],
+        depths.fixed[few],
+    )
+    row, _ = _saved(sphere, photo_px, view_px, proposal)
+
+    found = placing.compared(row, sphere, (60, 80), depths)
+
+    assert np.isinf(found["parallax"]) and found["moved_m"] is None and "4" in found["why"]
+
+
+def test_an_answer_kept_in_parallax_is_compared_from_the_pin_its_fit_started_from(page):
+    sources, proposal = page
+    sphere = sources.spheres[0]
+    _, _, photo_px, view_px, depths = _street(sphere)
+    pin = _parallax_body(sphere, photo_px, view_px)
+    row, _ = _saved(
+        sphere, photo_px, view_px, proposal, start={"lon": pin["lon"], "lat": pin["lat"]}
+    )
+
+    found = placing.compared(row, sphere, (60, 80), depths)
+
+    assert found["fit"] == "parallax" and found["moved_m"] == pytest.approx(
+        np.hypot(1.0, 1.0), abs=0.3
+    )
