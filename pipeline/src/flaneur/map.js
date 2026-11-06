@@ -37,11 +37,21 @@ function toggleAerial(map) {
   map.setLayoutProperty('aerial', 'visibility', visible ? 'none' : 'visible');
 }
 
+/** How many metres a degree of longitude and of latitude span at `lat`. */
+function metresPerDegree(lat) {
+  return [111320 * Math.cos(lat * Math.PI / 180), 111320];
+}
+
+/** How far apart two points ([lon, lat]) stand, in metres (near one another). */
+function metresBetween(a, b) {
+  const [east, north] = metresPerDegree(b[1]);
+  return Math.hypot((a[0] - b[0]) * east, (a[1] - b[1]) * north);
+}
+
 /** A wedge from the camera, `heading` degrees from north, `halfAngle` either side, `length`
  *  metres long, as a GeoJSON polygon. */
 function cone(lon, lat, heading, halfAngle, length) {
-  const metresPerDegreeLat = 111320;
-  const metresPerDegreeLon = metresPerDegreeLat * Math.cos(lat * Math.PI / 180);
+  const [metresPerDegreeLon, metresPerDegreeLat] = metresPerDegree(lat);
   const ring = [[lon, lat]];
   for (let a = heading - halfAngle; a <= heading + halfAngle; a += 5) {
     const r = a * Math.PI / 180;

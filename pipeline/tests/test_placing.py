@@ -1,5 +1,6 @@
 """The placing page: each photo on the map, then in its panorama."""
 
+import dataclasses
 import json
 
 import cv2
@@ -7,7 +8,7 @@ import numpy as np
 import pytest
 from shapely.geometry import Point
 
-from flaneur import depth, match, placing, placings, registration
+from flaneur import facades, match, placing, placings, registration
 from flaneur.gazetteer import to_degrees, to_metres
 from flaneur.registration import ViewOf
 
@@ -483,9 +484,25 @@ def _facing(heading: float) -> np.ndarray:
     return np.array([[np.cos(h), -np.sin(h), 0.0], [0.0, 0.0, -1.0], [np.sin(h), np.cos(h), 0.0]])
 
 
-def _street(sphere: match.Panorama):
-    """An old camera standing 2 m from the panorama, facing its view at 140°, and the details
-    of a street it saw: in the world, as clicked in the photo (80 × 60) and in the view shown."""
+DETAILS = [  # along the view at 140°, across it, up: on its two facades and its end
+    (8, -4, -1),
+    (12, 4, 1),
+    (15, -4, 2),
+    (15, 4, -1.5),
+    (30, -2, 4),
+    (30, 3, 0),
+    (12, -4, 3),
+    (25, 4, -2),
+]
+AHEAD = np.array([np.sin(np.radians(140)), np.cos(np.radians(140)), 0.0])  # the view's way
+RIGHT = np.array([np.cos(np.radians(140)), -np.sin(np.radians(140)), 0.0])
+
+
+def _street(sphere: match.Panorama, open_from: float | None = None, walls: bool = True):
+    """An old camera standing 2 m from the panorama, facing its view at 140°, the details of a
+    street it saw (in the world, as clicked in the photo, 80 × 60, and in the view shown), and
+    the scene of today's walls they lie on: two facades 8 m apart and the street's end at 30 m,
+    drawn by hand (the left facade open from `open_from` to 4 m further; none, `walls` False)."""
     home = np.array([sphere.x, sphere.y, sphere.z])
     camera = registration.Standing(
         tuple(home + [1.5, 1.3, -1.0]),
@@ -494,35 +511,24 @@ def _street(sphere: match.Panorama):
         (0.0, 0.0),
         (60, 80),
     )
-    ahead = np.array([np.sin(np.radians(140)), np.cos(np.radians(140)), 0.0])
-    right = np.array([np.cos(np.radians(140)), -np.sin(np.radians(140)), 0.0])
-    world = np.array(
-        [
-            home + d * ahead + x * right + [0.0, 0.0, z]
-            for d, x, z in [
-                (8, -3, -1),
-                (10, 2.5, 1),
-                (15, -4, 2),
-                (15, 4, -1.5),
-                (30, -2, 4),
-                (30, 5, 0),
-                (12, 0, 3),
-                (25, 1, -2),
-            ]
-        ]
-    )
+    world = np.array([home + d * AHEAD + x * RIGHT + [0.0, 0.0, z] for d, x, z in DETAILS])
     rays = (world - home) / np.linalg.norm(world - home, axis=1, keepdims=True)
     view_px = registration.view_pixels(
         rays @ sphere.axes.T, ViewOf(140.0), sphere.axes, placing.SHOWN
     )
-    depths = depth.Depths(
-        "p1",
-        rays,
-        np.linalg.norm(world - home, axis=1),
-        np.array(["p2"] * len(world)),
-        np.ones(len(world), bool),
+
+    def wall(d0, x0, d1, x1, made="fitted"):
+        a, b = (home + d * AHEAD + x * RIGHT for d, x in ((d0, x0), (d1, x1)))
+        return facades.Wall(tuple(a[:2]), tuple(b[:2]), sphere.z + 12.0, made)
+
+    left = [wall(0, -4, 40, -4)]
+    if open_from is not None:
+        left = [wall(0, -4, open_from, -4), wall(open_from + 4, -4, 40, -4)]
+    found = [*left, wall(0, 4, 40, 4), wall(30, -6, 30, 6, "drawn")] if walls else []
+    scene = facades.Scene(
+        sphere.id, tuple(home), sphere.z - 2.5, tuple(found), ("p2",), len(DETAILS)
     )
-    return camera, world, camera.project(world), view_px, depths
+    return camera, world, camera.project(world), view_px, scene
 
 
 def _parallax_body(sphere, photo_px, view_px, pin_off=(1.0, -1.0)):
@@ -559,8 +565,8 @@ def test_a_fit_gives_each_pairs_error(page, one):
 def test_parallax_gives_where_the_photographer_stood(page, one):
     sources, _ = page
     sphere = sources.spheres[0]
-    camera, _, photo_px, view_px, depths = _street(sphere)
-    sources.depths = lambda panorama, heading: depths
+    camera, _, photo_px, view_px, scene = _street(sphere)
+    sources.scene = lambda panorama, chosen: scene
 
     status, answer = one(
         sources, "POST", "/api/parallax", _parallax_body(sphere, photo_px, view_px)
@@ -571,7 +577,9 @@ def test_parallax_gives_where_the_photographer_stood(page, one):
     assert status == 200 and all(found["used"])
     assert np.hypot(stood.x - camera.position[0], stood.y - camera.position[1]) < 0.2
     assert found["height_above_ground"] == pytest.approx(1.5, abs=0.2)
-    assert found["from"][0] == ["p2"] and len(found["held_out"]["parallax"]) == len(photo_px)
+    assert found["source"][:5] == ["wall", "wall", "wall", "wall", "drawn"]  # the end: drawn
+    assert found["neighbours"] == ["p2"]
+    assert len(found["held_out"]["parallax"]) == len(photo_px)
     assert registration.from_json(found["registration"]).panorama == "p1"  # the flat fit too
     assert found["heading"] == pytest.approx(140.0, abs=0.5)  # the way its camera looked
 
@@ -588,23 +596,61 @@ def test_parallax_without_neighbours_says_why(page, one):
     assert status == 400 and "voisin" in reason.decode()
 
 
-def test_parallax_uses_the_depths_of_the_panorama_and_the_way_asked(page, one):
+def test_parallax_uses_the_scene_of_the_panorama_and_the_neighbours_chosen(page, one):
     sources, _ = page
     sphere = sources.spheres[0]
-    _, _, photo_px, view_px, depths = _street(sphere)
+    _, _, photo_px, view_px, scene = _street(sphere)
     asked = []
-    sources.depths = lambda panorama, heading: asked.append((panorama, heading)) or depths
+    sources.scene = lambda panorama, chosen: asked.append((panorama, chosen)) or scene
+    sources.spheres += [
+        match.Panorama(n, sphere.x + 5, sphere.y, 0.0, 0.0, sphere.path) for n in ("p2", "p3")
+    ]
+    body = _parallax_body(sphere, photo_px, view_px)
 
-    one(sources, "POST", "/api/parallax", _parallax_body(sphere, photo_px, view_px))
+    one(sources, "POST", "/api/parallax", body)
+    one(sources, "POST", "/api/parallax", {**body, "neighbours": ["p3", "p2"]})
+    one(sources, "POST", "/api/parallax", {**body, "neighbours": []})  # none: walls drawn only
 
-    assert asked == [("p1", 140.0)]
+    assert asked == [("p1", None), ("p1", ("p2", "p3")), ("p1", ())]
+
+
+def test_pairs_on_the_street_or_meeting_nothing_say_so(page, one):
+    sources, _ = page
+    sphere = sources.spheres[0]
+    _, _, photo_px, view_px, scene = _street(sphere, open_from=10)  # (12, -4, 3) seen through
+    sources.scene = lambda panorama, chosen: scene
+    down = AHEAD + [0.0, 0.0, -0.3]
+    down /= np.linalg.norm(down)
+    on_the_street = registration.view_pixels(
+        down[None] @ sphere.axes.T, ViewOf(140.0), sphere.axes, placing.SHOWN
+    )
+    body = _parallax_body(sphere, photo_px, view_px)
+
+    status, answer = one(sources, "POST", "/api/parallax", body)
+
+    found = json.loads(answer)
+    assert status == 200
+    assert (found["source"][6], found["metres"][6], found["used"][6]) == (None, None, False)
+    assert placing.depth_at(scene, sphere, on_the_street, ViewOf(140.0))[1] == ["ground"]
+
+
+def test_parallax_on_a_panorama_without_walls_says_why(page, one):
+    sources, _ = page
+    sphere = sources.spheres[0]
+    _, _, photo_px, view_px, scene = _street(sphere, walls=False)
+    sources.scene = lambda panorama, chosen: scene
+    body = _parallax_body(sphere, photo_px, view_px)
+
+    status, reason = one(sources, "POST", "/api/parallax", body)
+
+    assert status == 400 and "aucun mur" in reason.decode()
 
 
 def test_a_photo_laid_by_its_standing_camera_is_drawn(page, one):
     sources, _ = page
     sphere = sources.spheres[0]
-    camera, _, _, _, depths = _street(sphere)
-    sources.depths = lambda panorama, heading: depths
+    camera, _, _, _, scene = _street(sphere)
+    sources.scene = lambda panorama, chosen: scene
     body = {
         "photo_id": "pm:1",
         "panorama": "p1",
@@ -620,8 +666,8 @@ def test_a_photo_laid_by_its_standing_camera_is_drawn(page, one):
 def test_an_answer_in_parallax_keeps_the_camera_its_pairs_give(page, one):
     sources, proposal = page
     sphere = sources.spheres[0]
-    camera, _, photo_px, view_px, depths = _street(sphere)
-    sources.depths = lambda panorama, heading: depths
+    camera, _, photo_px, view_px, scene = _street(sphere)
+    sources.scene = lambda panorama, chosen: scene
     pin = _parallax_body(sphere, photo_px, view_px)
     body = {
         **ANSWER,
@@ -640,7 +686,9 @@ def test_an_answer_in_parallax_keeps_the_camera_its_pairs_give(page, one):
     assert np.allclose(np.linalg.norm(row["pairs"]["own"], axis=1), 1.0)
     kept = placings.standing_of(row)  # made again from the pairs saved, not taken from the page
     assert np.allclose(kept.position, camera.position, atol=0.2)
-    assert row["standing"]["from"][0] == ["p2"]
+    assert row["standing"]["source"][0] == "wall"
+    assert row["standing"]["neighbours"] == ["p2"]
+    assert row["standing"]["chosen"] is None  # picked by their geometry: replayed so
 
 
 def test_an_answer_by_points_keeps_its_pairs_without_parallax(page, one):
@@ -664,17 +712,35 @@ def test_an_answer_by_points_keeps_its_pairs_without_parallax(page, one):
     assert status == 200 and row["fit"] == "flat" and placings.standing_of(row) is None
 
 
-def test_the_depth_of_a_view_is_made_ahead_when_asked(page, one):
+def test_the_walls_of_a_panorama_are_made_ahead_when_asked(page, one):
     sources, _ = page
-    _, _, _, _, depths = _street(sources.spheres[0])
+    sphere = sources.spheres[0]
+    _, _, _, _, scene = _street(sphere)
     asked = []
-    sources.depths = lambda panorama, heading: asked.append((panorama, heading)) or depths
+    sources.scene = lambda panorama, chosen: asked.append((panorama, chosen)) or scene
+    sources.segments = lambda x, y: [((x, y), (x + 10.0, y))]
     body = {"photo_id": "pm:1", "panorama": "p1", "heading": 140.0}
 
     status, answer = one(sources, "POST", "/api/depth", body)
 
-    assert status == 200 and json.loads(answer)["details"] == len(depths.metres)
-    assert asked == [("p1", 140.0)]
+    found = json.loads(answer)
+    assert status == 200 and found["details"] == len(DETAILS) and found["neighbours"] == ["p2"]
+    assert [w["made"] for w in found["walls"]] == ["fitted", "fitted", "drawn"]
+    at = to_metres(Point(*found["walls"][0]["a"]))
+    assert np.allclose([at.x, at.y], scene.walls[0].a, atol=0.01)  # sent in degrees
+    assert len(found["segments"]) == 1 and asked == [("p1", None)]
+
+
+def test_a_panorama_without_walls_says_why_when_its_walls_are_asked(page, one):
+    sources, _ = page
+    sphere = sources.spheres[0]
+    sources.scene = lambda panorama, chosen: _street(sphere, walls=False)[4]
+    body = {"photo_id": "pm:1", "panorama": "p1", "heading": 140.0}
+
+    status, answer = one(sources, "POST", "/api/depth", body)
+
+    found = json.loads(answer)
+    assert status == 200 and found["walls"] == [] and "aucun mur" in found["why"]
 
 
 def test_no_depth_ahead_without_neighbours_says_why(page, one):
@@ -690,10 +756,10 @@ def test_no_depth_ahead_without_neighbours_says_why(page, one):
 def test_depth_that_fails_to_be_made_says_why(page, one):
     sources, _ = page
 
-    def broken(panorama, heading):
+    def broken(panorama, chosen):
         raise RuntimeError("le graphique a manqué de mémoire")
 
-    sources.depths = broken
+    sources.scene = broken
     body = {"photo_id": "pm:1", "panorama": "p1", "heading": 140.0}
 
     status, reason = one(sources, "POST", "/api/depth", body)
@@ -704,8 +770,8 @@ def test_depth_that_fails_to_be_made_says_why(page, one):
 def test_an_answer_in_parallax_refits_from_the_pin_it_started_from(page, one):
     sources, proposal = page
     sphere = sources.spheres[0]
-    _, _, photo_px, view_px, depths = _street(sphere)
-    sources.depths = lambda panorama, heading: depths
+    _, _, photo_px, view_px, scene = _street(sphere)
+    sources.scene = lambda panorama, chosen: scene
     asked = _parallax_body(sphere, photo_px, view_px)
     _, shown = one(sources, "POST", "/api/parallax", asked)
     shown = json.loads(shown)
@@ -760,7 +826,9 @@ def _saved(sphere, photo_px, view_px, proposal, start=None):
     """An answer by points as saved: its pairs, its place, in parallax the pin it started from."""
     pin = _parallax_body(sphere, photo_px, view_px)
     pairs = placing.kept_pairs(
-        {"photo_px": photo_px.tolist(), "view_px": view_px.tolist(), "view": pin["view"]}, sphere
+        {"photo_px": photo_px.tolist(), "view_px": view_px.tolist(), "view": pin["view"]},
+        sphere,
+        {},
     )
     row = {
         "photo_id": "pm:1",
@@ -779,10 +847,10 @@ def _saved(sphere, photo_px, view_px, proposal, start=None):
 def test_an_answer_s_two_fits_are_compared_from_its_saved_pairs(page):
     sources, proposal = page
     sphere = sources.spheres[0]
-    _, _, photo_px, view_px, depths = _street(sphere)
+    _, _, photo_px, view_px, scene = _street(sphere)
     row, _ = _saved(sphere, photo_px, view_px, proposal)
 
-    found = placing.compared(row, sphere, (60, 80), depths)
+    found = placing.compared(row, sphere, (60, 80), scene, {})
 
     assert found["pairs"] == found["with_depth"] == len(photo_px)
     assert found["refused"] == {"flat": 0, "parallax": 0} and found["fit"] == "flat"
@@ -793,18 +861,10 @@ def test_an_answer_s_two_fits_are_compared_from_its_saved_pairs(page):
 def test_both_fits_are_compared_on_the_same_pairs_those_with_depth(page):
     sources, proposal = page
     sphere = sources.spheres[0]
-    _, _, photo_px, view_px, depths = _street(sphere)
-    keep = np.arange(len(depths.metres)) != 0  # the first detail: no depth
-    depths = depth.Depths(
-        depths.panorama,
-        depths.directions[keep],
-        depths.metres[keep],
-        depths.seen_from[keep],
-        depths.fixed[keep],
-    )
+    _, _, photo_px, view_px, scene = _street(sphere, open_from=10)  # (12, -4, 3) seen through
     row, _ = _saved(sphere, photo_px, view_px, proposal)
 
-    found = placing.compared(row, sphere, (60, 80), depths)
+    found = placing.compared(row, sphere, (60, 80), scene, {})
 
     assert found["with_depth"] == len(photo_px) - 1
 
@@ -812,32 +872,26 @@ def test_both_fits_are_compared_on_the_same_pairs_those_with_depth(page):
 def test_a_photo_whose_parallax_fit_is_refused_counts_as_the_worst(page):
     sources, proposal = page
     sphere = sources.spheres[0]
-    _, _, photo_px, view_px, depths = _street(sphere)
-    few = np.arange(len(depths.metres)) < 3  # three details with a depth: under four
-    depths = depth.Depths(
-        depths.panorama,
-        depths.directions[few],
-        depths.metres[few],
-        depths.seen_from[few],
-        depths.fixed[few],
-    )
+    _, _, photo_px, view_px, scene = _street(sphere, walls=False)  # three on the street: few
     row, _ = _saved(sphere, photo_px, view_px, proposal)
 
-    found = placing.compared(row, sphere, (60, 80), depths)
+    found = placing.compared(row, sphere, (60, 80), scene, {})
 
-    assert np.isinf(found["parallax"]) and found["moved_m"] is None and "4" in found["why"]
+    assert np.isinf(found["parallax"])
+    assert found["moved_m"] is None
+    assert "6" in found["why"]
 
 
 def test_an_answer_kept_in_parallax_is_compared_from_the_pin_its_fit_started_from(page):
     sources, proposal = page
     sphere = sources.spheres[0]
-    _, _, photo_px, view_px, depths = _street(sphere)
+    _, _, photo_px, view_px, scene = _street(sphere)
     pin = _parallax_body(sphere, photo_px, view_px)
     row, _ = _saved(
         sphere, photo_px, view_px, proposal, start={"lon": pin["lon"], "lat": pin["lat"]}
     )
 
-    found = placing.compared(row, sphere, (60, 80), depths)
+    found = placing.compared(row, sphere, (60, 80), scene, {})
 
     assert found["fit"] == "parallax" and found["moved_m"] == pytest.approx(
         np.hypot(1.0, 1.0), abs=0.3
@@ -847,8 +901,8 @@ def test_an_answer_kept_in_parallax_is_compared_from_the_pin_its_fit_started_fro
 def test_an_answer_saved_again_on_the_same_fit_keeps_its_pairs_and_camera(page, one):
     sources, proposal = page
     sphere = sources.spheres[0]
-    _, _, photo_px, view_px, depths = _street(sphere)
-    sources.depths = lambda panorama, heading: depths
+    _, _, photo_px, view_px, scene = _street(sphere)
+    sources.scene = lambda panorama, chosen: scene
     pin = _parallax_body(sphere, photo_px, view_px)
     first = {
         **ANSWER,
@@ -872,3 +926,309 @@ def test_an_answer_saved_again_on_the_same_fit_keeps_its_pairs_and_camera(page, 
     row = placings.holding(sources.placings)["pm:1"]
     assert status == 200 and row["heading"] == 120.0
     assert row["pairs"] is not None and row["fit"] == "parallax" and placings.standing_of(row)
+
+
+# --- the hand choices: neighbours, walls, a pair's depth by a second click
+
+
+def _beside(sources, sphere) -> match.Panorama:
+    """A neighbour 3 m east of the panorama, known to the page."""
+    other = match.Panorama("p2", sphere.x + 3.0, sphere.y, sphere.z, 198.0, sphere.path)
+    sources.spheres.append(other)
+    return other
+
+
+def _seen_from(other: match.Panorama, point: np.ndarray) -> list[float]:
+    """Where a point of today falls in the neighbour's view facing as the view (140°)."""
+    ray = point - [other.x, other.y, other.z]
+    ray /= np.linalg.norm(ray)
+    return registration.view_pixels(
+        ray[None] @ other.axes.T, ViewOf(140.0), other.axes, placing.SHOWN
+    )[0].tolist()
+
+
+def test_panoramas_near_say_which_colmap_placed(page, one):
+    sources, _ = page
+    sources.fixed = {"p1"}
+
+    _, found = one(sources, "GET", "/api/near?lon=2.3466&lat=48.852")
+
+    assert [p["fixed"] for p in json.loads(found)] == [True]
+
+
+def _wall(sphere, d0: float, x0: float, d1: float, x1: float) -> dict:
+    home = np.array([sphere.x, sphere.y])
+    a, b = (
+        to_degrees(Point(*(home + d * AHEAD[:2] + x * RIGHT[:2]))) for d, x in ((d0, x0), (d1, x1))
+    )
+    return {"a": [a.x, a.y], "b": [b.x, b.y]}
+
+
+def test_walls_drawn_and_removed_are_saved_for_the_panorama(page, one, tmp_path):
+    sources, _ = page
+    sphere = sources.spheres[0]
+    scene = _street(sphere)[4]
+    sources.scene = lambda panorama, chosen: scene
+    sources.walls = tmp_path / "walls.jsonl"
+    body = {
+        "photo_id": "pm:1",
+        "panorama": "p1",
+        "drawn": [_wall(sphere, 0, -3.8, 40, -3.8) | {"top": 15.0}, _wall(sphere, 50, -5, 50, 5)],
+        "removed": [_wall(sphere, 0, 4, 40, 4)],
+    }
+
+    status, answer = one(sources, "POST", "/api/walls", body)
+
+    drawn, removed, _ = facades.saved_at(sources.walls, "p1")
+    assert status == 200
+    assert "walls" in json.loads(answer)
+    assert [w.top for w in drawn] == [15.0, None]  # its top when given; else made with the scene
+    assert len(removed) == 1
+
+
+def test_walls_drawn_at_other_panoramas_say_so(page, one, tmp_path):
+    sources, _ = page
+    sphere = sources.spheres[0]
+    drawn = facades.Wall((sphere.x - 4, sphere.y), (sphere.x - 4, sphere.y + 20), None, "drawn")
+    scene = dataclasses.replace(_street(sphere)[4], walls=(dataclasses.replace(drawn, at="p9"),))
+    sources.scene = lambda panorama, chosen: scene
+    body = {"photo_id": "pm:1", "panorama": "p1", "heading": 140.0}
+
+    _, answer = one(sources, "POST", "/api/depth", body)
+
+    assert [w["at"] for w in json.loads(answer)["walls"]] == ["p9"]  # sent back by p9 only
+
+
+def _second(sphere, other, i: int) -> dict:
+    _, world, _, view_px, _ = _street(sphere)
+    return {
+        "photo_id": "pm:1",
+        "panorama": "p1",
+        "view": {"heading": 140.0, "pitch": 5, "fov": 75},
+        "view_px": view_px[i].tolist(),
+        "neighbour": other.id,
+        "neighbour_px": _seen_from(other, world[i]),
+    }
+
+
+def test_a_second_click_gives_a_pair_its_depth(page, one):
+    sources, _ = page
+    sphere = sources.spheres[0]
+    other = _beside(sources, sphere)
+    _, world, _, _, _ = _street(sphere)
+
+    status, answer = one(sources, "POST", "/api/second", _second(sphere, other, 6))
+
+    expected = np.linalg.norm(world[6] - [sphere.x, sphere.y, sphere.z])
+    assert status == 200 and json.loads(answer)["metres"] == pytest.approx(expected, rel=0.02)
+
+
+def test_a_second_click_whose_rays_do_not_meet_is_refused(page, one):
+    sources, _ = page
+    sphere = sources.spheres[0]
+    other = _beside(sources, sphere)
+    body = _second(sphere, other, 6)
+    body["neighbour_px"] = [body["neighbour_px"][0], body["neighbour_px"][1] + 200]
+
+    status, reason = one(sources, "POST", "/api/second", body)
+
+    assert status == 400 and "ne se rencontrent pas" in reason.decode()
+
+
+def test_the_line_where_a_detail_may_be_in_the_neighbour_passes_through_it(page, one):
+    sources, _ = page
+    sphere = sources.spheres[0]
+    other = _beside(sources, sphere)
+    body = _second(sphere, other, 6)
+    at = np.array(body.pop("neighbour_px"))
+
+    status, answer = one(sources, "POST", "/api/epipolar", body)
+
+    line = np.array(json.loads(answer)["line"])
+    assert status == 200 and len(line) > 10
+    assert np.min(np.linalg.norm(line - at, axis=1)) < 3  # sampled finely near it
+
+
+def test_a_view_tinted_by_its_depth_is_drawn(page, one):
+    sources, _ = page
+    sphere = sources.spheres[0]
+    scene = _street(sphere)[4]
+    sources.scene = lambda panorama, chosen: scene
+    body = {"photo_id": "pm:1", "panorama": "p1", "view": {"heading": 140.0, "pitch": 5, "fov": 75}}
+
+    status, jpeg = one(sources, "POST", "/api/depthview", body)
+
+    assert status == 200 and cv2.imdecode(np.frombuffer(jpeg, np.uint8), 1) is not None
+
+
+def _with_second(sphere, other, i: int) -> dict:
+    """A parallax body whose pair i has a second click in the neighbour."""
+    _, world, photo_px, view_px, _ = _street(sphere)
+    body = _parallax_body(sphere, photo_px, view_px)
+    seconds = [None] * len(photo_px)
+    seconds[i] = {"neighbour": other.id, "px": _seen_from(other, world[i])}
+    return body | {"second_clicks": seconds}
+
+
+def test_a_pair_s_second_click_gives_its_depth_in_the_parallax_fit(page, one):
+    sources, _ = page
+    sphere = sources.spheres[0]
+    other = _beside(sources, sphere)
+    scene = _street(sphere, open_from=10)[4]  # pair 6 meets no wall
+    sources.scene = lambda panorama, chosen: scene
+
+    status, answer = one(sources, "POST", "/api/parallax", _with_second(sphere, other, 6))
+
+    found = json.loads(answer)
+    assert status == 200 and found["source"][6] == "click" and found["used"][6]
+
+
+def test_an_answer_keeps_its_second_clicks(page, one):
+    sources, proposal = page
+    sphere = sources.spheres[0]
+    other = _beside(sources, sphere)
+    scene = _street(sphere, open_from=10)[4]
+    sources.scene = lambda panorama, chosen: scene
+    asked = _with_second(sphere, other, 6)
+    body = {
+        **ANSWER,
+        "answer": "points",
+        "registration": registration.to_json(proposal),
+        "lon": asked["lon"],
+        "lat": asked["lat"],
+        "parallax": {"lon": asked["lon"], "lat": asked["lat"]},
+        "pairs": {k: asked[k] for k in ("photo_px", "view_px", "view", "second_clicks")},
+    }
+
+    status, _ = one(sources, "POST", "/api/answer", body)
+
+    row = placings.holding(sources.placings)["pm:1"]
+    second = row["pairs"]["second_clicks"][6]
+    assert status == 200 and second["neighbour"] == "p2" and len(second["own"]) == 3
+    assert row["standing"]["source"][6] == "click"
+
+
+def test_a_panorama_s_own_walls_come_back_as_saved_however_far(page, one, tmp_path):
+    sources, _ = page
+    sphere = sources.spheres[0]
+    scene = _street(sphere)[4]
+    sources.scene = lambda panorama, chosen: scene
+    sources.walls = tmp_path / "walls.jsonl"
+    far = facades.Wall((sphere.x + 35, sphere.y), (sphere.x + 35, sphere.y + 10), None, "drawn")
+    facades.record(
+        sources.walls, "p1", [far], [((sphere.x, sphere.y + 5), (sphere.x + 5, sphere.y + 5))]
+    )
+    asked = {"photo_id": "pm:1", "panorama": "p1", "heading": 140.0}
+
+    _, answer = one(sources, "POST", "/api/depth", asked)
+    mine = json.loads(answer)["mine"]
+    one(sources, "POST", "/api/walls", asked | mine)  # sent back as it came
+
+    assert [w["top"] for w in mine["drawn"]] == [None]  # as saved: made with the scene
+    assert facades.saved_at(sources.walls, "p1")[0][0].top is None
+    assert len(facades.saved_at(sources.walls, "p1")[1]) == 1
+
+
+def test_second_clicks_not_as_pairs_are_refused_with_why(page, one):
+    sources, _ = page
+    sphere = sources.spheres[0]
+    sources.scene = lambda panorama, chosen: _street(sphere)[4]
+    _, _, photo_px, view_px, _ = _street(sphere)
+    body = _parallax_body(sphere, photo_px, view_px) | {"second_clicks": [1] * len(photo_px)}
+
+    status, reason = one(sources, "POST", "/api/parallax", body)
+
+    assert status == 400 and "second clic" in reason.decode()
+
+
+def test_a_second_click_saved_whose_rays_no_longer_meet_leaves_its_pair_to_the_walls(page):
+    sources, proposal = page
+    sphere = sources.spheres[0]
+    other = _beside(sources, sphere)
+    _, _, photo_px, view_px, scene = _street(sphere)
+    row, _ = _saved(sphere, photo_px, view_px, proposal)
+    row["pairs"]["second_clicks"] = [None] * len(photo_px)
+    row["pairs"]["second_clicks"][0] = {"neighbour": "p2", "own": [0.0, 0.0, 1.0]}  # straight up
+
+    found = placing.compared(row, sphere, (60, 80), scene, {"p2": other})
+
+    assert found["with_depth"] == len(photo_px)  # its wall's depth, not the photo dropped
+
+
+def test_walls_shown_say_which_are_the_panorama_s_own(page, one, tmp_path):
+    sources, _ = page
+    sphere = sources.spheres[0]
+    sources.walls = tmp_path / "walls.jsonl"
+    mine = facades.Wall((sphere.x + 4, sphere.y), (sphere.x + 4, sphere.y + 20), None, "drawn")
+    facades.record(sources.walls, "p1", [mine], [])
+    street = _street(sphere)[4]
+    shown = dataclasses.replace(mine, top=20.0, at="p1")
+    scene = dataclasses.replace(street, walls=street.walls[:1] + (shown,))
+    sources.scene = lambda panorama, chosen: scene
+
+    _, answer = one(
+        sources, "POST", "/api/depth", {"photo_id": "pm:1", "panorama": "p1", "heading": 0}
+    )
+
+    assert [w["mine"] for w in json.loads(answer)["walls"]] == [None, 0]  # fitted; drawn here
+
+
+def test_the_neighbour_shown_beside_is_the_best_by_geometry_the_way_the_view_looks(page, one):
+    sources, _ = page
+    sphere = sources.spheres[0]
+    east = _beside(sources, sphere)  # 3 m east
+    north = match.Panorama("p3", sphere.x, sphere.y + 6.0, sphere.z, 198.0, sphere.path)
+    sources.spheres.append(north)
+    scene = dataclasses.replace(_street(sphere)[4], neighbours=("p2", "p3"))
+    sources.scene = lambda panorama, chosen: scene
+    body = {"photo_id": "pm:1", "panorama": "p1"}
+
+    _, facing_north = one(sources, "POST", "/api/depth", body | {"heading": 0.0})
+    _, facing_east = one(sources, "POST", "/api/depth", body | {"heading": 90.0})
+
+    assert json.loads(facing_north)["best"] == east.id  # across the line of sight
+    assert json.loads(facing_east)["best"] == north.id
+
+
+def test_an_answer_in_parallax_with_no_neighbour_chosen_is_saved(page, one):
+    sources, proposal = page
+    sphere = sources.spheres[0]
+    camera, _, photo_px, view_px, scene = _street(sphere)
+    drawn_only = dataclasses.replace(scene, neighbours=(), chosen=())  # walls drawn by hand only
+    sources.scene = lambda panorama, chosen: drawn_only
+    pin = _parallax_body(sphere, photo_px, view_px)
+    body = {
+        **ANSWER,
+        "answer": "points",
+        "registration": registration.to_json(proposal),
+        "lon": pin["lon"],
+        "lat": pin["lat"],
+        "neighbours": [],
+        "parallax": {"lon": pin["lon"], "lat": pin["lat"]},
+        "pairs": {"photo_px": photo_px.tolist(), "view_px": view_px.tolist(), "view": pin["view"]},
+    }
+
+    status, reason = one(sources, "POST", "/api/answer", body)
+
+    assert status == 200, reason
+    assert placings.holding(sources.placings)["pm:1"]["standing"]["chosen"] == []
+
+
+def test_a_wall_removed_elsewhere_stays_removed_when_its_panorama_saves_again(page, one, tmp_path):
+    sources, _ = page
+    sphere = sources.spheres[0]
+    sources.scene = lambda panorama, chosen: _street(sphere)[4]
+    sources.walls = tmp_path / "walls.jsonl"
+    theirs = facades.Wall((sphere.x + 4, sphere.y), (sphere.x + 4, sphere.y + 20), None, "drawn")
+    facades.record(sources.walls, "p1", [theirs], [])  # drawn at p1
+    facades.record(sources.walls, "p9", [], [(theirs.a, theirs.b)])  # then removed at p9
+    asked = {"photo_id": "pm:1", "panorama": "p1", "heading": 140.0}
+    _, answer = one(sources, "POST", "/api/depth", asked)
+    mine = json.loads(answer)["mine"]  # p1's own walls, as the page holds them
+    mine["drawn"].append(_wall(sphere, 0, -6, 20, -6))  # another drawn there
+
+    one(sources, "POST", "/api/walls", asked | mine)
+
+    drawn, _ = facades.saved_near(sources.walls, sphere.x, sphere.y)
+    assert not [w for w in drawn if abs(w.a[0] - theirs.a[0]) < 0.1]  # still removed
+    assert len(drawn) == 1  # the new one

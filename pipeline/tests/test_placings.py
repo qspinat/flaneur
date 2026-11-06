@@ -128,16 +128,33 @@ def test_only_an_accepted_proposal_is_carried_from_another_photo(tmp_path, answe
 # --- the pairs clicked, and the camera standing where the photographer stood
 
 PAIRS = {
-    "photo_px": [[100.0, 80.0], [500.0, 90.0], [300.0, 400.0], [120.0, 380.0], [400.0, 300.0]],
-    "own": [[0.1, 0.0, 1.0], [0.4, 0.0, 1.0], [0.25, 0.3, 1.0], [0.1, 0.3, 1.0], [0.3, 0.2, 1.0]],
+    "photo_px": [
+        [100.0, 80.0],
+        [500.0, 90.0],
+        [300.0, 400.0],
+        [120.0, 380.0],
+        [400.0, 300.0],
+        [650.0, 200.0],
+        [700.0, 500.0],
+    ],
+    "own": [
+        [0.1, 0.0, 1.0],
+        [0.4, 0.0, 1.0],
+        [0.25, 0.3, 1.0],
+        [0.1, 0.3, 1.0],
+        [0.3, 0.2, 1.0],
+        [0.5, 0.1, 1.0],
+        [0.55, 0.35, 1.0],
+    ],
     "view": {"heading": 40.0, "pitch": 5.0, "fov": 75.0},
     "side": 1280,
 }
 CAMERA = Standing((652_000.0, 6_861_000.0, -1.0), (0.1, 0.2, 0.3), 700.0, (0.0, -0.05), (600, 800))
 STANDING = {
     "camera": standing_to_json(CAMERA),
-    "metres": [12.0, 30.5, None, 8.2, 15.0],
-    "from": [["p2"], ["p2", "p3"], None, ["p3"], ["p2"]],
+    "metres": [12.0, 30.5, None, 8.2, 15.0, 20.0, 9.5],  # six with a depth
+    "source": ["wall", "drawn", None, "ground", "wall", "click", "wall"],
+    "neighbours": ["p2", "p3"],
 }
 
 
@@ -207,7 +224,7 @@ def test_a_parallax_answer_keeps_its_camera_and_its_flat_registration(tmp_path):
 @pytest.mark.parametrize(
     "standing",
     [
-        {"metres": STANDING["metres"], "from": STANDING["from"]},
+        {"metres": STANDING["metres"], "source": STANDING["source"]},
         {**STANDING, "camera": {"focal": 1}},
     ],
     ids=["no camera", "a camera half written"],
@@ -258,14 +275,21 @@ def test_answers_written_before_pairs_still_load(tmp_path):
     [
         {
             **STANDING,
-            "metres": [12.0, None, None, None, 3.0],
-            "from": [["p2"], None, None, None, ["p2"]],
+            "metres": [12.0, None, None, None, 3.0, 20.0, None],  # three
+            "source": ["wall", None, None, None, "wall", "wall", None],
         },
-        {**STANDING, "from": [["p2"], None, None, ["p3"], ["p2"]]},  # a depth with no source
-        {**STANDING, "from": [["p2"], [3], None, ["p3"], ["p2"]]},  # a source not a panorama
+        {**STANDING, "source": ["wall", "drawn", None, None, "wall", "click", "wall"]},
+        {**STANDING, "source": ["wall", "satellite", None, "ground", "wall", "click", "wall"]},
+        {**STANDING, "neighbours": "p2"},
         {**STANDING, "camera": {**STANDING["camera"], "size": [60, 80]}},  # clicks off its photo
     ],
-    ids=["too few depths", "a depth with no source", "a source not a panorama", "photo too small"],
+    ids=[
+        "too few depths",
+        "a depth with no source",
+        "a source not known",
+        "neighbours not a list",
+        "photo too small",
+    ],
 )
 def test_a_parallax_camera_that_does_not_go_with_its_pairs_is_refused(tmp_path, standing):
     with pytest.raises(ValueError):
@@ -322,3 +346,62 @@ def test_a_parallax_camera_s_starting_pin_written_wrong_is_refused(tmp_path, sta
             pairs=PAIRS,
             standing={**STANDING, "start": start},
         )
+
+
+def test_an_answer_kept_in_parallax_under_the_old_rule_is_saved_again(tmp_path):
+    four = {  # made when four depths sufficed, each from the neighbours that saw it
+        "camera": STANDING["camera"],
+        "metres": [12.0, 30.5, None, 8.2, 15.0, None, None],
+        "from": [["p2"], ["p2", "p3"], None, ["p3"], ["p2"], None, None],
+    }
+
+    row = placings.record(
+        tmp_path / "p.jsonl",
+        "pm:1",
+        "points",
+        30.0,
+        **SPOT,
+        registration=R,
+        pairs=PAIRS,
+        standing=four,
+    )
+
+    assert row["fit"] == "parallax"
+
+
+@pytest.mark.parametrize(
+    "seconds",
+    [
+        [None] * 6,  # one short
+        [None] * 6 + [{"neighbour": "p2"}],  # no direction
+        [None] * 6 + [{"neighbour": 2, "own": [0.1, 0.2, 1.0]}],  # not a panorama
+    ],
+    ids=["one short", "no direction", "not a panorama"],
+)
+def test_second_clicks_that_do_not_go_with_their_pairs_are_refused(tmp_path, seconds):
+    with pytest.raises(ValueError, match="second clic"):
+        placings.record(
+            tmp_path / "p.jsonl",
+            "pm:1",
+            "points",
+            3.0,
+            **SPOT,
+            registration=R,
+            pairs={**PAIRS, "second_clicks": seconds},
+        )
+
+
+def test_second_clicks_are_kept_with_their_pairs(tmp_path):
+    seconds = [None] * 6 + [{"neighbour": "p2", "own": [0.1, 0.2, 1.0]}]
+
+    row = placings.record(
+        tmp_path / "p.jsonl",
+        "pm:1",
+        "points",
+        3.0,
+        **SPOT,
+        registration=R,
+        pairs={**PAIRS, "second_clicks": seconds},
+    )
+
+    assert row["pairs"]["second_clicks"][6]["neighbour"] == "p2"

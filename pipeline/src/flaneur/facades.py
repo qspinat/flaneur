@@ -10,7 +10,7 @@ them."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 import numpy as np
@@ -27,6 +27,7 @@ GROUND = -1  # what a ray met: the street
 NOTHING = -2  # nothing known: the sky, or beyond the walls
 
 GROUND_BAND_M = 0.3  # details this close above the street are the street
+STREET_REACH_M = 50.0  # a ray meets the street this far at most (beyond: nearly level, unsure)
 MOST_POINTS = 4000
 SAMPLES = 300  # pairs of details proposing a line
 PAIR_M = (1.0, 20.0)  # how far apart a pair's details stand
@@ -51,6 +52,7 @@ ABOVE_M = 1.0  # and this far above its high ones
 OVERLAP_DEG = 20.0  # a drawn or removed wall replaces the stretch of a wall this close in angle
 OVERLAP_M = 1.5  # and to its line, alongside it
 MIN_PIECE_M = 1.0  # what is left of a wall shorter than this goes too
+DRAWN_ABOVE_M = 20.0  # a wall drawn where none was fitted reaches this high over the street
 REMOVED_MARGIN_M = 3.0  # a wall removed takes this much more of a wall fitted along it (fitted
 # again from other details, its ends move)
 NEAR_M = 30.0  # walls drawn serve panoramas this close
@@ -60,8 +62,10 @@ NEAR_M = 30.0  # walls drawn serve panoramas this close
 class Wall:
     a: tuple[float, float]  # its ends on the plan (Lambert-93)
     b: tuple[float, float]
-    top: float  # height, as the panoramas'
+    top: float | None  # height, as the panoramas' (drawn without one: see with_drawn)
     made: str  # "fitted" or "drawn"
+    at: str = field(default="", compare=False)  # drawn: the panorama where it was
+    since: int = field(default=0, compare=False)  # drawn: the save it first was in (0: new)
 
 
 @dataclass(frozen=True)
@@ -74,6 +78,7 @@ class Scene:
     walls: tuple[Wall, ...]
     neighbours: tuple[str, ...]  # the panoramas whose details the walls were fitted to
     details: int  # how many
+    chosen: tuple[str, ...] | None = None  # the neighbours the user chose (none: by geometry)
 
 
 Segment = tuple[tuple[float, float], tuple[float, float]]
@@ -81,7 +86,10 @@ Line = tuple[np.ndarray, float]  # unit normal on the plan, and offset: normal Â
 
 
 def fit(
-    points: np.ndarray, ground: float, candidates: list[Segment] = (), seed: int = 0
+    points: np.ndarray,
+    ground: float,
+    candidates: list[Segment] = (),
+    seed: int = 0,
 ) -> list[Wall]:
     """The walls along today's details (n Ã— 3, Lambert-93 and height), those on the street left
     out; BD TOPO's facade segments (`candidates`) proposed beside the lines details suggest,
@@ -179,9 +187,9 @@ def _shared(xy: np.ndarray, tree: cKDTree, lines: list[Line]) -> tuple[np.ndarra
     for _ in range(ROUNDS):
         costs = _costs(xy, lines)
         before, labels = labels, _labelled(costs, graph)
-        kept = _worth_keeping(costs, labels)
+        kept, given = _worth_keeping(costs, labels)  # each kept line fitted to the details it holds
         stable = len(kept) == len(lines) and np.array_equal(before, labels)
-        lines = [_total_least_squares(xy[labels == i]) for i in kept]
+        lines = [_total_least_squares(xy[given == i]) for i in kept]
         if stable:
             break
     return _labelled(_costs(xy, lines), graph), lines
@@ -209,10 +217,11 @@ def _labelled(costs: np.ndarray, graph: csr_matrix) -> np.ndarray:
     return labels
 
 
-def _worth_keeping(costs: np.ndarray, labels: np.ndarray) -> list[int]:
+def _worth_keeping(costs: np.ndarray, labels: np.ndarray) -> tuple[list[int], np.ndarray]:
     """The lines whose details would cost WALL_COST or more elsewhere, the least worth first;
     a line dropped gives its details to the best of those left before the next is weighed (two
-    lines sharing one facade: the first goes, the second then holds it alone)."""
+    lines sharing one facade: the first goes, the second then holds it alone). And the details'
+    labels so given."""
     labels = labels.copy()
     standing = np.ones(costs.shape[1], bool)  # the last: none, always there
 
@@ -228,7 +237,7 @@ def _worth_keeping(costs: np.ndarray, labels: np.ndarray) -> list[int]:
         if worth < WALL_COST:
             standing[i] = False
             labels[mine] = others[costs[mine][:, others].argmin(axis=1)]
-    return np.flatnonzero(standing[:-1]).tolist()
+    return np.flatnonzero(standing[:-1]).tolist(), labels
 
 
 def _stretches(t: np.ndarray) -> list[np.ndarray]:
@@ -258,8 +267,8 @@ def _stretches(t: np.ndarray) -> list[np.ndarray]:
 def cast(scene: Scene, directions: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     """How far along each world unit direction from the scene's camera: to the nearest wall it
     meets (within its ends, between the street and its top), else to the street when it points
-    down; NaN meeting nothing. And what it met: a wall's index, GROUND or NOTHING. (A wall is
-    met above the street, so before it.)"""
+    down (within STREET_REACH_M); NaN meeting nothing. And what it met: a wall's index, GROUND
+    or NOTHING. (A wall is met above the street, so before it.)"""
     origin = np.asarray(scene.origin, float)
     d = np.asarray(directions, float)
     edges = [(*w.a, *w.b, scene.ground, w.top) for w in scene.walls]
@@ -270,7 +279,7 @@ def cast(scene: Scene, directions: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         street = (scene.ground - origin[2]) / d[:, 2]
     none = met < 0
     met[none] = NOTHING
-    down = none & (d[:, 2] < 0) & (street > 0)
+    down = none & (d[:, 2] < 0) & (street > 0) & (street <= STREET_REACH_M)
     metres[down], met[down] = street[down], GROUND
     return metres, met
 
@@ -285,10 +294,19 @@ def in_view(scene: Scene, view: ViewOf, side: int) -> np.ndarray:
     return np.where(np.isnan(metres), np.inf, metres).reshape(side, side)
 
 
-def with_drawn(fitted: list[Wall], drawn: list[Wall], removed: list[Segment]) -> list[Wall]:
-    """The walls drawn by hand, and what the drawn and removed ones leave of the fitted."""
+def with_drawn(
+    fitted: list[Wall], drawn: list[Wall], removed: list[Segment], ground: float
+) -> list[Wall]:
+    """The walls drawn by hand, and what the drawn and removed ones leave of the fitted. A wall
+    drawn without its top takes that of the fitted walls it replaces (fitted again, it follows
+    them), else DRAWN_ABOVE_M over the street (`ground`)."""
+
+    def topped(w: Wall) -> Wall:
+        tops = [f.top for f in fitted if _left_of(f, (w.a, w.b), 0.0) != [f]]
+        return w if w.top is not None else replace(w, top=max(tops, default=ground + DRAWN_ABOVE_M))
+
     left = _uncovered(fitted, [(w.a, w.b) for w in drawn])
-    return list(drawn) + _uncovered(left, removed, REMOVED_MARGIN_M)
+    return [topped(w) for w in drawn] + _uncovered(left, removed, REMOVED_MARGIN_M)
 
 
 def _uncovered(walls: list[Wall], covering: list[Segment], margin: float = 0.0) -> list[Wall]:
@@ -324,39 +342,85 @@ def _left_of(wall: Wall, one: Segment, margin: float) -> list[Wall]:
     ]
 
 
-def record(path: Path, panorama: str, drawn: list[Wall], removed: list[Segment]) -> None:
-    """Keep the walls drawn at a panorama and those removed there (a row; the latest holds)."""
-    row = {"panorama": panorama, "removed": list(removed)}
-    append_row(path, {**row, "drawn": [{"a": w.a, "b": w.b, "top": w.top} for w in drawn]})
+def record(
+    path: Path,
+    panorama: str,
+    drawn: list[Wall],
+    removed: list[Segment],
+    removed_since: list[int] | None = None,
+) -> None:
+    """Keep the walls drawn at a panorama and those removed there (a row; the latest holds),
+    each with the save it first was in (`since`; `removed_since` for the removals): a wall or a
+    removal new, or sent back unchanged."""
+    now = 1 + max((s for row in rows(path) for s in _ages(row)), default=0)
+    ages = removed_since or [0] * len(removed)
+    append_row(
+        path,
+        {
+            "panorama": panorama,
+            "drawn": [{"a": w.a, "b": w.b, "top": w.top, "since": w.since or now} for w in drawn],
+            "removed": [
+                {"a": a, "b": b, "since": s or now} for (a, b), s in zip(removed, ages, strict=True)
+            ],
+        },
+    )
+
+
+def _ages(row: dict) -> list[int]:
+    return [x["since"] for x in row["drawn"] + row["removed"]]
+
+
+def _latest(path: Path) -> dict[str, dict]:
+    """The latest row of each panorama."""
+    latest: dict[str, dict] = {}
+    for row in rows(path):
+        latest[row["panorama"]] = row
+    return latest
+
+
+def _read(row: dict) -> tuple[list[Wall], list[Segment], list[int]]:
+    """A row's walls drawn and its removals, and the save each removal first was in."""
+    drawn = [
+        Wall(tuple(w["a"]), tuple(w["b"]), w["top"], "drawn", at=row["panorama"], since=w["since"])
+        for w in row["drawn"]
+    ]
+    removed = [(tuple(r["a"]), tuple(r["b"])) for r in row["removed"]]
+    return drawn, removed, [r["since"] for r in row["removed"]]
+
+
+def saved_at(path: Path, panorama: str) -> tuple[list[Wall], list[Segment], list[int]]:
+    """The walls drawn and removed at a panorama (its latest row), and when each removal was."""
+    row = _latest(path).get(panorama)
+    return _read(row) if row else ([], [], [])
 
 
 def saved_near(
     path: Path, x: float, y: float, radius: float = NEAR_M
 ) -> tuple[list[Wall], list[Segment]]:
     """The walls drawn and removed (the latest row of each panorama) reaching within `radius`
-    of (x, y); a wall drawn at one panorama and removed at another afterwards stays removed.
-    (A panorama's row holds the walls drawn there, not those drawn at others.)"""
-    latest: dict[str, dict] = {}
-    for row in rows(path):
-        latest.pop(row["panorama"], None)  # in the order saved last
-        latest[row["panorama"]] = row
-    near = []
-    for row in latest.values():
-        drawn = [Wall(tuple(w["a"]), tuple(w["b"]), float(w["top"]), "drawn") for w in row["drawn"]]
-        removed = [(tuple(a), tuple(b)) for a, b in row["removed"]]
-        near.append(
-            (
-                [w for w in drawn if _distance((x, y), (w.a, w.b)) <= radius],
-                [r for r in removed if _distance((x, y), r) <= radius],
-            )
+    of (x, y). A wall drawn at one panorama loses the stretches removed at others after it was
+    drawn (a wall drawn after a removal near it stays). (A panorama's row holds the walls drawn
+    there, not those drawn at others.)"""
+    drawn: list[Wall] = []
+    removals: list[tuple[Segment, int, str]] = []
+    for panorama, row in _latest(path).items():
+        walls, removed, ages = _read(row)
+        drawn += [w for w in walls if _distance((x, y), (w.a, w.b)) <= radius]
+        removals += [
+            (r, s, panorama)
+            for r, s in zip(removed, ages, strict=True)
+            if _distance((x, y), r) <= radius
+        ]
+    kept = [
+        piece
+        for wall in drawn
+        for piece in _uncovered(
+            [wall],
+            [r for r, s, at in removals if at != wall.at and s > wall.since],
+            REMOVED_MARGIN_M,
         )
-    removed = [r for _, theirs in near for r in theirs]
-    drawn = [
-        wall
-        for i, (walls, _) in enumerate(near)
-        for wall in _uncovered(walls, [r for _, rs in near[i + 1 :] for r in rs], REMOVED_MARGIN_M)
     ]
-    return drawn, removed
+    return kept, [r for r, _, _ in removals]
 
 
 def _distance(point: tuple[float, float], segment: Segment) -> float:

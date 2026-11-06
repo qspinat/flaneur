@@ -1,5 +1,7 @@
 """An old photo registered onto a panorama, worked on in a view cut from it."""
 
+import dataclasses
+
 import cv2
 import numpy as np
 import pytest
@@ -282,9 +284,10 @@ def _street_points() -> np.ndarray:
     return np.array(rows + [[-2.0, 40.0, 6.0], [2.0, 40.0, 1.0]])
 
 
-def _clicked_both(world: np.ndarray):
-    """The details as clicked: in the photo, and in the panorama's view up the street."""
-    photo_px = STANDING.project(world)
+def _clicked_both(world: np.ndarray, camera: registration.Standing = STANDING):
+    """The details as clicked: in the photo (taken by `camera`), and in the panorama's view up
+    the street."""
+    photo_px = camera.project(world)
     own = (world / np.linalg.norm(world, axis=1, keepdims=True)) @ LEVEL.T
     return photo_px, registration.view_pixels(own, NORTH, LEVEL, SIDE)
 
@@ -331,12 +334,45 @@ def test_pairs_without_depth_are_left_out_and_counted():
     assert not used[[0, 5]].any() and used.sum() == len(world) - 2
 
 
-def test_too_few_pairs_with_depth_are_refused():
+def test_five_pairs_with_depth_are_too_few_for_the_fit_shown():
     world = _street_points()
-    world[3:] = np.nan
+    world[5:] = np.nan
 
-    with pytest.raises(registration.NotFitted, match="4"):
+    with pytest.raises(registration.NotFitted, match="6"):
         _standing_fit(world)
+
+
+def test_a_pair_held_out_refits_from_five():
+    world = _street_points()[[1, 4, 7, 10, 13, 16]]  # six pairs with depth
+    photo_px, view_px = _clicked_both(world)
+    flat, _ = registration.fit(photo_px, view_px, SIZE, SIDE, "p", NORTH, LEVEL)
+
+    off = registration.held_out_standing(photo_px, world, SIZE, flat, LEVEL, (1.5, -1.0), GROUND)
+
+    assert np.isfinite(off).all()
+
+
+def test_a_pair_held_out_is_refitted_with_the_lens_shift_the_fit_shown_has():
+    raised = dataclasses.replace(STANDING, shift=(0.0, -0.2))
+    world = _street_points()[[2, 5, 7, 10, 13, 16]]  # six pairs: the shift fitted
+    photo_px, view_px = _clicked_both(world, raised)
+    flat, _ = registration.fit(photo_px, view_px, SIZE, SIDE, "p", NORTH, LEVEL)
+
+    off = registration.held_out_standing(photo_px, world, SIZE, flat, LEVEL, (1.5, -1.0), GROUND)
+
+    assert np.median(off) < 1e-3  # not held at zero for the five left
+
+
+def test_a_raised_lens_is_found_from_six_pairs():
+    raised = dataclasses.replace(STANDING, shift=(0.0, -0.2))
+    world = _street_points()[[2, 5, 7, 10, 13, 16]]  # on both walls, near and far
+    photo_px, view_px = _clicked_both(world, raised)
+    flat, _ = registration.fit(photo_px, view_px, SIZE, SIDE, "p", NORTH, LEVEL)
+
+    found, _ = registration.fit_standing(photo_px, world, SIZE, flat, LEVEL, (1.5, -1.0), GROUND)
+
+    assert np.allclose(found.shift, raised.shift, atol=0.005)  # a flat fit reads it as a tilt
+    assert np.allclose(found.position, raised.position, atol=0.1)
 
 
 def test_a_position_at_its_limits_is_refused():
@@ -520,3 +556,20 @@ def test_a_pair_held_out_is_left_out_of_the_fit_the_standing_camera_starts_from(
     )
 
     assert restarted == list(range(len(world)))
+
+
+def test_a_pair_held_out_is_refitted_with_the_lens_shift_given():
+    raised = dataclasses.replace(STANDING, shift=(0.0, -0.2))
+    world = _street_points()[[2, 5, 7, 10, 13, 16]]
+    photo_px, view_px = _clicked_both(world, raised)
+    flat, _ = registration.fit(photo_px, view_px, SIZE, SIDE, "p", NORTH, LEVEL)
+
+    def held_at(shift):
+        return np.median(
+            registration.held_out_standing(
+                photo_px, world, SIZE, flat, LEVEL, (1.5, -1.0), GROUND, shift=shift
+            )
+        )
+
+    assert held_at(raised.shift) < 1e-3  # the fit shown's: right
+    assert held_at((0.0, 0.0)) > 2e-3  # a wrong one is kept, not fitted

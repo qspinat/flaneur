@@ -24,8 +24,9 @@ MIN_SPREAD = 0.1  # share of the photo's diagonal the points clicked span: under
 CLICKED_OFF = 1 / 64  # a clicked pair farther than this (a share of the view's side: 10 px
 # of 640) from the others' fit counts for less, whatever size the view is shown at
 MIN_COVER = 0.25  # share of the photo inside the hull of the points matched: under it, bunched
-MIN_STANDING = 4  # pairs with a depth a camera standing off the panorama is fitted from
-STANDING_SHIFTED_FROM = 6  # and its lens shift too
+MIN_STANDING = 6  # pairs with a depth a camera standing off the panorama is fitted from, its
+# lens shift too (a flat fit reads a raised lens as a tilt: its shift is no guide)
+LEAST_STANDING = 4  # the fewest a camera kept is made from (its 7 unknowns, the shift held)
 STANDING_OFF = 0.01  # a pair this far (share of the photo's diagonal: 10 px of 1000) counts less
 STANDING_FOCAL = (0.2, 5.0)  # times the photo's longer side, as the flat fit's: beyond, the
 # camera slid along its axis (a longer lens traded for a farther stand)
@@ -254,38 +255,40 @@ def fit_standing(
     axes: np.ndarray,
     pin: tuple[float, float],
     ground: float,
+    least: int = MIN_STANDING,
+    shift: tuple[float, float] | None = None,
 ) -> tuple[Standing, np.ndarray]:
     """The camera where the photographer stood, through pairs clicked by hand whose panorama
     point has a depth (`world`: those points; NaN rows, none: left out), and which pairs it
     used. It starts from the flat fit `start`, at the user's `pin` on a tripod; it stands within
     match.MOST_MOVED_M of the pin, match.STREET_HEIGHT_M above the `ground`; its lens shift is
-    fitted from STANDING_SHIFTED_FROM pairs; a pair far from the others counts for less
-    (STANDING_OFF of the photo's diagonal)."""
+    fitted, or held at `shift`; a pair far from the others counts for less (STANDING_OFF of the
+    photo's diagonal). It takes `least` pairs with depth."""
     photo_px, world = np.asarray(photo_px, float), np.asarray(world, float)
     inside = (photo_px >= 0) & (photo_px <= [size[1], size[0]])
     if not inside.all():
         raise NotFitted("des points tombent hors de la photo")
     used = ~np.isnan(world).any(axis=1)
-    if used.sum() < MIN_STANDING:
-        raise NotFitted(f"il faut au moins {MIN_STANDING} paires avec une profondeur")
+    if used.sum() < least:
+        raise NotFitted(f"il faut au moins {least} paires avec une profondeur")
     clicked, points = photo_px[used], world[used]
     diagonal = np.hypot(*size)
-    turn, focal, shift = start_of(start, axes, size)
+    turn, focal, start_shift = start_of(start, axes, size)
     low_z, high_z = (ground + m for m in match.STREET_HEIGHT_M)
     low_f, high_f = (np.log(k * max(size)) for k in STANDING_FOCAL)
     x0 = [*turn, np.clip(np.log(focal), low_f + 0.01, high_f - 0.01), *pin, ground + TRIPOD_M]
     low = [-np.inf] * 3 + [low_f, pin[0] - match.MOST_MOVED_M, pin[1] - match.MOST_MOVED_M, low_z]
     high = [np.inf] * 3 + [high_f, pin[0] + match.MOST_MOVED_M, pin[1] + match.MOST_MOVED_M, high_z]
-    shifted = used.sum() >= STANDING_SHIFTED_FROM
-    if shifted:
-        x0, low, high = [*x0, *np.clip(shift, -0.45, 0.45)], [*low, -0.5, -0.5], [*high, 0.5, 0.5]
+    if shift is None:  # fitted
+        x0 = [*x0, *np.clip(start_shift, -0.45, 0.45)]
+        low, high = [*low, -0.5, -0.5], [*high, 0.5, 0.5]
 
     def camera(x: np.ndarray) -> Standing:
         return Standing(
             tuple(x[4:7]),
             tuple(x[:3]),
             float(np.exp(x[3])),
-            tuple(x[7:9]) if shifted else (0.0, 0.0),
+            tuple(x[7:9]) if shift is None else tuple(shift),
             size,
         )
 
@@ -365,16 +368,21 @@ def held_out_standing(
     pin: tuple[float, float],
     ground: float,
     restart: Callable[[int], Registration] | None = None,
+    shift: tuple[float, float] | None = None,
 ) -> np.ndarray:
-    """Each pair's error by the standing camera fitted without it (NaN without depth, infinite
-    when that fit is refused), started from `restart(i)`: the flat fit made without it too
-    (else `start`, which saw it)."""
+    """Each pair's error by the standing camera fitted without it, from one pair fewer than the
+    fit shown takes (NaN without depth, infinite when that fit is refused), started from
+    `restart(i)`: the flat fit made without it too (else `start`, which saw it). Its lens shift
+    held at `shift`, the fit shown's (from five pairs, its 9 unknowns would leave one to spare),
+    else fitted."""
 
     def without(i: int) -> Standing:
         rest = world.copy()
         rest[i] = np.nan
         begun = start if restart is None else restart(i)
-        return fit_standing(photo_px, rest, size, begun, axes, pin, ground)[0]
+        return fit_standing(
+            photo_px, rest, size, begun, axes, pin, ground, MIN_STANDING - 1, shift
+        )[0]
 
     return _held_out(
         ~np.isnan(world).any(axis=1),

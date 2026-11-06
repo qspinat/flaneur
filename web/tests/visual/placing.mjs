@@ -89,8 +89,8 @@ async function onPoints(routes) {
   await opened.goto(url);
   await opened.locator('#pair.on').waitFor({ timeout: 15000 });
   await opened.waitForTimeout(1000);
-  const shot = await opened.locator('#photo').boundingBox(), seen = await opened.locator('#view').boundingBox();
-  const click = async (points) => {
+  const click = async (points) => {  // where the pictures stand now (a third one moves them)
+    const shot = await opened.locator('#photo').boundingBox(), seen = await opened.locator('#view').boundingBox();
     for (const [x, y] of points) {
       await opened.mouse.click(shot.x + x * shot.width, shot.y + y * shot.height);
       await opened.mouse.click(seen.x + x * seen.width, seen.y + y * seen.height);
@@ -99,35 +99,112 @@ async function onPoints(routes) {
   return [opened, click];
 }
 
-const asked = { depth: 0, parallax: 0, standingLaid: 0, answer: null };
-let stood = null;
+const SIX = [[0.2, 0.2], [0.8, 0.2], [0.5, 0.7], [0.3, 0.5], [0.7, 0.6], [0.4, 0.3]];
+const JPEG = { contentType: 'image/jpeg', body: Buffer.from([0xff, 0xd8, 0xff, 0xd9]) };  // a picture
+const CENTRE = [2.3459, 48.8518];  // the map's, when a test needs a spot
+/** Walls around a spot, as /api/depth sends them: one fitted, one drawn here, BD TOPO's facade. */
+const wallsAround = (lon, lat, panorama, neighbour) => {
+  const at = (east, north) => [lon + east / (111320 * Math.cos(lat * Math.PI / 180)), lat + north / 111320];
+  return { details: 900, neighbours: [neighbour], best: neighbour, why: '',
+    walls: [{ a: at(-6, 0), b: at(-6, 30), top: 12, made: 'fitted', at: '', mine: null },
+            { a: at(6, 0), b: at(6, 30), top: 20, made: 'drawn', at: panorama, mine: 0 }],
+    segments: [[at(-6.5, -5), at(-6.5, 35)]],
+    mine: { drawn: [{ a: at(6, 0), b: at(6, 30), top: null }], removed: [] } };
+};
+const asked = { depth: [], parallax: [], standingLaid: 0, answer: null, epipolar: 0, second: null, walls: [], tint: 0 };
+let stood = null, here = null;
+const walls = (record) => (route) => {
+  const body = route.request().postDataJSON();
+  record.push(body);
+  return route.fulfill({ json: wallsAround(here.lon, here.lat, body.panorama, here.neighbour) });
+};
 const [deep, pairsAt] = await onPoints({
-  '**/api/depth': (route) => { asked.depth++; return route.fulfill({ json: { details: 900 } }); },
+  '**/api/depth': walls(asked.depth),
+  '**/api/walls': walls(asked.walls),
   '**/api/parallax': (route) => {
-    asked.parallax++;
-    const body = JSON.parse(route.request().postData());
+    const body = route.request().postDataJSON();
+    asked.parallax.push(body);
     stood = { lon: body.lon + 0.00004, lat: body.lat - 0.00002 };
     const n = body.photo_px.length;
     return route.fulfill({ json: {
       registration: { ...registration, panorama: body.panorama }, ...stood, height_above_ground: 1.6, heading: 120,
       standing: { position: [0, 0, 0], turn: [0, 0, 0], focal: 500, shift: [0, 0], size: [600, 800] },
-      used: Array(n).fill(true), metres: Array(n).fill(12), from: Array(n).fill(['p2']),
-      only_unfixed: Array(n).fill(false), errors: [0.005, 0.02, 0.05, ...Array(n).fill(0.001)].slice(0, n),
+      used: Array(n).fill(true), metres: Array(n).fill(12), source: Array(n).fill('wall'),
+      neighbours: [here.neighbour], chosen: null, errors: [0.005, 0.02, 0.05, ...Array(n).fill(0.001)].slice(0, n),
       held_out: { flat: Array(n).fill(0.04), parallax: Array(n).fill(0.01) } } });
   },
+  '**/api/epipolar': (route) => { asked.epipolar++; return route.fulfill({ json: { line: [[100, 600], [700, 640], [1200, 700]] } }); },
+  '**/api/second': (route) => { asked.second = route.request().postDataJSON(); return route.fulfill({ json: { metres: 14.2 } }); },
+  '**/api/depthview': (route) => { asked.tint++; return route.fulfill(JPEG); },
   '**/api/composite': (route) => {
-    if (JSON.parse(route.request().postData()).standing) asked.standingLaid++;
-    return route.fulfill({ contentType: 'image/jpeg', body: Buffer.from([0xff, 0xd8, 0xff, 0xd9]) });
+    if (route.request().postDataJSON().standing) asked.standingLaid++;
+    return route.fulfill(JPEG);
   },
-  '**/api/answer': (route) => { asked.answer = JSON.parse(route.request().postData()); return route.fulfill({ json: {} }); },
+  '**/api/answer': (route) => { asked.answer = route.request().postDataJSON(); return route.fulfill({ json: {} }); },
 });
+here = await deep.evaluate(() => ({ lon: near[at].lon, lat: near[at].lat, id: near[at].id,
+                                     neighbour: (near[1] ?? near[0]).id, at: [(near[1] ?? near[0]).lon, (near[1] ?? near[0]).lat] }));
+/** Where a point ([lon, lat]) of the map is on the screen. */
+const onScreen = (point) => deep.evaluate((p) => {
+  const at = map.project(p), box = map.getCanvas().getBoundingClientRect();
+  return [box.left + at.x, box.top + at.y];
+}, point);
+const clickMap = async (point, key) => {
+  const [x, y] = await onScreen(point);
+  if (key) await deep.keyboard.down(key);
+  await deep.mouse.click(x, y);
+  if (key) await deep.keyboard.up(key);
+  await deep.waitForTimeout(700);
+};
 await deep.keyboard.press('p');
-await deep.waitForTimeout(500);
-check(asked.depth === 1, `the toggle makes the view's depth ahead (${asked.depth})`);
-await pairsAt([[0.2, 0.2], [0.8, 0.2], [0.5, 0.7], [0.3, 0.5]]);
 await deep.waitForTimeout(800);
-check(asked.parallax > 0 && asked.standingLaid > 0, `four pairs refit by parallax and laid through depth (${asked.parallax}, ${asked.standingLaid})`);
+check(asked.depth.length === 1, `the toggle makes the panorama's walls ahead (${asked.depth.length})`);
+const drawn = await deep.evaluate(() => [map.getSource('walls').serialize().data.features.length,
+                                         map.getSource('segments').serialize().data.features.length]);
+check(drawn[0] === 2 && drawn[1] === 1, `the walls and BD TOPO's facades are drawn on the map (${drawn})`);
+check(await deep.locator('#third-box').isVisible(), 'pairing in parallax shows the best neighbour\'s view beside');
+await pairsAt(SIX);
+await deep.waitForTimeout(1000);
+check(asked.parallax.length > 0 && asked.standingLaid > 0, `six pairs refit by parallax and laid through depth (${asked.parallax.length}, ${asked.standingLaid})`);
 check((await deep.locator('#view-stage .dot.off').count()) >= 1, 'a pair far from the fit shows on its dot');
+check(asked.epipolar > 0 && (await deep.locator('#line').getAttribute('points')).length > 0,
+  `the last pair's line is drawn in the neighbour's view (${asked.epipolar})`);
+const third = await deep.locator('#third').boundingBox();
+await deep.mouse.click(third.x + third.width * 0.5, third.y + third.height * 0.5);
+await deep.waitForTimeout(1000);
+check(asked.second?.neighbour === here.neighbour && asked.second?.neighbour_px?.length === 2,
+  'a click in the neighbour\'s view asks the last pair\'s depth there');
+check((await deep.locator('#view-stage .dot.click').count()) === 1, 'that pair\'s dot says its depth came from a second click');
+check(asked.parallax.at(-1).second_clicks?.[5]?.neighbour === here.neighbour, 'the parallax fit is made again with the second click');
+await clickMap(here.at, 'Shift');
+check(Array.isArray(asked.depth.at(-1).neighbours) && !asked.depth.at(-1).neighbours.includes(here.neighbour),
+  `Shift-click on a neighbour used leaves it out of the walls (${JSON.stringify(asked.depth.at(-1).neighbours)})`);
+await clickMap([here.lon, here.lat], 'Shift');
+check(asked.depth.at(-1).neighbours === undefined, `Shift-click on the panorama shown gives the neighbours back to geometry (${asked.depth.length}: ${JSON.stringify(asked.depth.at(-1).neighbours)})`);
+await deep.keyboard.press('w');
+const metres = (east, north) => [here.lon + east / (111320 * Math.cos(here.lat * Math.PI / 180)), here.lat + north / 111320];
+await clickMap(metres(-15, -10)); await clickMap(metres(-15, 10));
+check(asked.walls.at(-1)?.drawn?.length === 2 && asked.walls.at(-1).removed.length === 0,
+  `a wall drawn in two clicks on the map is saved with the panorama's own (${asked.walls.at(-1)?.drawn?.length})`);
+await clickMap(metres(-6, 15));  // the fitted wall
+await deep.keyboard.press('Backspace');
+await deep.waitForTimeout(700);
+check(asked.walls.at(-1)?.removed?.length === 1, `a fitted wall chosen and ⌫ is saved as removed here (${asked.walls.at(-1)?.removed?.length})`);
+await clickMap(metres(6, 15));  // the wall drawn here
+const end = await deep.locator('.wall-end').first().boundingBox();
+await deep.mouse.move(end.x + end.width / 2, end.y + end.height / 2);
+await deep.mouse.down(); await deep.mouse.move(end.x + 40, end.y + 10, { steps: 5 }); await deep.mouse.up();
+await deep.waitForTimeout(700);
+const moved = asked.walls.at(-1);
+check(moved?.drawn?.length === 1 && moved.drawn[0].a[0] !== wallsAround(here.lon, here.lat, '', '').mine.drawn[0].a[0],
+  'dragging an end of a wall drawn here moves it');
+await deep.keyboard.press('w');
+await deep.keyboard.press('d');
+await deep.waitForTimeout(600);
+check(asked.tint > 0, 'D shows the view tinted by depth');
+await deep.keyboard.press('d');
+await deep.waitForTimeout(1500);  // the view itself again
+await deep.screenshot({ path: 'screenshots/placing-walls.png' });
 await deep.locator('.stood').click();
 await deep.waitForTimeout(300);
 const pin = await deep.evaluate(() => spot);
@@ -136,24 +213,56 @@ check(Math.abs(pin.lon - stood.lon) < 1e-9 && Math.abs(pin.lat - stood.lat) < 1e
 await deep.keyboard.press('Enter');
 await deep.waitForTimeout(800);
 const sent = asked.answer || {};
-check(sent.parallax && sent.parallax.lon !== stood.lon && sent.pairs?.photo_px?.length === 4,
-  `Entrée keeps the pairs and the pin the parallax fit started from (${JSON.stringify(sent.parallax)})`);
+check(sent.parallax && sent.parallax.lon !== stood.lon && sent.pairs?.photo_px?.length === 6
+  && sent.pairs?.second_clicks?.[5]?.neighbour === here.neighbour,
+  `Entrée keeps the pairs, their second clicks and the pin the parallax fit started from (${JSON.stringify(sent.parallax)})`);
 
 // parallax refused (too few pairs with depth): the flat fit meanwhile, so the photo can be kept
 const [flatPage, flatPairs] = await onPoints({
-  '**/api/depth': (route) => route.fulfill({ json: { details: 900 } }),
-  '**/api/parallax': (route) => route.fulfill({ status: 400, body: 'il faut au moins 4 paires avec une profondeur' }),
+  '**/api/depth': (route) => route.fulfill({ json: { ...wallsAround(...CENTRE, 'x', 'y'), neighbours: [] } }),
+  '**/api/parallax': (route) => route.fulfill({ status: 400, body: 'il faut au moins 6 paires avec une profondeur' }),
 });
 await flatPage.keyboard.press('p');
 await flatPage.waitForTimeout(300);
-await flatPairs([[0.2, 0.2], [0.8, 0.2], [0.5, 0.7], [0.3, 0.5]]);
+await flatPairs(SIX);
 await flatPage.waitForTimeout(1500);
 const flatSaid = await flatPage.textContent('#message');
 check(flatSaid.includes('à plat') && (await flatPage.evaluate(() => !!proposal)), `parallax refused falls back to the flat fit (« ${flatSaid} »)`);
 
+// a panorama COLMAP did not place: the page says so, and offers the nearest one placed
+const [unsure] = await onPoints({
+  '**/api/near**': async (route) => {
+    const found = await (await route.fetch()).json();
+    return route.fulfill({ json: found.map((p, i) => ({ ...p, fixed: i > 0 })) });
+  },
+  '**/api/depth': (route) => route.fulfill({ json: wallsAround(...CENTRE, 'x', 'y') }),
+});
+await unsure.keyboard.press('p');
+await unsure.waitForTimeout(600);
+const doubt = await unsure.textContent('#message');
+check(doubt.includes('COLMAP'), `a panorama COLMAP did not place says its depth is unsure (« ${doubt} »)`);
+
+// walls asked at one panorama, coming after the page went to the next: not taken for its own
+let slow = true;
+const [late] = await onPoints({
+  '**/api/depth': async (route) => {
+    const first = slow;
+    slow = false;
+    if (first) await new Promise((done) => setTimeout(done, 2500));
+    return route.fulfill({ json: { ...wallsAround(...CENTRE, 'x', 'y'), details: first ? 111 : 222 } });
+  },
+});
+await late.keyboard.press('p');  // the walls asked here: slow
+await late.waitForTimeout(300);
+await late.keyboard.press('p');  // parallax off, and on to the next panorama while they come
+await late.keyboard.press('.');
+await late.waitForTimeout(3500);
+const kept = await late.evaluate(() => scene?.details);
+check(kept !== 111, `walls coming late from the panorama left are not taken for the one shown (${kept})`);
+
 // no depth to be had: the toggle says why
 const [none] = await onPoints({
-  '**/api/depth': (route) => route.fulfill({ status: 400, body: 'pas de panorama voisin à 1–12 m' }),
+  '**/api/depth': (route) => route.fulfill({ status: 400, body: 'pas de panorama voisin à 2–15 m' }),
 });
 await none.keyboard.press('p');
 await none.waitForTimeout(500);

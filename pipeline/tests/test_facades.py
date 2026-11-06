@@ -64,7 +64,7 @@ def test_a_side_street_between_two_facades_on_one_line_leaves_a_gap():
     walls = facades.fit(_street(gap=(20, 30)), GROUND)
     left = [w for w in _found(walls, 0, 4.0) if max(w.a[0], w.b[0]) < 0]
 
-    through = np.array([[-4.0, 25.0, -1.0]])
+    through = np.array([[-4.0, 25.0, -2.0]])
     through /= np.linalg.norm(through)
     _, met = facades.cast(_scene(walls), through)
 
@@ -114,7 +114,7 @@ def test_a_wall_drawn_replaces_the_fitted_one_and_a_removed_one_stays_removed():
     ]
     drawn = [facades.Wall((-3.8, 0.0), (-3.8, 60.0), 20.0, "drawn")]
 
-    kept = facades.with_drawn(fitted, drawn, [((4.0, 0.0), (4.0, 60.0))])
+    kept = facades.with_drawn(fitted, drawn, [((4.0, 0.0), (4.0, 60.0))], GROUND)
 
     assert kept == drawn
 
@@ -123,7 +123,7 @@ def test_a_short_wall_drawn_aslant_replaces_only_the_stretch_it_covers():
     fitted = [facades.Wall((4.0, 2.0), (4.0, 58.0), 12.0, "fitted")]
     drawn = [facades.Wall((3.5, 28.0), (4.5, 33.0), 20.0, "drawn")]  # 11° off, 5 m long
 
-    kept = facades.with_drawn(fitted, drawn, [])
+    kept = facades.with_drawn(fitted, drawn, [], GROUND)
 
     pieces = sorted((w.a[1], w.b[1]) for w in kept if w.made == "fitted")
     assert pieces == [pytest.approx((2, 28)), pytest.approx((33, 58))]
@@ -194,7 +194,7 @@ def test_a_wall_drawn_after_a_removal_near_it_stays(tmp_path):
 def test_a_removed_wall_fitted_again_a_little_longer_stays_removed():
     fitted = [facades.Wall((4.0, 0.0), (4.0, 60.0), 12.0, "fitted")]
 
-    assert facades.with_drawn(fitted, [], [((4.0, 2.0), (4.0, 58.0))]) == []
+    assert facades.with_drawn(fitted, [], [((4.0, 2.0), (4.0, 58.0))], GROUND) == []
 
 
 def test_a_wall_drawn_again_after_its_removal_comes_back(tmp_path):
@@ -205,3 +205,43 @@ def test_a_wall_drawn_again_after_its_removal_comes_back(tmp_path):
     facades.record(path, "a", drawn, [])  # drawn there again
 
     assert facades.saved_near(path, 0.0, 30.0)[0] == drawn
+
+
+def test_a_ray_barely_down_meets_no_street_far_off():
+    walls = [facades.Wall((4.0, 0.0), (4.0, 60.0), 12.0, "fitted")]
+    ray = np.array([[0.0, np.cos(np.radians(1)), -np.sin(np.radians(1))]])  # 143 m to the street
+
+    metres, met = facades.cast(_scene(walls), ray)
+
+    assert np.isnan(metres[0]) and met[0] == facades.NOTHING
+
+
+def test_a_wall_drawn_without_its_top_takes_that_of_the_wall_it_replaces_else_twenty_metres():
+    fitted = [facades.Wall((-4.0, 2.0), (-4.0, 58.0), 12.0, "fitted")]
+    drawn = [
+        facades.Wall((-3.8, 0.0), (-3.8, 60.0), None, "drawn"),
+        facades.Wall((-5.0, 70.0), (5.0, 70.0), None, "drawn"),  # where none was fitted
+    ]
+
+    kept = facades.with_drawn(fitted, drawn, [], GROUND)
+
+    assert [w.top for w in kept] == [12.0, GROUND + facades.DRAWN_ABOVE_M]  # over the street
+
+
+def test_walls_drawn_near_say_where_they_were_drawn(tmp_path):
+    path = tmp_path / "walls.jsonl"
+    facades.record(path, "a", [facades.Wall((0.0, 5.0), (10.0, 5.0), None, "drawn")], [])
+
+    drawn, _ = facades.saved_near(path, 0.0, 0.0)
+
+    assert [w.at for w in drawn] == ["a"]
+
+
+def test_a_line_kept_for_the_details_of_one_dropped_is_fitted_to_them():
+    xy = np.column_stack([np.zeros(20), np.arange(20.0)])  # twenty details along x = 0
+    same = (np.array([1.0, 0.0]), 0.0)
+    tree = facades.cKDTree(xy)
+
+    labels, lines = facades._shared(xy, tree, [same, same])  # the first dropped, the second holds
+
+    assert len(lines) == 1 and (labels == 0).all()

@@ -28,6 +28,11 @@
             border: 2px solid var(--paper); box-shadow: 0 2px 8px #000a; z-index: 2; }
   #pair { display: none; grid-template-columns: 1fr 1fr; gap: 8px; height: 100%; padding: 8px; }
   #pair.on { display: grid; }
+  #pair.three { grid-template-columns: 1fr 1fr 1fr; }
+  #third-box .label { position: absolute; top: 4px; left: 6px; z-index: 3; font-size: 12px;
+                      background: #000b; padding: 1px 6px; border-radius: 3px; }
+  #epipolar { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+  #epipolar polyline { fill: none; stroke: #4caf7a; stroke-width: 3; vector-effect: non-scaling-stroke; }
   #pair .box { position: relative; overflow: hidden; display: flex; align-items: center; justify-content: center; }
   #pair .zoomed-stage { position: relative; max-width: 100%; max-height: 100%; }
   #pair img { display: block; max-width: 100%; max-height: calc(100vh - 120px); cursor: crosshair; }
@@ -40,6 +45,9 @@
   .dot.near { background: #f29b4e; }  /* its pair 1–3 % of the photo from the fit */
   .dot.off { background: #e0523a; color: #fff; }  /* over 3 % */
   .dot.nodepth { box-shadow: 0 0 0 2px #111, 0 0 0 4px #ede4d3; }  /* no depth: not in parallax */
+  .dot.click { box-shadow: 0 0 0 2px #111, 0 0 0 4px #4caf7a; }  /* its depth by a second click */
+  .wall-end { width: 14px; height: 14px; border-radius: 50%; background: #e8892b;
+              border: 2px solid #111; cursor: grab; }
   #parallax { font: inherit; background: #3a352e; color: var(--paper); border: 1px solid #6b6255;
               border-radius: 4px; padding: 2px 10px; cursor: pointer; }
   #parallax.on { background: var(--enamel); border-color: #8fa6c9; }
@@ -65,7 +73,13 @@
     Photo : <kbd>Entrée</kbd> elle tombe juste · <kbd>F</kbd> poser par points · <kbd>X</kbd> trop loin
     · <kbd>S</kbd> passer · <kbd>R</kbd> retourner l'image · <kbd>[</kbd><kbd>]</kbd> tourner la vue ·
     <kbd>,</kbd><kbd>.</kbd> panorama voisin · <kbd>P</kbd> parallaxe (le photographe ailleurs que
-    le panorama : point bleu sur le plan, clic pour l'accepter).
+    le panorama : point bleu sur le plan, clic pour l'accepter).<br>
+    Parallaxe : <kbd>⇧</kbd>+clic sur un panorama le prend (ou le laisse) pour les murs (cerclés de
+    vert ; sur celui montré : choisis à nouveau par leur géométrie), <kbd>⌥</kbd>+clic le montre à
+    droite · <kbd>W</kbd> murs : deux clics en tracent un (<kbd>⇧</kbd> : accroché à un coin BD TOPO),
+    clic pour en choisir un, <kbd>⌫</kbd> le retire, ses bouts se déplacent · <kbd>D</kbd> la vue
+    teintée par la distance · <kbd>N</kbd> le panorama recalé par COLMAP le plus proche · par points,
+    un clic sur le même détail dans la vue de droite donne sa profondeur à la dernière paire.
   </div>
 </section>
 <section id="main">
@@ -81,6 +95,7 @@
     <div id="pair">
       <div class="box" id="photo-box"><div class="zoomed-stage" id="photo-stage"><img id="photo" alt=""></div></div>
       <div class="box" id="view-box"><div class="zoomed-stage" id="view-stage"><img id="view" alt=""><img id="view-laid" alt=""></div></div>
+      <div class="box" id="third-box" style="display: none"><span class="label" id="third-label"></span><div class="zoomed-stage" id="third-stage"><img id="third" alt=""><svg id="epipolar" preserveAspectRatio="none"><polyline id="line"/></svg></div></div>
     </div>
   </div>
   <div id="foot">
@@ -92,7 +107,7 @@
 <script src="map.js"></script>
 <script>
 const CONE_HALF_ANGLE = 25, CONE_LENGTH_M = 25;
-let rules = { min_points: 2, min_standing: 4, view_step: 30, near_m: 40 };  // as the server sends them
+let rules = { min_points: 2, min_standing: 6, view_step: 30, near_m: 40 };  // as the server sends them
 const $ = (id) => document.getElementById(id);
 const say = (text) => { $('message').textContent = text || ''; };
 /** Show a picture made by the server in `img`, freeing the one it showed before. */
@@ -132,33 +147,61 @@ let parallaxOn = false;  // the photo fitted from where the photographer stood (
 let fitted = null;       // the last fit by points: each pair's error; in parallax, where it stood
                          // and the pin it started from (`start`: an answer refits from it)
 let fitting = 0;         // the latest fit asked for (an older one coming back is ignored)
-let deepened = null;     // the view whose depth was last asked for (panorama|heading)
+let deepened = null;     // the walls last asked for (panorama|neighbours chosen|heading)
+let scene = null;        // the walls around the panorama shown (see /api/depth): fitted, drawn
+                         // (`mine`: those drawn and removed here, as saved), BD TOPO's facades
+const choices = {};      // the neighbours chosen by hand, by panorama (none: by their geometry)
+let wallsMode = false, drawingFrom = null, selected = null;  // walls drawn on the map (W)
+let tinted = false;      // the view tinted by depth (D)
+let third = null;        // the neighbour whose view shows beside, for second clicks
+const chosenHere = () => (at >= 0 ? choices[near[at].id] : undefined);
 
 const map = new maplibregl.Map({
   container: 'map',
   style: plainStyle(
     { near: { type: 'geojson', data: { type: 'FeatureCollection', features: [] } },
-      placed: { type: 'geojson', data: { type: 'FeatureCollection', features: [] } } },
-    [{ id: 'placed', type: 'circle', source: 'placed', paint: {
+      placed: { type: 'geojson', data: { type: 'FeatureCollection', features: [] } },
+      walls: { type: 'geojson', data: { type: 'FeatureCollection', features: [] } },
+      segments: { type: 'geojson', data: { type: 'FeatureCollection', features: [] } } },
+    [{ id: 'segments', type: 'line', source: 'segments', paint: { 'line-color': '#8c867c', 'line-width': 2 } },
+     { id: 'walls', type: 'line', source: 'walls', paint: {
+        'line-color': ['match', ['get', 'made'], 'drawn', '#e8892b', '#3b7dd8'],
+        'line-width': ['case', ['get', 'selected'], 7, 4] } },
+     { id: 'placed', type: 'circle', source: 'placed', paint: {
         'circle-radius': 6, 'circle-color': ['match', ['get', 'answer'], 'far', '#7a7468', '#2f6b4f'],
         'circle-stroke-color': '#ede4d3', 'circle-stroke-width': 1.5 } },
-     { id: 'near', type: 'circle', source: 'near', paint: {
+     { id: 'used', type: 'circle', source: 'near', filter: ['get', 'used'], paint: {
+        'circle-radius': 11, 'circle-opacity': 0, 'circle-stroke-color': '#4caf7a', 'circle-stroke-width': 3 } },
+     { id: 'near', type: 'circle', source: 'near', paint: {  // placed by COLMAP: full; borrowed: hollow
         'circle-radius': ['case', ['get', 'shown'], 8, 5],
-        'circle-color': ['case', ['get', 'shown'], '#1b3a6b', '#ffffff'],
+        'circle-color': ['case', ['get', 'shown'], '#1b3a6b', ['get', 'fixed'], '#ffffff', 'rgba(0,0,0,0)'],
         'circle-stroke-color': '#1b3a6b', 'circle-stroke-width': 2 } }]),
   center: [2.3459, 48.8518], zoom: 18, keyboard: false,
+  boxZoom: false,  // Shift-click takes or leaves a neighbour (see the map's click)
 });
 const marker = new maplibregl.Marker({ color: '#8a3b12', draggable: true });
 marker.on('dragend', () => { const p = marker.getLngLat(); spot.lon = p.lng; spot.lat = p.lat; drawCone(); findNear(); });
-map.on('click', 'near', (e) => { const id = e.features[0].properties.id; goTo(near.findIndex((p) => p.id === id)); });
-map.on('click', 'placed', async (e) => {  // a photo placed: shown again, with its answer
-  if (answering || map.queryRenderedFeatures(e.point, { layers: ['near'] }).length) return;
+/** A click on the map, by what it hit and the mode: a panorama (Shift: taken or left for the
+ *  walls; ⌥: shown beside), in walls mode a wall or a wall's end, else a photo placed. */
+map.on('click', (e) => {
+  const hit = (layer) => map.queryRenderedFeatures(e.point, { layers: [layer] })[0]?.properties;
+  const { shiftKey: shift, altKey: alt } = e.originalEvent, panorama = hit('near');
+  if (panorama && shift) toggleNeighbour(panorama.id);
+  else if (panorama && alt) showBeside(panorama.id);
+  else if (wallsMode) {
+    const wall = hit('walls');
+    if (wall && !drawingFrom) { if (editable()) choose(wall.i); } else drawWall(snapped([e.lngLat.lng, e.lngLat.lat], shift));
+  } else if (panorama) goTo(near.findIndex((p) => p.id === panorama.id));
+  else if (hit('placed') && !answering) reopen(hit('placed').id);
+});
+/** A photo placed, shown again with its answer. */
+async function reopen(id) {
   try {
-    const r = await fetch(`/api/reopen/${encodeURIComponent(e.features[0].properties.id)}`);
+    const r = await fetch(`/api/reopen/${encodeURIComponent(id)}`);
     if (!r.ok) throw new Error(await r.text());
     show({ ...(await r.json()), why: 'rouverte' });
   } catch (error) { say(`Impossible de la rouvrir : ${error.message}`); }
-});
+}
 const stoodSpot = document.createElement('div');
 stoodSpot.className = 'stood';
 const stood = new maplibregl.Marker({ element: stoodSpot });
@@ -190,8 +233,9 @@ function drawCone() {
     features: spot.heading == null ? [] : [cone(spot.lon, spot.lat, spot.heading, CONE_HALF_ANGLE, CONE_LENGTH_M)] });
 }
 function drawNear() {
+  const used = parallaxOn && scene ? scene.neighbours : [];
   map.getSource('near').setData({ type: 'FeatureCollection', features: near.map((p, i) => ({
-    type: 'Feature', properties: { id: p.id, shown: i === at },
+    type: 'Feature', properties: { id: p.id, shown: i === at, fixed: !!p.fixed, used: used.includes(p.id) },
     geometry: { type: 'Point', coordinates: [p.lon, p.lat] } })) });
 }
 
@@ -208,7 +252,7 @@ async function findNear() {
 }
 async function goTo(i) {
   if (i < 0 || i >= near.length) return;
-  at = i; drawNear(); leavePairing(); pairs = []; forgetFit(); setParallax(parallaxOn);
+  at = i; deepened = null; dropScene(); leavePairing(); pairs = []; forgetFit(); setParallax(parallaxOn);
   const sphere = near[at];
   const step = rules.view_step;
   view = { heading: Math.round((spot.heading ?? 0) / step) * step % 360 };
@@ -232,17 +276,21 @@ async function goTo(i) {
   else { say('Pas de proposition : la poser par points (F revient au panorama).'); enterPairing(); }
 }
 
-function viewUrl() {
-  const v = view, p = near[at];  // the server's view when pitch and fov are not given
-  return `/view/${p.id}?heading=${v.heading}` + (v.pitch != null ? `&pitch=${v.pitch}&fov=${v.fov}` : '');
+function viewUrl(id = near[at].id) {
+  const v = view;  // the server's view when pitch and fov are not given
+  return `/view/${id}?heading=${v.heading}` + (v.pitch != null ? `&pitch=${v.pitch}&fov=${v.fov}` : '');
 }
+/** What a request about the panorama shown sends: the photo, the panorama, the view, the
+ *  neighbours chosen; and `more`. */
+const about = (more) => ({ photo_id: photo.id, panorama: near[at].id, view, heading: view.heading,
+                          neighbours: chosenHere(), ...more });
 function where() {
   $('where').textContent = at < 0 ? '' :
     `Panorama ${at + 1}/${near.length}, à ${near[at].metres} m · vue vers ${Math.round(view.heading)}°`;
 }
 async function showView() {
   where(); depthAhead();
-  $('today').src = at < 0 ? '' : viewUrl();
+  $('today').src = at < 0 ? '' : viewUrl(); if (tinted) showTint();
   shown($('laid'), '');
   if (proposal && at >= 0) {
     const seen = { ...proposal, view };  // the same registration seen from the view shown
@@ -259,6 +307,17 @@ function setParallax(on, why = '') {
   $('parallax').classList.toggle('on', on);
   $('parallax').disabled = !!why;
   $('parallax').title = why || PARALLAX_TITLE;
+  if (!on) dropScene();
+  else { if (scene && !third) third = scene.best; drawWalls(); showThird(); }
+}
+/** Everything made from the walls shown let go: walls mode, the wall chosen and its ends, the
+ *  tint, the neighbour beside (a panorama left, or parallax off). */
+function dropScene() {
+  walling++;  // the walls on their way no longer wanted
+  if (at < 0 || near[at]?.id !== scene?.panorama) scene = null;
+  setWalls(false); third = null; picked = false;
+  if (tinted) { tinted = false; showTint(); }
+  drawWalls(); showThird();
 }
 async function toggleParallax() {
   if ($('parallax').disabled || at < 0) return;
@@ -267,24 +326,210 @@ async function toggleParallax() {
   // a fit changes only from the pairs that may stand off the panorama: Entrée keeps the new one
   if (pairs.length >= rules.min_standing) { forgetFit(); fitPairs(); } else { drawDots(); help(); }
 }
-/** The depth of the view shown, made ahead (seconds the first time on a view); none to be had:
- *  the button says why, and parallax goes off. */
-async function depthAhead() {
+/** The walls around the panorama shown, made ahead (seconds the first time on a panorama), from
+ *  the neighbours chosen if any; none to be had: the button says why, and parallax goes off.
+ *  Whether these are still the walls wanted when they come. */
+let walling = 0;  // the walls last asked for, made (/api/depth) or saved (/api/walls)
+async function depthAhead(again = false) {
   if (!parallaxOn || at < 0) return false;
-  const key = `${near[at].id}|${view.heading}`;
-  if (key === deepened) return true;  // asked already for this view
+  // the walls, from the neighbours chosen; and which neighbour sees best the way the view looks
+  const key = `${near[at].id}|${JSON.stringify(chosenHere() ?? null)}|${view.heading}`;
+  if (key === deepened && !again) return true;  // asked already for these
   deepened = key;
-  say('Profondeur des détails de la vue en cours…');
+  const mine = ++walling, here = near[at].id;
+  say('Murs autour du panorama en cours…');
   try {
-    const found = await post('/api/depth', { photo_id: photo.id, panorama: near[at].id, heading: view.heading });
-    if (deepened === key) say(`Profondeur : ${found.details} détails autour de la vue.`);
-    return true;
+    const found = await post('/api/depth', about());
+    const still = mine === walling && near[at]?.id === here;  // nothing asked or left since
+    if (still) applyScene(found);
+    return still;
   } catch (error) {
-    if (deepened !== key) return false;  // another view since: this one's failure is not its
+    if (mine !== walling) return false;  // others asked since: this failure is not theirs
     deepened = null; setParallax(false, error.message); say(error.message);
     return false;
   }
 }
+/** The walls just made: drawn on the map, the neighbour beside (the best for the view unless
+ *  one was picked), and what they came from said. */
+function applyScene(found) {
+  scene = { ...found, panorama: near[at].id }; choose(null);
+  if (!picked || !scene.neighbours.includes(third)) { third = scene.best; picked = false; }
+  showThird();
+  const nearest = near.findIndex((p) => p.fixed);
+  const unsure = near[at].fixed ? '' : ' Profondeur peu sûre ici : ce panorama n\'a pas été recalé par COLMAP'
+    + (nearest >= 0 ? ` (N : le plus proche recalé, à ${near[nearest].metres} m).` : '.');
+  say((scene.why || `Murs : ${scene.walls.length}, de ${scene.details} détails vus avec `
+       + `${scene.neighbours.length} voisin(s).`) + unsure);
+}
+function drawWalls() {
+  const on = parallaxOn && scene;
+  const line = (a, b, properties) => ({ type: 'Feature', properties, geometry: { type: 'LineString', coordinates: [a, b] } });
+  map.getSource('walls').setData({ type: 'FeatureCollection', features: on
+    ? scene.walls.map((w, i) => line(w.a, w.b, { i, made: w.made, selected: selected === i })) : [] });
+  map.getSource('segments').setData({ type: 'FeatureCollection', features: on
+    ? scene.segments.map(([a, b]) => line(a, b, {})) : [] });
+  drawNear();
+}
+/** A neighbour taken for the walls, or left (Shift-click on the map; on the panorama shown:
+ *  back to those picked by their geometry): the walls made again. */
+async function toggleNeighbour(id) {
+  if (!parallaxOn || at < 0) return;
+  if (id === near[at].id) delete choices[id];
+  else {
+    const chosen = new Set(chosenHere() ?? scene?.neighbours ?? []);
+    if (chosen.has(id)) chosen.delete(id); else { chosen.add(id); third = id; picked = true; }
+    choices[near[at].id] = [...chosen].sort();  // none left: only the walls drawn by hand
+  }
+  if (await depthAhead(true)) depthChanged();
+}
+/** The walls changed: the parallax fit and the tinted view made again. */
+function depthChanged() {
+  refit();
+  if (tinted) showTint();
+}
+function refit() {
+  if (pairing && pairs.length >= rules.min_standing) { forgetFit(); fitPairs(); }
+}
+
+// --- walls drawn by hand on the map (W)
+function setWalls(on) {
+  wallsMode = on; drawingFrom = null; choose(null);
+  map.getCanvas().style.cursor = on ? 'crosshair' : '';
+}
+function toggleWalls() {
+  if (!parallaxOn || !scene) { say('Murs : la parallaxe d\'abord (P), puis W.'); return; }
+  setWalls(!wallsMode);
+  say(wallsMode ? 'Murs : deux clics en tracent un (⇧ : accroché à un coin BD TOPO), un clic sur un mur le '
+    + 'choisit (⌫ le retire, ses bouts se déplacent) ; W pour finir.' : '');
+}
+/** A point clicked on the map; with Shift, BD TOPO's nearest corner within 3 m instead. */
+function snapped(point, shift) {
+  if (!shift) return point;
+  const corners = scene.segments.flat().filter((c) => metresBetween(c, point) <= 3);
+  return corners.sort((a, b) => metresBetween(a, point) - metresBetween(b, point))[0] ?? point;
+}
+/** An end of a wall being drawn: the first, then the second, which draws it. */
+function drawWall(end) {
+  if (!editable()) return;
+  if (!drawingFrom) { choose(null); drawingFrom = end; say('Murs : le second bout.'); return; }
+  scene.mine.drawn.push({ a: drawingFrom, b: end }); drawingFrom = null; saveWalls();
+}
+/** The wall shown at `i` chosen (none: null), its ends to drag. */
+function choose(i) {
+  selected = i; drawWalls(); endMarkers();
+  if (i != null) say('Mur choisi : ⌫ le retire ; ses bouts se déplacent (un mur trouvé ainsi déplacé devient dessiné).');
+}
+/** A wall shown taken out: one drawn here, from those; another, as a wall removed here. */
+function takeOut(wall) {
+  if (wall.mine != null) scene.mine.drawn.splice(wall.mine, 1);
+  else scene.mine.removed.push({ a: wall.a, b: wall.b });
+}
+let ends = [];
+/** The chosen wall's ends, to drag: one drawn here moves; another becomes one drawn here. */
+function endMarkers() {
+  ends.forEach((m) => m.remove()); ends = [];
+  if (selected == null || !wallsMode) return;
+  const wall = scene.walls[selected];
+  ends = ['a', 'b'].map((end) => {
+    const handle = document.createElement('div'); handle.className = 'wall-end';
+    const m = new maplibregl.Marker({ element: handle, draggable: true }).setLngLat(wall[end]).addTo(map);
+    m.on('dragend', () => {
+      if (!editable()) { m.setLngLat(wall[end]); return; }
+      const p = m.getLngLat();
+      const top = wall.mine != null ? scene.mine.drawn[wall.mine].top : null;  // drawn here: its own
+      const moved = { a: wall.a, b: wall.b, top, [end]: [p.lng, p.lat] };
+      takeOut(wall); scene.mine.drawn.push(moved); saveWalls();
+    });
+    return m;
+  });
+}
+function removeChosen() {
+  if (selected == null || !editable()) return;
+  takeOut(scene.walls[selected]); saveWalls();
+}
+let saving = false;  // walls on their way to be saved: no other edit until they come back
+/** This panorama's own walls drawn and removed, saved: the walls made again with them. */
+async function saveWalls() {
+  const mine = ++walling, here = near[at].id;
+  saving = true; choose(null);
+  try {
+    const found = await post('/api/walls', about({ drawn: scene.mine.drawn, removed: scene.mine.removed }));
+    if (mine !== walling || near[at]?.id !== here) return;  // asked again since, or elsewhere now
+    applyScene(found); depthChanged();
+  } catch (error) { if (mine === walling) { say(error.message); depthAhead(true); } }  // as they are
+  finally { saving = false; }
+}
+/** Whether the walls may be edited now (none on its way to be saved). */
+function editable() {
+  if (saving) say('Murs : enregistrement en cours…');
+  return !saving;
+}
+
+// --- the view tinted by depth (D)
+let tinting = 0;
+async function showTint() {
+  if (at < 0) return;
+  const img = pairing ? $('view') : $('today'), mine = ++tinting;
+  if (!tinted) { shown($('today'), viewUrl()); if (pairing) shown($('view'), viewUrl()); return; }
+  try {
+    const drawn = await post('/api/depthview', about());
+    if (mine === tinting) shown(img, drawn); else URL.revokeObjectURL(drawn);
+  } catch (error) { if (mine === tinting) { tinted = false; say(error.message); } }
+}
+function toggleTint() {
+  if (!parallaxOn) { say('La vue teintée par la distance : la parallaxe d\'abord (P).'); return; }
+  tinted = !tinted; showTint();
+}
+
+// --- a pair's depth by a second click, in a neighbour's view facing the same way
+let picked = false;  // the neighbour beside picked by hand, not the best for the view
+/** A neighbour of the walls shown beside (⌥-click on the map). */
+function showBeside(id) {
+  if (!scene?.neighbours.includes(id)) { if (scene) say('Ce panorama ne donne pas les murs : ⇧+clic pour l\'y prendre.'); return; }
+  third = id; picked = true; showThird();
+}
+function showThird() {
+  const on = !!(pairing && parallaxOn && third);
+  $('pair').classList.toggle('three', on);
+  $('third-box').style.display = on ? '' : 'none';
+  if (!on) return;
+  const away = near.find((p) => p.id === third)?.metres;
+  $('third-label').textContent = `un voisin${away != null ? ` à ${away} m` : ''} : le même détail y donne `
+    + 'sa profondeur à la dernière paire';
+  if (!$('third').src.endsWith(viewUrl(third))) $('third').src = viewUrl(third);
+  drawDots();
+}
+let lined = '';
+/** Where the last pair's detail may stand in the neighbour's view: the line its ray draws there
+ *  (asked again only when the last pair or the neighbour changes). */
+async function drawLine() {
+  const last = pairs.at(-1);
+  const key = pairing && last && third ? `${third}|${last[1]}` : '';
+  if (key === lined) return;
+  lined = key;
+  $('line').setAttribute('points', '');
+  if (!key) return;
+  try {
+    const found = await post('/api/epipolar', about({ view_px: last[1], neighbour: third }));
+    if (lined !== key) return;
+    const side = $('third').naturalWidth || 1280;
+    $('epipolar').setAttribute('viewBox', `0 0 ${side} ${$('third').naturalHeight || side}`);
+    $('line').setAttribute('points', found.line.map(([x, y]) => `${x},${y}`).join(' '));
+  } catch { if (lined === key) lined = ''; }  // no line (asked again later): the click still works
+}
+$('third').addEventListener('click', async (e) => {
+  if (!pairing || !pairs.length || !third) return;
+  const pair = pairs.at(-1), px = pixelOf($('third'), e), neighbour = third;
+  try {
+    const found = await post('/api/second', about({ view_px: pair[1], neighbour, neighbour_px: px }));
+    const i = pairs.indexOf(pair);
+    if (i < 0) return;  // that pair taken back meanwhile
+    pair[2] = { neighbour, px };
+    say(`Paire ${i + 1} : à ${found.metres.toFixed(1)} m, par le second clic.`);
+    drawDots(); refit();
+  } catch (error) { say(error.message); }
+});
+
 /** A fit made for pairs, a view or a panorama no longer shown: forgotten, and one on its way
  *  ignored when it comes back. */
 function forgetFit() {
@@ -303,17 +548,21 @@ function enterPairing() {
   $('square').style.display = 'none'; $('pinned').style.display = 'none'; $('pair').classList.add('on');
   $('photo').src = photoUrl();
   $('view').src = viewUrl(); shown($('view-laid'), '');
-  drawDots(); help();
+  if (tinted) showTint();
+  showThird(); drawDots(); help();
 }
 function leavePairing() {
-  pairing = false; $('pair').classList.remove('on');
+  pairing = false; $('pair').classList.remove('on', 'three'); $('third-box').style.display = 'none';
   $('square').style.display = ''; $('pinned').style.display = '';
   document.querySelectorAll('.dot').forEach((d) => d.remove()); $('points-help').textContent = '';
   fadeable();
 }
 function help() {
-  const deep = fitted?.used ? ` · parallaxe : ${fitted.used.filter(Boolean).length} paire(s) avec profondeur`
-      + (fitted.only_unfixed?.some(Boolean) ? ' (certaines venues de panoramas non recalés)' : '')
+  const deeper = ' ; à la dernière, un second clic à droite, ou un mur dessiné (W)';
+  const counted = fitted?.used?.filter(Boolean).length;
+  const deep = fitted?.used
+    ? ` · parallaxe : ${counted}/${pairs.length} paire(s) avec profondeur (il en faut ${rules.min_standing})`
+      + (counted < pairs.length ? deeper : '')
     : parallaxOn ? ` · parallaxe : il en faut ${rules.min_standing} avec profondeur` : '';
   $('points-help').textContent = pairing
     ? `${pairs.length} paire(s) — cliquer un détail dans la photo puis le même dans la vue ; cliquer un point pour le déplacer ; ⌫ annuler la dernière`
@@ -335,22 +584,27 @@ function drawDots() {
     dot.style.top = `${y / img.naturalHeight * img.offsetHeight}px`;
     img.parentElement.appendChild(dot);  // the stage
   };
-  pairs.forEach(([a, b], i) => { place($('photo'), a, i + 1); place($('view'), b, i + 1); });
+  pairs.forEach(([a, b, second], i) => {
+    place($('photo'), a, i + 1); place($('view'), b, i + 1);
+    if (second && second.neighbour === third) place($('third'), second.px, i + 1);
+  });
+  drawLine();
   if (waiting) place($('photo'), waiting, pairs.length + 1, true);
 }
 /** How far pair `i` lies from the fit shown (shares of the photo's diagonal): its dot's class. */
 function dotClass(i) {
   const error = fitted?.errors?.[i];
-  const depthless = fitted?.used && !fitted.used[i] ? ' nodepth' : '';
-  if (typeof error !== 'number') return depthless;
-  return (error > 0.03 ? 'off' : error > 0.01 ? 'near' : '') + depthless;
+  const marks = (fitted?.used && !fitted.used[i] ? ' nodepth' : '') + (pairs[i]?.[2] ? ' click' : '');
+  if (typeof error !== 'number') return marks;
+  return (error > 0.03 ? 'off' : error > 0.01 ? 'near' : '') + marks;
 }
+const DEPTH_FROM = { wall: 'mur trouvé', drawn: 'mur dessiné', ground: 'la rue', click: 'second clic' };
 function dotTitle(i) {
   if (!fitted?.errors) return '';
   const percent = (v) => typeof v === 'number' ? `${(v * 100).toFixed(1)} %` : v === 'refusé' ? 'refusé' : '—';
   const held = fitted.held_out?.parallax ?? fitted.held_out;  // in parallax, its own
-  const depth = fitted.metres ? (fitted.metres[i] == null ? ' · pas de profondeur'
-    : ` · à ${fitted.metres[i].toFixed(1)} m (${(fitted.from[i] || []).length} voisin(s))`) : '';
+  const depth = fitted.metres ? (fitted.metres[i] == null ? ' · pas de profondeur : son rayon ne touche aucun mur'
+    : ` · à ${fitted.metres[i].toFixed(1)} m (${DEPTH_FROM[fitted.source[i]] ?? fitted.source[i]})`) : '';
   return `écart ${percent(fitted.errors[i])} de la photo, ${percent(held?.[i])} sans elle${depth}`;
 }
 /** The pair whose point, in `img` (0: the photo, 1: the view), lies under a click, if any. */
@@ -383,8 +637,8 @@ function pairsChanged() {
 }
 async function fitPairs(deep = true) {
   refused = '';
-  const asked = { photo_id: photo.id, panorama: near[at].id, view, flipped,
-                  photo_px: pairs.map((p) => p[0]), view_px: pairs.map((p) => p[1]) };
+  const asked = about({ flipped, photo_px: pairs.map((p) => p[0]), view_px: pairs.map((p) => p[1]),
+                        second_clicks: pairs.map((p) => p[2] ?? null) });
   const start = { lon: spot.lon, lat: spot.lat };
   const [route, sent, done] = deep && parallaxOn && pairs.length >= rules.min_standing
     ? ['/api/parallax', { ...asked, ...start }, 'Recalée en parallaxe : le point bleu, sur le plan, est où se tenait le photographe.']
@@ -397,7 +651,7 @@ async function fitPairs(deep = true) {
     proposal = fitted.registration; made = 'points'; showStood(fitted); say(done);
     drawDots(); help();
     const laid = fitted.standing
-      ? { photo_id: photo.id, panorama: near[at].id, view, flipped, standing: fitted.standing }
+      ? about({ flipped, standing: fitted.standing })
       : { photo_id: photo.id, registration: proposal, flipped };
     const drawn = await post('/api/composite', laid);
     if (mine === fitting) shown($('view-laid'), drawn); else URL.revokeObjectURL(drawn);
@@ -423,9 +677,10 @@ async function answer(kind) {
   if (kind === 'fits' || kind === 'points') body.registration = proposal;
   if (kind === 'fits' && carried) body.carried_from = carried;
   if (kind === 'points' && fitted) {  // the pairs of the fit shown (not those clicked since)
-    const { photo_px, view_px } = fitted.asked;
-    body.pairs = { photo_px, view_px, view: fitted.asked.view };
-    if (fitted?.start) body.parallax = fitted.start;  // the camera refitted from it
+    const { photo_px, view_px, view: seen, second_clicks, neighbours } = fitted.asked;
+    body.pairs = { photo_px, view_px, view: seen, second_clicks };
+    body.neighbours = neighbours;
+    if (fitted.start) body.parallax = fitted.start;  // the camera refitted from it
   }
   try { await post('/api/answer', body); await next(); }
   catch (error) { say(error.message); }
@@ -457,6 +712,14 @@ document.addEventListener('keydown', (e) => {
     if (pairing) enterPairing(); else { pairs = []; parallaxAfresh(); showView(); }  // pairs of that view gone
   } else if (e.key === ',' || e.key === '.') goTo(at + (e.key === ',' ? -1 : 1));
   else if (e.key === 'p' || e.key === 'P') toggleParallax();
+  else if (e.key === 'w' || e.key === 'W') toggleWalls();
+  else if (e.key === 'd' || e.key === 'D') toggleTint();
+  else if (e.key === 'n' || e.key === 'N') {
+    const placed = near.findIndex((p) => p.fixed);
+    if (placed < 0) say('Aucun panorama recalé par COLMAP ici.');
+    else if (placed === at) say('C\'est déjà le panorama recalé le plus proche.');
+    else goTo(placed);
+  } else if (e.key === 'Backspace' && wallsMode && selected != null) removeChosen();
   else if (e.key === 'a' || e.key === 'A') toggleAerial(map); else if (e.key === 'Backspace' && pairing) {
     if (waiting) waiting = null; else pairs.pop();
     pairsChanged();
@@ -493,7 +756,7 @@ function show(next) {
 }
 
 // the dots, in the stage, move with the picture zoomed, and keep their size (see .dot)
-for (const name of ['photo', 'view']) {
+for (const name of ['photo', 'view', 'third']) {
   const stage = $(`${name}-stage`);
   zoomable($(`${name}-box`), stage, { onZoom: (scale) => stage.style.setProperty('--zoom', scale) });
 }
