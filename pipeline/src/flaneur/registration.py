@@ -29,7 +29,6 @@ STANDING_SHIFTED_FROM = 6  # and its lens shift too
 STANDING_OFF = 0.01  # a pair this far (share of the photo's diagonal: 10 px of 1000) counts less
 STANDING_FOCAL = (0.2, 5.0)  # times the photo's longer side, as the flat fit's: beyond, the
 # camera slid along its axis (a longer lens traded for a farther stand)
-PANORAMA_HEIGHT_M = 2.5  # a panorama's camera above the street (Panoramax cars): the ground
 HIDDEN = 1.1  # a point this much farther from the camera than the nearest it sees there
 TRIPOD_M = 1.5  # a standing camera is first looked for this high above the street
 MIN_FRAME = 0.10  # share of the view the warped photo covers (Blanc, Produit, Ingensand 2018)
@@ -373,6 +372,14 @@ def held_out_standing(
         without,
         lambda s, i: errors_standing(s, photo_px[[i]], world[[i]])[0],
     )
+
+
+def own_directions(view_px: np.ndarray, view: ViewOf, axes: np.ndarray, side: int) -> np.ndarray:
+    """The unit directions, in the panorama's own picture, of pixels of a view `side` pixels
+    square (corners at whole numbers) cut from it levelled with `axes` (see view_pixels)."""
+    unit = np.column_stack([np.asarray(view_px, float) / side, np.ones(len(view_px))])
+    own = unit @ _to_camera(view, axes).T
+    return own / np.linalg.norm(own, axis=1, keepdims=True)
 
 
 def in_view(r: Registration, view: ViewOf, axes: np.ndarray) -> np.ndarray:

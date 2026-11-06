@@ -5,8 +5,10 @@ import json
 import cv2
 import numpy as np
 import pytest
+from shapely.geometry import Point
 
-from flaneur import match, placing, placings, registration
+from flaneur import depth, match, placing, placings, registration
+from flaneur.gazetteer import to_degrees, to_metres
 from flaneur.registration import ViewOf
 
 SIDE = 640
@@ -124,7 +126,8 @@ def test_points_clicked_give_the_registration_back(page, one):
     status, answer = one(sources, "POST", "/api/fit", body)
 
     assert status == 200
-    assert np.allclose(registration.from_json(json.loads(answer)).matrix, proposal.matrix)
+    found = json.loads(answer)["registration"]
+    assert np.allclose(registration.from_json(found).matrix, proposal.matrix)
 
 
 def test_the_proposal_and_the_panoramas_near_are_given(page, one):
@@ -468,3 +471,265 @@ def test_a_picture_not_a_whole_sphere_is_not_taken_for_one(page, one):
     _, jpeg = one(sources, "GET", "/view/p1?heading=140&pitch=5&fov=75")
 
     assert cv2.imdecode(np.frombuffer(jpeg, np.uint8), 1).max() > 0  # its own
+
+
+# --- parallax: the old camera where the photographer stood
+
+
+def _facing(heading: float) -> np.ndarray:
+    """From the world to a camera facing `heading`, level (x right, y down, z ahead)."""
+    h = np.radians(heading)
+    return np.array([[np.cos(h), -np.sin(h), 0.0], [0.0, 0.0, -1.0], [np.sin(h), np.cos(h), 0.0]])
+
+
+def _street(sphere: match.Panorama):
+    """An old camera standing 2 m from the panorama, facing its view at 140°, and the details
+    of a street it saw: in the world, as clicked in the photo (80 × 60) and in the view shown."""
+    home = np.array([sphere.x, sphere.y, sphere.z])
+    camera = registration.Standing(
+        tuple(home + [1.5, 1.3, -1.0]),
+        tuple(cv2.Rodrigues(_facing(140.0))[0].ravel()),
+        70.0,
+        (0.0, 0.0),
+        (60, 80),
+    )
+    ahead = np.array([np.sin(np.radians(140)), np.cos(np.radians(140)), 0.0])
+    right = np.array([np.cos(np.radians(140)), -np.sin(np.radians(140)), 0.0])
+    world = np.array(
+        [
+            home + d * ahead + x * right + [0.0, 0.0, z]
+            for d, x, z in [
+                (8, -3, -1),
+                (10, 2.5, 1),
+                (15, -4, 2),
+                (15, 4, -1.5),
+                (30, -2, 4),
+                (30, 5, 0),
+                (12, 0, 3),
+                (25, 1, -2),
+            ]
+        ]
+    )
+    rays = (world - home) / np.linalg.norm(world - home, axis=1, keepdims=True)
+    view_px = registration.view_pixels(
+        rays @ sphere.axes.T, ViewOf(140.0), sphere.axes, placing.SHOWN
+    )
+    depths = depth.Depths(
+        "p1",
+        rays,
+        np.linalg.norm(world - home, axis=1),
+        np.array(["p2"] * len(world)),
+        np.ones(len(world), bool),
+    )
+    return camera, world, camera.project(world), view_px, depths
+
+
+def _parallax_body(sphere, photo_px, view_px, pin_off=(1.0, -1.0)):
+    camera_at = to_degrees(Point(sphere.x + 1.5 + pin_off[0], sphere.y + 1.3 + pin_off[1]))
+    return {
+        "photo_id": "pm:1",
+        "panorama": "p1",
+        "view": {"heading": 140.0, "pitch": 5, "fov": 75},
+        "photo_px": photo_px.tolist(),
+        "view_px": view_px.tolist(),
+        "lon": camera_at.x,
+        "lat": camera_at.y,
+    }
+
+
+def test_a_fit_gives_each_pairs_error(page, one):
+    sources, _ = page
+    seen = cv2.perspectiveTransform(SPREAD[None], H)[0]
+    body = {
+        "photo_id": "pm:1",
+        "panorama": "p1",
+        "view": {"heading": 140.0},
+        "photo_px": (SPREAD * [80, 60]).tolist(),
+        "view_px": (seen * placing.SHOWN).tolist(),
+    }
+
+    status, answer = one(sources, "POST", "/api/fit", body)
+
+    found = json.loads(answer)
+    assert status == 200 and len(found["errors"]) == len(found["held_out"]) == len(SPREAD)
+    assert registration.from_json(found["registration"]).panorama == "p1"
+
+
+def test_parallax_gives_where_the_photographer_stood(page, one):
+    sources, _ = page
+    sphere = sources.spheres[0]
+    camera, _, photo_px, view_px, depths = _street(sphere)
+    sources.depths = lambda panorama, heading: depths
+
+    status, answer = one(
+        sources, "POST", "/api/parallax", _parallax_body(sphere, photo_px, view_px)
+    )
+
+    found = json.loads(answer)
+    stood = to_metres(Point(found["lon"], found["lat"]))
+    assert status == 200 and all(found["used"])
+    assert np.hypot(stood.x - camera.position[0], stood.y - camera.position[1]) < 0.2
+    assert found["height_above_ground"] == pytest.approx(1.5, abs=0.2)
+    assert found["from"][0] == ["p2"] and len(found["held_out"]["parallax"]) == len(photo_px)
+
+
+def test_parallax_without_neighbours_says_why(page, one):
+    sources, _ = page
+    sphere = sources.spheres[0]
+    _, _, photo_px, view_px, _ = _street(sphere)
+
+    status, reason = one(
+        sources, "POST", "/api/parallax", _parallax_body(sphere, photo_px, view_px)
+    )
+
+    assert status == 400 and "voisin" in reason.decode()
+
+
+def test_parallax_uses_the_depths_of_the_panorama_and_the_way_asked(page, one):
+    sources, _ = page
+    sphere = sources.spheres[0]
+    _, _, photo_px, view_px, depths = _street(sphere)
+    asked = []
+    sources.depths = lambda panorama, heading: asked.append((panorama, heading)) or depths
+
+    one(sources, "POST", "/api/parallax", _parallax_body(sphere, photo_px, view_px))
+
+    assert asked == [("p1", 140.0)]
+
+
+def test_a_photo_laid_by_its_standing_camera_is_drawn(page, one):
+    sources, _ = page
+    sphere = sources.spheres[0]
+    camera, _, _, _, depths = _street(sphere)
+    sources.depths = lambda panorama, heading: depths
+    body = {
+        "photo_id": "pm:1",
+        "panorama": "p1",
+        "view": {"heading": 140.0, "pitch": 5, "fov": 75},
+        "standing": registration.standing_to_json(camera),
+    }
+
+    status, jpeg = one(sources, "POST", "/api/composite", body)
+
+    assert status == 200 and cv2.imdecode(np.frombuffer(jpeg, np.uint8), 1) is not None
+
+
+def test_an_answer_in_parallax_keeps_the_camera_its_pairs_give(page, one):
+    sources, proposal = page
+    sphere = sources.spheres[0]
+    camera, _, photo_px, view_px, depths = _street(sphere)
+    sources.depths = lambda panorama, heading: depths
+    pin = _parallax_body(sphere, photo_px, view_px)
+    body = {
+        **ANSWER,
+        "answer": "points",
+        "registration": registration.to_json(proposal),
+        "lon": pin["lon"],
+        "lat": pin["lat"],
+        "parallax": {"lon": pin["lon"], "lat": pin["lat"]},
+        "pairs": {"photo_px": photo_px.tolist(), "view_px": view_px.tolist(), "view": pin["view"]},
+    }
+
+    status, _ = one(sources, "POST", "/api/answer", body)
+
+    row = placings.holding(sources.placings)["pm:1"]
+    assert status == 200 and row["fit"] == "parallax" and row["pairs"]["side"] == placing.SHOWN
+    assert np.allclose(np.linalg.norm(row["pairs"]["own"], axis=1), 1.0)
+    kept = placings.standing_of(row)  # made again from the pairs saved, not taken from the page
+    assert np.allclose(kept.position, camera.position, atol=0.2)
+    assert row["standing"]["from"][0] == ["p2"]
+
+
+def test_an_answer_by_points_keeps_its_pairs_without_parallax(page, one):
+    sources, proposal = page
+    sphere = sources.spheres[0]
+    _, _, photo_px, view_px, _ = _street(sphere)
+    body = {
+        **ANSWER,
+        "answer": "points",
+        "registration": registration.to_json(proposal),
+        "pairs": {
+            "photo_px": photo_px.tolist(),
+            "view_px": view_px.tolist(),
+            "view": {"heading": 140.0, "pitch": 5, "fov": 75},
+        },
+    }
+
+    status, _ = one(sources, "POST", "/api/answer", body)
+
+    row = placings.holding(sources.placings)["pm:1"]
+    assert status == 200 and row["fit"] == "flat" and placings.standing_of(row) is None
+
+
+def test_the_depth_of_a_view_is_made_ahead_when_asked(page, one):
+    sources, _ = page
+    _, _, _, _, depths = _street(sources.spheres[0])
+    asked = []
+    sources.depths = lambda panorama, heading: asked.append((panorama, heading)) or depths
+    body = {"photo_id": "pm:1", "panorama": "p1", "heading": 140.0}
+
+    status, answer = one(sources, "POST", "/api/depth", body)
+
+    assert status == 200 and json.loads(answer)["details"] == len(depths.metres)
+    assert asked == [("p1", 140.0)]
+
+
+def test_no_depth_ahead_without_neighbours_says_why(page, one):
+    sources, _ = page
+
+    status, reason = one(
+        sources, "POST", "/api/depth", {"photo_id": "pm:1", "panorama": "p1", "heading": 0}
+    )
+
+    assert status == 400 and "voisin" in reason.decode()
+
+
+def test_depth_that_fails_to_be_made_says_why(page, one):
+    sources, _ = page
+
+    def broken(panorama, heading):
+        raise RuntimeError("le graphique a manqué de mémoire")
+
+    sources.depths = broken
+    body = {"photo_id": "pm:1", "panorama": "p1", "heading": 140.0}
+
+    status, reason = one(sources, "POST", "/api/depth", body)
+
+    assert status == 400 and "mémoire" in reason.decode()
+
+
+def test_an_answer_in_parallax_refits_from_the_pin_it_started_from(page, one):
+    sources, proposal = page
+    sphere = sources.spheres[0]
+    _, _, photo_px, view_px, depths = _street(sphere)
+    sources.depths = lambda panorama, heading: depths
+    asked = _parallax_body(sphere, photo_px, view_px)
+    _, shown = one(sources, "POST", "/api/parallax", asked)
+    shown = json.loads(shown)
+    body = {
+        **ANSWER,
+        "answer": "points",
+        "registration": registration.to_json(proposal),
+        "lon": shown["lon"],
+        "lat": shown["lat"],  # the position accepted, the pin moved there
+        "parallax": {"lon": asked["lon"], "lat": asked["lat"]},  # where the fit started
+        "pairs": {
+            "photo_px": asked["photo_px"],
+            "view_px": asked["view_px"],
+            "view": asked["view"],
+        },
+    }
+
+    status, _ = one(sources, "POST", "/api/answer", body)
+
+    kept = placings.standing_of(placings.holding(sources.placings)["pm:1"])
+    assert status == 200 and kept == registration.standing_from_json(shown["standing"])
+
+
+def test_a_composite_with_no_standing_camera_is_the_flat_one(page, one):
+    sources, proposal = page
+    body = {"photo_id": "pm:1", "registration": registration.to_json(proposal), "standing": None}
+
+    status, _ = one(sources, "POST", "/api/composite", body)
+
+    assert status == 200

@@ -6,7 +6,7 @@ import io
 import json
 import shutil
 import time
-from collections import Counter
+from collections import Counter, OrderedDict
 from collections.abc import Callable, Iterable
 from contextlib import closing
 from dataclasses import asdict, replace
@@ -31,6 +31,7 @@ from flaneur import (
     confirming,
     db,
     dedup,
+    depth,
     export,
     fakes,
     geocode,
@@ -68,6 +69,7 @@ WEB_DATA = ROOT / "web" / "public" / "data"  # the walk, as the site reads it (n
 REVIEWS = DATA / "overrides" / "reviews.jsonl"
 SIGHTS = DATA / "overrides" / "sights.jsonl"  # the landmarks marked in photos, by hand
 CORRECTIONS = DATA / "pilot" / "panorama_corrections.json"  # on the buildings (register): unused
+KEPT_DEPTHS = 24  # views' details with their depth the placing page keeps (1.4 MB each)
 FIXES = DATA / "pilot" / "panorama_fixes.json"  # panoramas placed with each other (reconstruct)
 PLACINGS = DATA / "overrides" / "placings.jsonl"  # the user's answers on the placing page
 TILTS = DATA / "pilot" / "panorama_tilts.json"  # how each one's camera leaned (level)
@@ -331,10 +333,14 @@ def _placed(pictures: list[Picture]) -> list[Picture]:
     as their run's nearest panoramas so placed (reconstruct.borrowed), else as recorded (not
     by their own roofs and corners: see register)."""
     fixes = register.load(FIXES)
-    found = {
-        p.id: tuple(fixes[p.id]["fix"]) for p in pictures if register.still(fixes.get(p.id), p)
-    }
+    found = {i: tuple(fixes[i]["fix"]) for i in _fixed_by_colmap(pictures, fixes)}
     return register.applied(pictures, reconstruct.borrowed(found, pictures))
+
+
+def _fixed_by_colmap(pictures: list[Picture], fixes: dict) -> set[str]:
+    """The panoramas COLMAP placed itself (`fixes`: register.load(FIXES)), as they are recorded
+    now (the others borrow a fix from their run, or stay as recorded: see _placed)."""
+    return {p.id for p in pictures if register.still(fixes.get(p.id), p)}
 
 
 @app.command("register")
@@ -1045,9 +1051,8 @@ def match_check(tries: int = 20, seed: int = 0) -> None:
     rng = np.random.default_rng(seed)
     marking = np.random.default_rng([seed, 1])  # its own: the fakes stay the same
     # only panoramas COLMAP placed: another's place is borrowed from its run, or its phone's
-    fixes = register.load(FIXES)
     with closing(db.connect(DB_PATH)) as conn:
-        fixed = {p.id for p in panoramas.load(conn) if register.still(fixes.get(p.id), p)}
+        fixed = _fixed_by_colmap(panoramas.load(conn), register.load(FIXES))
     placed = [p for p in near_by if p.id in fixed]
     tries = min(tries, len(placed))
     if not tries:
@@ -1632,6 +1637,7 @@ def place_photos(
     with closing(db.connect(DB_PATH)) as conn:  # where each photo is best known now
         walk = _walk(conn, _placing_answers(answers)[0])
         copies = dedup.negatives(conn)
+        fixed = _fixed_by_colmap(panoramas.load(conn), register.load(FIXES))  # trusted first
     photos = {
         me.id: {
             "title": me.title,
@@ -1743,8 +1749,33 @@ def place_photos(
             rgb = cv2.resize(rgb, size, interpolation=cv2.INTER_AREA)
         return np.ascontiguousarray(rgb[:, :, ::-1])  # as OpenCV reads pictures
 
+    made: OrderedDict[tuple[str, int], depth.Depths] = OrderedDict()  # 1.4 MB each
+
+    def depth_toward(panorama: str, k: int) -> depth.Depths | None:
+        """One view's details with their depth, made once (asked twice at once: made once,
+        the second waiting), kept for KEPT_DEPTHS views; none made is asked again next time."""
+        if (panorama, k) not in made:
+            with sources.matching:  # the matcher, with the proposals
+                if (panorama, k) not in made:
+                    found = depth.of_panorama(by_id[panorama], spheres, fixed, models(), [k])
+                    if found is None:
+                        return None
+                    made[panorama, k] = found
+                    while len(made) > KEPT_DEPTHS:
+                        made.popitem(last=False)
+        return made.get((panorama, k))
+
+    def depths(panorama: str, heading: float) -> depth.Depths | None:
+        """The depth of today's details around a panorama the way a view faces (see
+        depth.around), made with the matcher, kept per view as the view turns."""
+        if not live:
+            raise ValueError("pas de parallaxe sans le modèle : relancer sans --no-live")
+        if panorama not in by_id:
+            return None
+        return depth.around(heading, lambda k: depth_toward(panorama, k))
+
     sources = placing.Sources(
-        photos, spheres, answers, proposal, ahead, graph, carried_now, full=full
+        photos, spheres, answers, proposal, ahead, graph, carried_now, full=full, depths=depths
     )
     with httpx.Client(timeout=10, follow_redirects=True) as client:
         _serve_page(

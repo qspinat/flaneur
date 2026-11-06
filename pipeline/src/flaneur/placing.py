@@ -19,8 +19,9 @@ import cv2
 import numpy as np
 from shapely.geometry import Point
 
-from flaneur import localpage, match, placings, queueing, registration
+from flaneur import depth, localpage, match, placings, queueing, registration
 from flaneur.gazetteer import to_degrees, to_metres
+from flaneur.panoramas import PANORAMA_HEIGHT_M
 from flaneur.registration import ViewOf
 
 PAGE = Path(__file__).with_name("placing_page.html")
@@ -29,6 +30,7 @@ SHOWN = 2 * match.VIEW_SIDE  # a view's side as the page shows it: 1280 px, what
 # panorama 6144 px around holds (see Sources.full)
 FULL_WIDTH = round(SHOWN * 360 / match.VIEW_FOV)  # 6144 px around: SHOWN px in a 75° view
 KEPT_PICTURES = 6  # 360° pictures kept decoded (57 MB each at FULL_WIDTH)
+KEPT_VIEWS = 8  # views' depth kept (6.6 MB each at SHOWN, float32), refitted on the same view
 RETRY_S = 60.0  # a larger picture not had (offline...) is asked for again after this
 
 
@@ -47,6 +49,11 @@ class Sources:
     # a panorama's picture larger than its own (see SHOWN), the views shown cut from it; none to
     # be had, its own
     full: Callable[[str], np.ndarray | None] = lambda _: None
+    # the depth of today's details around a panorama, the way a view faces (see depth); none
+    # without neighbours or the matcher
+    depths: Callable[[str, float], depth.Depths | None] = lambda *_: None
+    # the matcher, one thing at a time: proposals, and depth when it must be made
+    matching: threading.Lock = field(default_factory=threading.Lock)
 
 
 class Around:
@@ -72,6 +79,83 @@ def settings() -> dict:
         "min_points": registration.MIN_POINTS,
         "view_step": 360 // len(match.VIEW_HEADINGS),
         "near_m": NEAR_M,
+    }
+
+
+def _listed(values: np.ndarray) -> list:
+    """Numbers as JSON has them: NaN (none) as null, infinite (a fit refused) as "refusé"."""
+    return [None if np.isnan(v) else "refusé" if np.isinf(v) else float(v) for v in values]
+
+
+def flat(
+    photo_px: np.ndarray, view_px: np.ndarray, view: ViewOf, sphere: match.Panorama, size: tuple
+) -> tuple[dict, registration.Registration]:
+    """The photo laid by its camera at the panorama, from pairs clicked in a view shown at
+    SHOWN: as the page has it (with each pair's error, fitted and held out), and the fit."""
+    fitted, _ = registration.fit(photo_px, view_px, size, SHOWN, sphere.id, view, sphere.axes)
+    errors = registration.errors_flat(fitted, photo_px, view_px, size, SHOWN, view, sphere.axes)
+    held_out = registration.held_out_flat(photo_px, view_px, size, SHOWN, view, sphere.axes)
+    found = {
+        "registration": registration.to_json(fitted),
+        "errors": _listed(errors),
+        "held_out": _listed(held_out),
+    }
+    return found, fitted
+
+
+def parallax(
+    photo_px: np.ndarray,
+    view_px: np.ndarray,
+    view: ViewOf,
+    sphere: match.Panorama,
+    size: tuple,
+    depths: depth.Depths,
+    pin: tuple[float, float],
+    held_out: bool = True,
+) -> dict:
+    """The photo's camera where the photographer stood: from the pairs whose panorama point has
+    a depth (see depth), started from the flat fit and the user's `pin`; where it stood, each
+    pair's depth and the neighbours it came from, and its error, fitted and held out (both;
+    `held_out` False, none: when only the camera is wanted)."""
+    if held_out:
+        shown, start = flat(photo_px, view_px, view, sphere, size)
+    else:
+        start, _ = registration.fit(photo_px, view_px, size, SHOWN, sphere.id, view, sphere.axes)
+    rays = registration.own_directions(view_px, view, sphere.axes, SHOWN) @ sphere.axes
+    metres, only_unfixed, came = depth.at(depths, rays)
+    world = np.array([sphere.x, sphere.y, sphere.z]) + metres[:, None] * rays
+    ground = sphere.z - PANORAMA_HEIGHT_M  # under the panorama (see scene)
+    fitting = (photo_px, world, size, start, sphere.axes, pin, ground)
+    found, used = registration.fit_standing(*fitting)
+    stood = to_degrees(Point(found.position[0], found.position[1]))
+    return {
+        "standing": registration.standing_to_json(found),
+        "lon": stood.x,
+        "lat": stood.y,
+        "height_above_ground": found.position[2] - ground,
+        "used": used.tolist(),
+        "metres": _listed(metres),
+        "from": came,
+        "only_unfixed": only_unfixed.tolist(),
+        "errors": _listed(registration.errors_standing(found, photo_px, world)),
+        "held_out": held_out
+        and {
+            "flat": shown["held_out"],
+            "parallax": _listed(registration.held_out_standing(*fitting)),
+        },
+    }
+
+
+def kept_pairs(pairs: dict, sphere: match.Panorama) -> dict:
+    """Pairs clicked in a view shown at SHOWN, as an answer keeps them: the panorama's as
+    directions in its own picture (unmoved when it is levelled again)."""
+    view = ViewOf(**pairs["view"])
+    own = registration.own_directions(np.array(pairs["view_px"], float), view, sphere.axes, SHOWN)
+    return {
+        "photo_px": pairs["photo_px"],
+        "own": own.tolist(),
+        "view": {"heading": view.heading, "pitch": view.pitch, "fov": view.fov},
+        "side": SHOWN,
     }
 
 
@@ -162,7 +246,7 @@ def serve(sources: Sources, port: int) -> HTTPServer:
         found = around.near(x, y)
         nearest[photo_id] = found[0][1] if found else np.inf
     proposals: dict[tuple[str, str], dict | None] = {}  # made once per photo and panorama
-    matching = threading.Lock()  # one proposal at a time (the matcher and its caches)
+    matching = sources.matching  # one proposal at a time (the matcher and its caches)
 
     def near(lon: float, lat: float) -> list[dict]:
         here = to_metres(Point(lon, lat))
@@ -220,6 +304,7 @@ def serve(sources: Sources, port: int) -> HTTPServer:
                     pass
             return own(panorama)
 
+    @lru_cache(maxsize=2)  # the photo being placed, as it is and turned over
     def photo_image(photo_id: str, flipped: bool) -> np.ndarray:
         image = cv2.imread(str(sources.photos[photo_id]["image"]))
         return image[:, ::-1].copy() if flipped else image
@@ -238,6 +323,54 @@ def serve(sources: Sources, port: int) -> HTTPServer:
         if panorama is not None and panorama not in spheres:
             raise ValueError(f"panorama inconnu : {panorama}")
         return photo_id, spheres.get(panorama)
+
+    def here(sphere: match.Panorama | None) -> match.Panorama:
+        if sphere is None:
+            raise ValueError("le panorama où poser la photo manque")
+        return sphere
+
+    def clicked(body: dict, photo_id: str) -> tuple[np.ndarray, np.ndarray, ViewOf, tuple]:
+        """The pairs a request sends, the view they were clicked in, and the photo's size."""
+        size = photo_image(photo_id, bool(body.get("flipped"))).shape[:2]
+        pairs = (np.array(body["photo_px"], float), np.array(body["view_px"], float))
+        return *pairs, ViewOf(**body["view"]), size
+
+    def depths_of(sphere: match.Panorama, heading: float) -> depth.Depths:
+        try:  # made with the matcher: whatever fails there, the page is told why
+            found = sources.depths(sphere.id, heading)
+        except ValueError:
+            raise
+        except Exception as error:
+            raise ValueError(f"profondeur impossible à faire ici : {error}") from error
+        if found is None:
+            raise ValueError("pas de panorama voisin à 1–12 m : pas de parallaxe ici")
+        return found
+
+    @lru_cache(maxsize=KEPT_VIEWS)
+    def metres_in(panorama: str, view: ViewOf) -> np.ndarray:  # the same view, refitted
+        sphere = spheres[panorama]
+        found = depth.in_view(depths_of(sphere, view.heading), view, sphere.axes, SHOWN)
+        return found.astype(np.float32)
+
+    def laid_standing(body: dict, image: np.ndarray, sphere: match.Panorama) -> np.ndarray:
+        """The view with the photo laid by its standing camera, through the depth there."""
+        view = ViewOf(**body["view"])
+        camera = registration.standing_from_json(body["standing"])
+        origin = np.array([sphere.x, sphere.y, sphere.z])
+        return registration.composite_standing(
+            cut(sphere.id, view), image, camera, origin, view, metres_in(sphere.id, view)
+        )
+
+    def answered_in_parallax(body: dict, photo_id: str, sphere: match.Panorama) -> dict:
+        """The camera an answer kept in parallax keeps: made again from its pairs and the pin
+        the fit started from (`parallax`: lon, lat; the answer's own place may be the position
+        accepted since), never what the page sent back; with each pair's depth and the
+        neighbours it came from."""
+        photo_px, view_px, view, size = clicked({**body, **body["pairs"]}, photo_id)
+        start = _metres(body["parallax"]["lon"], body["parallax"]["lat"])
+        depths = depths_of(sphere, view.heading)
+        found = parallax(photo_px, view_px, view, sphere, size, depths, start, held_out=False)
+        return {"camera": found["standing"], "metres": found["metres"], "from": found["from"]}
 
     class Handler(localpage.Handler):
         def do_GET(self) -> None:  # noqa: N802 (http.server's naming)
@@ -279,6 +412,15 @@ def serve(sources: Sources, port: int) -> HTTPServer:
                     found = found and registration.from_json(found)
                     if found and found.panorama not in spheres:
                         raise ValueError(f"panorama inconnu : {found.panorama}")
+                    pairs = body.get("pairs")
+                    if pairs is not None and not found:
+                        raise ValueError("des paires vont avec leur panorama")
+                    kept = spheres[found.panorama] if found else None
+                    standing = None
+                    if body.get("parallax"):
+                        if pairs is None:
+                            raise ValueError("une réponse en parallaxe garde ses paires")
+                        standing = answered_in_parallax(body, photo_id, kept)
                     self._json(
                         placings.record(
                             sources.placings,
@@ -292,22 +434,26 @@ def serve(sources: Sources, port: int) -> HTTPServer:
                             flipped=body.get("flipped", False),
                             carried_from=body.get("carried_from"),
                             inputs=sources.photos[photo_id].get("inputs", ""),
+                            pairs=None if pairs is None else kept_pairs(pairs, kept),
+                            standing=standing,
                         )
                     )
                 elif self.path == "/api/fit":
-                    if sphere is None:
-                        raise ValueError("le panorama où poser la photo manque")
+                    sphere = here(sphere)
+                    photo_px, view_px, view, size = clicked(body, photo_id)
+                    self._json(flat(photo_px, view_px, view, sphere, size)[0])
+                elif self.path == "/api/depth":
+                    made = depths_of(here(sphere), float(body["heading"]))
+                    self._json({"details": len(made.metres)})
+                elif self.path == "/api/parallax":
+                    sphere = here(sphere)
+                    photo_px, view_px, view, size = clicked(body, photo_id)
+                    depths = depths_of(sphere, view.heading)
+                    pin = _metres(body["lon"], body["lat"])
+                    self._json(parallax(photo_px, view_px, view, sphere, size, depths, pin))
+                elif self.path == "/api/composite" and body.get("standing") is not None:
                     image = photo_image(photo_id, bool(body.get("flipped")))
-                    fitted, _ = registration.fit(
-                        np.array(body["photo_px"], float),
-                        np.array(body["view_px"], float),
-                        image.shape[:2],
-                        SHOWN,
-                        sphere.id,
-                        ViewOf(**body["view"]),
-                        sphere.axes,
-                    )
-                    self._json(registration.to_json(fitted))
+                    self._send(200, _jpeg(laid_standing(body, image, here(sphere))), "image/jpeg")
                 elif self.path == "/api/composite":
                     laid = registration.from_json(body["registration"])
                     image = photo_image(photo_id, bool(body.get("flipped")))

@@ -3,6 +3,7 @@ panoramas, each detail found in both placed where the two rays meet (the panoram
 they were taken, see cli._spheres). They agree with the panoramas by construction; measured on
 2026-11-06: hundreds of details a view, the rays passing within a few centimetres."""
 
+from collections.abc import Callable
 from dataclasses import dataclass
 
 import cv2
@@ -19,6 +20,7 @@ REACH_DEG = 1.5  # a direction takes the depth of the details this near it
 MOST_SPREAD = 1.5  # unless they disagree: the farther of them this much farther than the nearer
 COARSE = 4  # depth over a view is made at a quarter of its side, then enlarged
 COLUMNS = 40  # where the sky begins, found in this many columns of a view
+FACING = 3  # views of a panorama whose details a view can show: the nearest its way
 MIN_IN_VIEW = 10  # details seen in a view for a depth all over it
 
 
@@ -44,13 +46,42 @@ def neighbours(
     return [p for *_, p in sorted(near, key=lambda n: n[:2])][:MOST_NEIGHBOURS]
 
 
+def facing(heading: float) -> list[int]:
+    """The FACING views (indices of match.VIEW_HEADINGS) nearest a view facing `heading`:
+    those whose details it can show."""
+    headings = np.array(match.VIEW_HEADINGS, float)
+    off = np.abs((headings - heading + 180) % 360 - 180)
+    return np.argsort(off, kind="stable")[:FACING].tolist()
+
+
+def around(heading: float, made: Callable[[int], "Depths | None"]) -> "Depths | None":
+    """The depth around a panorama the way a view faces: its facing views' (`made(k)` for each,
+    see facing), joined; none when none has any."""
+    parts = [found for k in facing(heading) if (found := made(k)) is not None]
+    return joined(parts) if parts else None
+
+
+def joined(parts: list[Depths]) -> Depths:
+    """Depths made apart (views of one panorama, see facing), as one."""
+    return Depths(
+        parts[0].panorama,
+        np.vstack([d.directions for d in parts]),
+        np.concatenate([d.metres for d in parts]),
+        np.concatenate([d.seen_from for d in parts]),
+        np.concatenate([d.fixed for d in parts]),
+    )
+
+
 def triangulated(
-    home: match.Panorama, other: match.Panorama, views: match.Views
+    home: match.Panorama,
+    other: match.Panorama,
+    views: match.Views,
+    only: list[int] | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """The details of each view of `home` found in the views of `other` facing the same way or
     a step either side (a near wall turns tens of degrees between two panoramas): their
     directions from `home` and how far along, where the two rays meet by match.placed's
-    rules."""
+    rules. Only those of `home`'s views in `only` (indices of match.VIEW_HEADINGS), else all."""
     a, b = np.array([home.x, home.y, home.z]), np.array([other.x, other.y, other.z])
     headings = list(match.VIEW_HEADINGS)
     mine, theirs = views.of(home), views.of(other)
@@ -58,6 +89,8 @@ def triangulated(
         return np.empty((0, 3)), np.empty(0)
     rays_a, rays_b = [], []
     for k, heading in enumerate(headings):
+        if only is not None and k not in only:
+            continue
         for step in (-1, 0, 1):
             j = (k + step) % len(headings)
             ia, ib = views.matcher.match(mine[k], theirs[j])
@@ -80,13 +113,18 @@ def triangulated(
 
 
 def of_panorama(
-    home: match.Panorama, spheres: list[match.Panorama], fixed: set[str], views: match.Views
+    home: match.Panorama,
+    spheres: list[match.Panorama],
+    fixed: set[str],
+    views: match.Views,
+    headings: list[int] | None = None,
 ) -> Depths | None:
-    """The details around `home` with their depth, from its neighbours; none without any."""
+    """The details around `home` with their depth, from its neighbours (in its views
+    `headings` only, see facing; else all around); none without any."""
     near = neighbours(home, spheres, fixed)
     if not near:
         return None
-    found = [(p, *triangulated(home, p, views)) for p in near]
+    found = [(p, *triangulated(home, p, views, headings)) for p in near]
     if not any(len(m) for *_, m in found):
         return None
     return Depths(
@@ -98,21 +136,25 @@ def of_panorama(
     )
 
 
-def at(depths: Depths, directions: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+def at(depths: Depths, directions: np.ndarray) -> tuple[np.ndarray, np.ndarray, list]:
     """How far along each direction (world, unit): the median of the details within REACH_DEG
     of it; NaN when there are none, or when they disagree (MOST_SPREAD: a corner, a near
-    wall's edge against the street beyond: no depth rather than one in the air between); and
-    whether those came only from neighbours COLMAP did not place itself."""
+    wall's edge against the street beyond: no depth rather than one in the air between);
+    whether those came only from neighbours COLMAP did not place itself; and which neighbours
+    they came from (None without a depth)."""
     near = directions @ depths.directions.T >= np.cos(np.radians(REACH_DEG))
     metres = np.full(len(directions), np.nan)
     only_unfixed = np.zeros(len(directions), bool)
+    sources: list[list[str] | None] = [None] * len(directions)
     for i, row in enumerate(near):
         found = depths.metres[row]
         if len(found):
             low, high = np.percentile(found, [20, 80])
             metres[i] = np.median(found) if high <= MOST_SPREAD * low else np.nan
             only_unfixed[i] = not depths.fixed[row].any()
-    return metres, only_unfixed
+            if not np.isnan(metres[i]):
+                sources[i] = sorted(set(depths.seen_from[row].tolist()))
+    return metres, only_unfixed, sources
 
 
 def in_view(depths: Depths, view: ViewOf, axes: np.ndarray, side: int) -> np.ndarray:

@@ -23,6 +23,9 @@ SECTOR_DEG = 45
 DOUBTFUL_DEG = 30
 
 
+PANORAMA_HEIGHT_M = 2.5  # a panorama's camera above the street: a car's roof, a backpack
+
+
 def harvest(client: httpx.Client, area: BaseGeometry) -> tuple[list[Picture], int]:
     """The 360° pictures inside `area` (Lambert-93), searched tile by tile, and how many tiles
     came back full (some pictures may be missing there)."""

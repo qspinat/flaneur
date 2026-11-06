@@ -276,8 +276,8 @@ function pairsChanged() {
 async function fitPairs() {
   refused = '';
   try {
-    proposal = await post('/api/fit', { photo_id: photo.id, panorama: near[at].id, view, flipped,
-      photo_px: pairs.map((p) => p[0]), view_px: pairs.map((p) => p[1]) });
+    ({ registration: proposal } = await post('/api/fit', { photo_id: photo.id, panorama: near[at].id, view, flipped,
+      photo_px: pairs.map((p) => p[0]), view_px: pairs.map((p) => p[1]) }));
     made = 'points'; say('Recalée : Entrée pour garder, ou continuer à ajouter des points.');
     shown($('view-laid'), await post('/api/composite', { photo_id: photo.id, registration: proposal, flipped }));
   } catch (error) {

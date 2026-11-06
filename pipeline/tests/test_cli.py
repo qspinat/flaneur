@@ -91,3 +91,16 @@ def test_the_panoramas_are_not_used_when_their_tilts_were_measured_otherwise(mon
 
     with pytest.raises(typer.BadParameter, match="flaneur level"):
         cli._lined_up([])
+
+
+def test_panoramas_fixed_by_colmap_are_told_apart():
+    from flaneur.panoramax import Picture
+
+    here = Picture("p1", 2.3466, 48.852, 40.0, True, "2024-01-01", "", "")
+    moved = Picture("p2", 2.3467, 48.852, 40.0, True, "2024-01-01", "", "")
+    fixes = {
+        "p1": {"fix": [0.1, 0.2, 0.3], "recorded": [here.point.x, here.point.y, 40.0]},
+        "p2": {"fix": [0.1, 0.2, 0.3], "recorded": [0.0, 0.0, 40.0]},  # recorded elsewhere then
+    }
+
+    assert cli._fixed_by_colmap([here, moved], fixes) == {"p1"}

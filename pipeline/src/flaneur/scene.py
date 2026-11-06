@@ -11,11 +11,11 @@ from shapely.geometry.base import BaseGeometry
 from flaneur import buildings, panoramas
 from flaneur.blocks import MOST_PAIRS
 from flaneur.export import WalkPhoto, image_name, panoramax_credit
+from flaneur.panoramas import PANORAMA_HEIGHT_M
 from flaneur.panoramax import Picture
 
 GROUND_STEP_M = 10
 NEAREST_BASES = 8
-PANORAMA_HEIGHT_M = 2.5  # a camera on a car's roof or a backpack
 
 
 @dataclass(frozen=True)

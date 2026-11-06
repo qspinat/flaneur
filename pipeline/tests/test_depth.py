@@ -104,7 +104,7 @@ def test_details_straight_ahead_of_both_give_no_depth():
 def test_a_direction_far_from_every_detail_has_no_depth():
     found = depth.of_panorama(HOME, [HOME, NEXT], set(), _Views())
 
-    metres, _ = depth.at(found, np.array([[0.0, 0.0, 1.0]]))  # straight up
+    metres, *_ = depth.at(found, np.array([[0.0, 0.0, 1.0]]))  # straight up
 
     assert np.isnan(metres[0])
 
@@ -112,7 +112,7 @@ def test_a_direction_far_from_every_detail_has_no_depth():
 def test_a_depth_from_neighbours_colmap_did_not_fix_is_told():
     found = depth.of_panorama(HOME, [HOME, NEXT], set(), _Views())
 
-    _, only_unfixed = depth.at(found, found.directions[:1])
+    _, only_unfixed, _ = depth.at(found, found.directions[:1])
 
     assert only_unfixed[0]
 
@@ -154,7 +154,7 @@ def test_a_direction_between_near_and_far_details_has_no_depth():
         np.ones(4, bool),
     )
 
-    metres, _ = depth.at(near_and_far, np.array([[0.0, 1.0, 0.0]]))
+    metres, *_ = depth.at(near_and_far, np.array([[0.0, 1.0, 0.0]]))
 
     assert np.isnan(metres[0])
 
@@ -162,7 +162,7 @@ def test_a_direction_between_near_and_far_details_has_no_depth():
 def test_a_depth_from_a_neighbour_colmap_fixed_is_not_flagged():
     found = depth.of_panorama(HOME, [HOME, NEXT], {"next"}, _Views())
 
-    _, only_unfixed = depth.at(found, found.directions[:1])
+    _, only_unfixed, _ = depth.at(found, found.directions[:1])
 
     assert not only_unfixed[0]
 
@@ -202,3 +202,40 @@ def test_details_in_a_line_give_a_depth_without_failing():
     metres = depth.in_view(in_a_line, ViewOf(heading=0.0), HOME.axes, SIDE)
 
     assert np.isfinite(metres[SIDE // 2 + 20, SIDE // 2 + 40])
+
+
+def test_a_view_takes_the_depth_of_the_three_views_nearest_its_way():
+    assert sorted(depth.facing(140.0)) == [4, 5, 6]  # 150°, 120° and 180°: the nearest three
+    assert sorted(depth.facing(355.0)) == [0, 1, 11]  # across north
+
+
+def test_details_are_made_only_for_the_views_asked():
+    only = depth.of_panorama(HOME, [HOME, NEXT], set(), _Views(), headings=[0])
+    everywhere = depth.of_panorama(HOME, [HOME, NEXT], set(), _Views())
+
+    assert 0 < len(only.metres) < len(everywhere.metres)
+
+
+def test_depths_made_apart_are_joined():
+    a = depth.of_panorama(HOME, [HOME, NEXT], set(), _Views(), headings=[0])
+    b = depth.of_panorama(HOME, [HOME, NEXT], {"next"}, _Views(), headings=[1])
+
+    both = depth.joined([a, b])
+
+    assert len(both.metres) == len(a.metres) + len(b.metres) and both.fixed.sum() == len(b.metres)
+
+
+def test_the_depth_around_a_view_is_its_facing_views_joined():
+    made = []
+
+    def view(k: int):
+        made.append(k)
+        return depth.of_panorama(HOME, [HOME, NEXT], set(), _Views(), headings=[k])
+
+    found = depth.around(0.0, view)
+
+    assert sorted(made) == sorted(depth.facing(0.0)) and len(found.metres) > 0
+
+
+def test_no_depth_around_a_view_none_of_whose_views_has_any():
+    assert depth.around(180.0, lambda k: None) is None
