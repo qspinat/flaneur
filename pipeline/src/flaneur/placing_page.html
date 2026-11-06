@@ -313,7 +313,6 @@ function leavePairing() {
 }
 function help() {
   const deep = fitted?.used ? ` · parallaxe : ${fitted.used.filter(Boolean).length} paire(s) avec profondeur`
-      + (fitted.only_unfixed?.some(Boolean) ? ' (certaines venues de panoramas non recalés)' : '')
     : parallaxOn ? ` · parallaxe : il en faut ${rules.min_standing} avec profondeur` : '';
   $('points-help').textContent = pairing
     ? `${pairs.length} paire(s) — cliquer un détail dans la photo puis le même dans la vue ; cliquer un point pour le déplacer ; ⌫ annuler la dernière`
@@ -345,12 +344,13 @@ function dotClass(i) {
   if (typeof error !== 'number') return depthless;
   return (error > 0.03 ? 'off' : error > 0.01 ? 'near' : '') + depthless;
 }
+const DEPTH_FROM = { wall: 'mur trouvé', drawn: 'mur dessiné', ground: 'la rue', click: 'second clic' };
 function dotTitle(i) {
   if (!fitted?.errors) return '';
   const percent = (v) => typeof v === 'number' ? `${(v * 100).toFixed(1)} %` : v === 'refusé' ? 'refusé' : '—';
   const held = fitted.held_out?.parallax ?? fitted.held_out;  // in parallax, its own
-  const depth = fitted.metres ? (fitted.metres[i] == null ? ' · pas de profondeur'
-    : ` · à ${fitted.metres[i].toFixed(1)} m (${(fitted.from[i] || []).length} voisin(s))`) : '';
+  const depth = fitted.metres ? (fitted.metres[i] == null ? ' · pas de profondeur : son rayon ne touche aucun mur'
+    : ` · à ${fitted.metres[i].toFixed(1)} m (${DEPTH_FROM[fitted.source[i]] ?? fitted.source[i]})`) : '';
   return `écart ${percent(fitted.errors[i])} de la photo, ${percent(held?.[i])} sans elle${depth}`;
 }
 /** The pair whose point, in `img` (0: the photo, 1: the view), lies under a click, if any. */

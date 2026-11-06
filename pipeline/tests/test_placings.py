@@ -153,9 +153,9 @@ CAMERA = Standing((652_000.0, 6_861_000.0, -1.0), (0.1, 0.2, 0.3), 700.0, (0.0, 
 STANDING = {
     "camera": standing_to_json(CAMERA),
     "metres": [12.0, 30.5, None, 8.2, 15.0, 20.0, 9.5],  # six with a depth
-    "from": [["p2"], ["p2", "p3"], None, ["p3"], ["p2"], ["p2"], ["p3"]],
+    "source": ["wall", "drawn", None, "ground", "wall", "click", "wall"],
+    "neighbours": ["p2", "p3"],
 }
-LAST_TWO = [["p2"], ["p3"]]  # the sources of the last two pairs' depths
 
 
 def test_pairs_are_kept_with_an_answer_by_points(tmp_path):
@@ -224,7 +224,7 @@ def test_a_parallax_answer_keeps_its_camera_and_its_flat_registration(tmp_path):
 @pytest.mark.parametrize(
     "standing",
     [
-        {"metres": STANDING["metres"], "from": STANDING["from"]},
+        {"metres": STANDING["metres"], "source": STANDING["source"]},
         {**STANDING, "camera": {"focal": 1}},
     ],
     ids=["no camera", "a camera half written"],
@@ -276,13 +276,20 @@ def test_answers_written_before_pairs_still_load(tmp_path):
         {
             **STANDING,
             "metres": [12.0, None, None, None, 3.0, 20.0, None],  # three
-            "from": [["p2"], None, None, None, ["p2"], ["p2"], None],
+            "source": ["wall", None, None, None, "wall", "wall", None],
         },
-        {**STANDING, "from": [["p2"], None, None, ["p3"], ["p2"], *LAST_TWO]},  # a depth, no source
-        {**STANDING, "from": [["p2"], [3], None, ["p3"], ["p2"], *LAST_TWO]},  # not a panorama
+        {**STANDING, "source": ["wall", "drawn", None, None, "wall", "click", "wall"]},
+        {**STANDING, "source": ["wall", "satellite", None, "ground", "wall", "click", "wall"]},
+        {**STANDING, "neighbours": "p2"},
         {**STANDING, "camera": {**STANDING["camera"], "size": [60, 80]}},  # clicks off its photo
     ],
-    ids=["too few depths", "a depth with no source", "a source not a panorama", "photo too small"],
+    ids=[
+        "too few depths",
+        "a depth with no source",
+        "a source not known",
+        "neighbours not a list",
+        "photo too small",
+    ],
 )
 def test_a_parallax_camera_that_does_not_go_with_its_pairs_is_refused(tmp_path, standing):
     with pytest.raises(ValueError):
@@ -342,9 +349,9 @@ def test_a_parallax_camera_s_starting_pin_written_wrong_is_refused(tmp_path, sta
 
 
 def test_an_answer_kept_in_parallax_under_the_old_rule_is_saved_again(tmp_path):
-    four = {
-        **STANDING,
-        "metres": [12.0, 30.5, None, 8.2, 15.0, None, None],  # made when four sufficed
+    four = {  # made when four depths sufficed, each from the neighbours that saw it
+        "camera": STANDING["camera"],
+        "metres": [12.0, 30.5, None, 8.2, 15.0, None, None],
         "from": [["p2"], ["p2", "p3"], None, ["p3"], ["p2"], None, None],
     }
 

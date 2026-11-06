@@ -1,10 +1,12 @@
 import json
+import threading
 
+import numpy as np
 import pytest
 import typer
 from typer.testing import CliRunner
 
-from flaneur import cli, confirming, match
+from flaneur import cli, confirming, depth, facades, match
 from flaneur.cli import app
 
 
@@ -104,3 +106,87 @@ def test_panoramas_fixed_by_colmap_are_told_apart():
     }
 
     assert cli._fixed_by_colmap([here, moved], fixes) == {"p1"}
+
+
+LEFT = [[-4.0, y, z] for y in np.arange(2.0, 40.0, 0.5) for z in (-1.0, 3.0, 8.0)]
+STREET = np.array(LEFT + [[4.0, y, z] for _, y, z in LEFT])  # two facades along y
+METRES = np.linalg.norm(STREET, axis=1)
+
+
+def _scenes(monkeypatch, tmp_path):
+    """Scenes around a panorama with a neighbour beside it (and one too far), every view's
+    matches with it being the street's two facades; and the matches asked."""
+    home = match.Panorama("home", 0.0, 0.0, 0.0, 0.0, tmp_path / "h.jpg")
+    beside = match.Panorama("beside", 4.0, 0.0, 0.0, 0.0, tmp_path / "b.jpg")
+    far = match.Panorama("far", 40.0, 0.0, 0.0, 0.0, tmp_path / "f.jpg")
+    asked = []
+
+    def triangulated(a, b, views, only):
+        asked.append((a.id, b.id, tuple(only)))
+        return STREET / METRES[:, None], METRES
+
+    monkeypatch.setattr(depth, "triangulated", triangulated)
+    spheres = [home, beside, far]
+    scenes = cli._Scenes(
+        spheres, set(), lambda: None, threading.Lock(), lambda x, y: [], tmp_path / "w.jsonl"
+    )
+    return asked, scenes, home
+
+
+def test_scenes_match_each_view_with_a_neighbour_once_and_keep_the_walls(monkeypatch, tmp_path):
+    asked, scenes, _ = _scenes(monkeypatch, tmp_path)
+
+    first = scenes.scene("home", None)
+    again = scenes.scene("home", None)
+    chosen = scenes.scene("home", ("beside",))
+
+    assert len(asked) == len(match.VIEW_HEADINGS)  # all around, once each
+    assert again == first
+    assert len(first.walls) == 2
+    assert first.neighbours == ("beside",) and first.chosen is None
+    assert chosen.walls == first.walls and chosen.chosen == ("beside",)  # the same matches
+    assert scenes.scene("nowhere", None) is None
+
+
+def _square(x0: float, x1: float) -> dict:
+    ring = [[x0, 0.0, 30.0], [x1, 0.0, 30.0], [x1, 10.0, 30.0], [x0, 10.0, 30.0], [x0, 0.0, 30.0]]
+    return {"geometry": {"type": "Polygon", "coordinates": [ring]}, "properties": {}}
+
+
+def test_bd_topo_s_street_facades_leave_the_walls_between_buildings_out():
+    near = cli._street_facades([_square(0.0, 10.0), _square(10.2, 20.0)])  # heights kept: 3D
+
+    found = near(10.0, -5.0)
+
+    inside = [s for s in found if all(5.0 < x < 15.0 and 1.0 < y < 9.0 for x, y in s)]
+    assert found and not inside  # the facades, not the party wall at x = 10
+
+
+def test_walls_drawn_change_the_scene_without_matching_again(monkeypatch, tmp_path):
+    asked, scenes, home = _scenes(monkeypatch, tmp_path)
+    fitted = scenes.scene("home", None)
+    left = next(w for w in fitted.walls if w.a[0] < 0)
+
+    facades.record(tmp_path / "w.jsonl", "home", [], [(left.a, left.b)])
+
+    assert len(scenes.scene("home", None).walls) == len(fitted.walls) - 1
+    assert len(asked) == len(match.VIEW_HEADINGS)
+
+
+def test_neighbours_chosen_by_hand_are_matched_however_far(monkeypatch, tmp_path):
+    asked, scenes, _ = _scenes(monkeypatch, tmp_path)
+
+    found = scenes.scene("home", ("far",))  # 40 m off: never picked by geometry
+
+    assert found.neighbours == ("far",)
+    assert len(asked) == len(match.VIEW_HEADINGS)
+
+
+def test_walls_drawn_give_a_scene_where_no_neighbour_is_matched(monkeypatch, tmp_path):
+    asked, scenes, _ = _scenes(monkeypatch, tmp_path)
+    drawn = facades.Wall((-4.0, 0.0), (-4.0, 30.0), 20.0, "drawn")
+    facades.record(tmp_path / "w.jsonl", "home", [drawn], [])
+
+    found = scenes.scene("home", ("nowhere",))  # a choice of none known
+
+    assert found.walls == (drawn,) and found.details == 0 and not asked

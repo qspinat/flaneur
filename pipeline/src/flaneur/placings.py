@@ -6,7 +6,7 @@ The last answer on a photo holds, a skip leaving the one before it; the rows bef
 
 from collections import defaultdict
 from pathlib import Path
-from typing import NamedTuple
+from typing import Any, NamedTuple
 
 from flaneur.registration import (
     LEAST_STANDING,
@@ -20,6 +20,8 @@ from flaneur.sources import append_row, number, rows, seconds_taken
 
 ANSWERS = ("fits", "points", "far", "skip")
 PLACED = ("fits", "points")  # those with a registration
+# what gave a pair its depth in parallax: a wall fitted or drawn, the street, a second click
+DEPTH_SOURCES = ("wall", "drawn", "ground", "click")
 
 
 def record(
@@ -155,7 +157,8 @@ def _check_standing(standing: dict, pairs: dict | None) -> None:
         raise ValueError(
             "une caméra en parallaxe : sa position, son orientation, sa focale"
         ) from error
-    metres, sources = standing.get("metres"), standing.get("from")
+    older = "source" not in standing  # kept before walls: each depth's neighbours instead
+    metres, sources = standing.get("metres"), standing.get("from" if older else "source")
     n = len(pairs["photo_px"])
     if not (
         isinstance(metres, list) and isinstance(sources, list) and len(metres) == len(sources) == n
@@ -163,13 +166,15 @@ def _check_standing(standing: dict, pairs: dict | None) -> None:
         raise ValueError("une profondeur et sa source par paire, ou aucune")
     if not all(m is None or (number(m) and m > 0) for m in metres):
         raise ValueError("une profondeur est un nombre de mètres")
-    named = all(
+    if not all(
         (m is None) == (s is None)
-        and (s is None or (isinstance(s, list) and s and all(isinstance(i, str) for i in s)))
+        and (s is None or (names(s) and bool(s) if older else s in DEPTH_SOURCES))
         for m, s in zip(metres, sources, strict=True)
-    )
-    if not named:
-        raise ValueError("une profondeur va avec les panoramas voisins d'où elle vient")
+    ):
+        raise ValueError("une profondeur dit d'où elle vient : " + ", ".join(sorted(DEPTH_SOURCES)))
+    chosen = standing.get("chosen")
+    if not (older or (names(standing.get("neighbours")) and (chosen is None or names(chosen)))):
+        raise ValueError("une caméra en parallaxe : les panoramas voisins de ses murs")
     start = standing.get("start")
     if start is not None and not (
         isinstance(start, dict) and number(start.get("lon")) and number(start.get("lat"))
@@ -182,6 +187,11 @@ def _check_standing(standing: dict, pairs: dict | None) -> None:
     h, w = camera.size
     if any(not (0 <= x <= w and 0 <= y <= h) for x, y in pairs["photo_px"]):
         raise ValueError("une caméra en parallaxe : les points cliqués tombent hors de sa photo")
+
+
+def names(value: Any) -> bool:
+    """Whether a value is a list of panoramas' ids."""
+    return isinstance(value, list) and all(isinstance(i, str) for i in value)
 
 
 def carried(rows: dict[str, dict]) -> dict[str, list[str]]:

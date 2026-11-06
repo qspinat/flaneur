@@ -27,6 +27,7 @@ GROUND = -1  # what a ray met: the street
 NOTHING = -2  # nothing known: the sky, or beyond the walls
 
 GROUND_BAND_M = 0.3  # details this close above the street are the street
+STREET_REACH_M = 50.0  # a ray meets the street this far at most (beyond: nearly level, unsure)
 MOST_POINTS = 4000
 SAMPLES = 300  # pairs of details proposing a line
 PAIR_M = (1.0, 20.0)  # how far apart a pair's details stand
@@ -74,6 +75,7 @@ class Scene:
     walls: tuple[Wall, ...]
     neighbours: tuple[str, ...]  # the panoramas whose details the walls were fitted to
     details: int  # how many
+    chosen: tuple[str, ...] | None = None  # the neighbours the user chose (none: by geometry)
 
 
 Segment = tuple[tuple[float, float], tuple[float, float]]
@@ -258,8 +260,8 @@ def _stretches(t: np.ndarray) -> list[np.ndarray]:
 def cast(scene: Scene, directions: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     """How far along each world unit direction from the scene's camera: to the nearest wall it
     meets (within its ends, between the street and its top), else to the street when it points
-    down; NaN meeting nothing. And what it met: a wall's index, GROUND or NOTHING. (A wall is
-    met above the street, so before it.)"""
+    down (within STREET_REACH_M); NaN meeting nothing. And what it met: a wall's index, GROUND
+    or NOTHING. (A wall is met above the street, so before it.)"""
     origin = np.asarray(scene.origin, float)
     d = np.asarray(directions, float)
     edges = [(*w.a, *w.b, scene.ground, w.top) for w in scene.walls]
@@ -270,7 +272,7 @@ def cast(scene: Scene, directions: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         street = (scene.ground - origin[2]) / d[:, 2]
     none = met < 0
     met[none] = NOTHING
-    down = none & (d[:, 2] < 0) & (street > 0)
+    down = none & (d[:, 2] < 0) & (street > 0) & (street <= STREET_REACH_M)
     metres[down], met[down] = street[down], GROUND
     return metres, met
 

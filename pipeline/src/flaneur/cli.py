@@ -24,6 +24,7 @@ import typer
 from dotenv import load_dotenv
 from PIL import Image
 from shapely.geometry import Point
+from shapely.ops import unary_union
 
 from flaneur import (
     buildings,
@@ -34,6 +35,7 @@ from flaneur import (
     dedup,
     depth,
     export,
+    facades,
     fakes,
     geocode,
     landmarks,
@@ -59,6 +61,7 @@ from flaneur import (
 )
 from flaneur.blocks import Blocks
 from flaneur.gazetteer import Gazetteer, angle, to_degrees, to_metres
+from flaneur.panoramas import PANORAMA_HEIGHT_M
 from flaneur.panoramax import Picture
 from flaneur.read import read_all
 from flaneur.sources import albert_kahn, paris_musees, write_json
@@ -70,9 +73,13 @@ WEB_DATA = ROOT / "web" / "public" / "data"  # the walk, as the site reads it (n
 REVIEWS = DATA / "overrides" / "reviews.jsonl"
 SIGHTS = DATA / "overrides" / "sights.jsonl"  # the landmarks marked in photos, by hand
 CORRECTIONS = DATA / "pilot" / "panorama_corrections.json"  # on the buildings (register): unused
-KEPT_DEPTHS = 24  # views' details with their depth the placing page keeps (1.4 MB each)
+KEPT_TRIANGULATED = 480  # a view of a panorama matched with a neighbour's: its details' depth
+# (12 views, 4 neighbours: ten panoramas; under 100 kB each)
+MERGED_M = 0.3  # BD TOPO's buildings this close are one block (their facades: see _street_facades)
+KEPT_SCENES = 16  # panoramas' walls the placing page keeps
 FIXES = DATA / "pilot" / "panorama_fixes.json"  # panoramas placed with each other (reconstruct)
 PLACINGS = DATA / "overrides" / "placings.jsonl"  # the user's answers on the placing page
+WALLS = DATA / "overrides" / "walls.jsonl"  # today's walls drawn and removed by hand
 TILTS = DATA / "pilot" / "panorama_tilts.json"  # how each one's camera leaned (level)
 PANORAMAS = DATA / "raw" / "panoramas"  # their pictures
 
@@ -338,10 +345,13 @@ def _placed(pictures: list[Picture]) -> list[Picture]:
     return register.applied(pictures, reconstruct.borrowed(found, pictures))
 
 
-class _Depths:
-    """Today's details with their depth around panoramas, per view (see depth.around): made
-    with the matcher (`lock` held while it runs; asked twice at once, made once), kept for
-    KEPT_DEPTHS views; one that cannot be made is asked again next time."""
+class _Scenes:
+    """Today's walls around panoramas, for the placing page's parallax (see facades): fitted from
+    the details each view of a panorama shares with its neighbours (picked by their geometry at
+    that view's heading, among those chosen if any), all around; BD TOPO's facades near it
+    proposed (`segments`); the walls drawn and removed by hand (`walls_path`) laid over them
+    when asked. Matches are made with the matcher (`lock` held while it runs) and kept,
+    KEPT_TRIANGULATED of them; walls fitted are kept, KEPT_SCENES."""
 
     def __init__(
         self,
@@ -349,42 +359,108 @@ class _Depths:
         fixed: set[str],
         views: Callable[[], match.Views],
         lock: threading.Lock,
+        segments: Callable[[float, float], list[facades.Segment]],
+        walls_path: Path,
     ):
         self.by_id = {p.id: p for p in spheres}
         self.spheres, self.fixed, self.views, self.lock = spheres, fixed, views, lock
-        self.made: OrderedDict[tuple[str, int], depth.Depths] = OrderedDict()  # 1.4 MB each
-        self.guard = threading.Lock()
+        self.segments, self.walls_path = segments, walls_path
+        self.matched: OrderedDict[tuple[str, str, int], tuple] = OrderedDict()
+        self.fitted: OrderedDict[tuple, facades.Scene | None] = OrderedDict()
+        self.guard = threading.Lock()  # the kept ones, read and changed one thread at a time
+        self.fitting = threading.Lock()  # walls fitted one panorama at a time (asked twice: once)
 
-    def toward(self, panorama: str, k: int) -> depth.Depths | None:
-        key = (panorama, k)
-        with self.guard:  # the kept views, read and changed one thread at a time
-            if key in self.made:
-                self.made.move_to_end(key)  # used lately: kept longest
-                return self.made[key]
-        with self.lock:  # the matcher, one thing at a time
+    def _kept(self, kept: OrderedDict, key, most: int, make: Callable, lock: threading.Lock):
+        with self.guard:
+            if key in kept:
+                kept.move_to_end(key)  # used lately: kept longest
+                return kept[key]
+        with lock:
             with self.guard:
-                if key in self.made:  # made meanwhile, by the request that held the matcher
-                    return self.made[key]
-            home = self.by_id[panorama]
-            found = depth.of_panorama(
-                home,
-                depth.neighbours(home, self.spheres, self.fixed, match.VIEW_HEADINGS[k]),
-                self.fixed,
-                self.views(),
-                [k],
-            )
-            if found is None:
-                return None
+                if key in kept:  # made meanwhile, by the request that held the lock
+                    return kept[key]
+            found = make()
             with self.guard:
-                self.made[key] = found
-                while len(self.made) > KEPT_DEPTHS:
-                    self.made.popitem(last=False)
+                kept[key] = found
+                while len(kept) > most:
+                    kept.popitem(last=False)
             return found
 
-    def around(self, panorama: str, heading: float) -> depth.Depths | None:
-        if panorama not in self.by_id:
+    def triangulated(self, home: match.Panorama, other: match.Panorama, k: int) -> tuple:
+        """The details of `home`'s view k found in `other`'s, placed (see depth.triangulated)."""
+
+        def made() -> tuple:
+            directions, metres = depth.triangulated(home, other, self.views(), [k])
+            return directions.astype(np.float32), metres.astype(np.float32)
+
+        return self._kept(self.matched, (home.id, other.id, k), KEPT_TRIANGULATED, made, self.lock)
+
+    def scene(self, panorama: str, chosen: Iterable[str] | None) -> facades.Scene | None:
+        """The walls around a panorama, from the neighbours `chosen` (else picked), with those
+        drawn and removed by hand; none for a panorama not known."""
+        home = self.by_id.get(panorama)
+        if home is None:
             return None
-        return depth.around(heading, lambda k: self.toward(panorama, k))
+        chosen = tuple(sorted(set(chosen))) if chosen else None
+        fitted = self._kept(
+            self.fitted,
+            (panorama, chosen),
+            KEPT_SCENES,
+            lambda: self._fit(home, chosen),
+            self.fitting,
+        )
+        drawn = facades.saved_near(self.walls_path, home.x, home.y)
+        return replace(fitted, walls=tuple(facades.with_drawn(list(fitted.walls), *drawn)))
+
+    def _fit(self, home: match.Panorama, chosen: tuple[str, ...] | None) -> facades.Scene:
+        if chosen is None:  # picked by their geometry, view by view
+            near = [
+                depth.neighbours(home, self.spheres, self.fixed, h) for h in match.VIEW_HEADINGS
+            ]
+        else:  # all those chosen, in every view (rays too near parallel meet nowhere)
+            near = [[self.by_id[i] for i in chosen if i in self.by_id and i != home.id]] * len(
+                match.VIEW_HEADINGS
+            )
+        asked = sorted({p.id: p for found in near for p in found}.values(), key=lambda p: p.id)
+        origin = np.array([home.x, home.y, home.z])
+        points = [  # a neighbour's views in turn: its features read once
+            origin + directions * metres[:, None]
+            for other in asked
+            for k, found in enumerate(near)
+            if other in found
+            for directions, metres in [self.triangulated(home, other, k)]
+        ]
+        found = np.vstack(points) if points else np.empty((0, 3))  # none: drawn walls only
+        ground = home.z - PANORAMA_HEIGHT_M
+        fitted = facades.fit(found, ground, self.segments(home.x, home.y))
+        neighbours = tuple(p.id for p in asked)
+        return facades.Scene(
+            home.id, tuple(origin), ground, tuple(fitted), neighbours, len(found), chosen
+        )
+
+
+def _street_facades(features: list[dict]) -> Callable[[float, float], list[facades.Segment]]:
+    """BD TOPO's street facades on the plan (Lambert-93), those reaching within facades.NEAR_M
+    of a spot: candidates for the walls fitted there. Each block's buildings merged (gaps under
+    MERGED_M closed), its outer outline kept: the walls between buildings, at their backs and
+    round courtyards are not seen from the street."""
+    parts = [o for f in features for o in buildings.outlines(f)]
+    merged = unary_union([p.buffer(MERGED_M) for p in parts]).buffer(-MERGED_M)
+    rings = [g.exterior.coords for g in getattr(merged, "geoms", [merged]) if not g.is_empty]
+    edges = Blocks.of([([(x, y) for x, y, *_ in ring][:-1], 0.0, 0.0) for ring in rings])
+    return lambda x, y: [
+        ((e[0], e[1]), (e[2], e[3])) for e in edges.near(x, y, facades.NEAR_M).edges
+    ]
+
+
+def _placing_world() -> tuple[list[match.Panorama], Callable[[float, float], list]]:
+    """The panoramas where they were taken, levelled, at their camera's height over the street
+    (parallax needs it on a slope), and BD TOPO's street facades near a spot."""
+    with closing(db.connect(DB_PATH)) as conn:
+        area = placements.area(conn, buildings.MARGIN_M)
+        features = _buildings(area)
+        pictures = _lined_up(panoramas.load(conn))
+    return _panoramas(pictures, _heights(features, area)), _street_facades(features)
 
 
 def _fixed_by_colmap(pictures: list[Picture], fixes: dict) -> set[str]:
@@ -1682,28 +1758,28 @@ def compare_parallax(answers: Path = PLACINGS) -> None:
     photographe, cherché depuis là où son recalage était parti). Pour chacune, l'erreur médiane
     des paires avec profondeur, chacune refaite sans elle (part de la diagonale de la photo ;
     un recalage refusé compte comme le pire), et l'écart entre la place trouvée et le départ.
-    Avec le modèle (profondeur des panoramas voisins)."""
+    Avec le modèle (les murs d'aujourd'hui, vus depuis les panoramas voisins)."""
     rows = [r for r in placings.holding(answers).values() if r.get("pairs") and r["registration"]]
     if not rows:
         typer.echo("aucune réponse par points avec ses paires")
         return
-    spheres = _spheres()
+    spheres, segments = _placing_world()
     with closing(db.connect(DB_PATH)) as conn:
         fixed = _fixed_by_colmap(panoramas.load(conn), register.load(FIXES))
     views = _views(kept=8)  # a panorama and its neighbours
-    made = _Depths(spheres, fixed, lambda: views, threading.Lock())
+    made = _Scenes(spheres, fixed, lambda: views, threading.Lock(), segments, WALLS)
     found, skipped = [], 0
     for row in sorted(rows, key=lambda r: r["registration"]["panorama"]):  # its views kept
         panorama, image = row["registration"]["panorama"], _exported(row["photo_id"])
         try:
             if not image.exists() or row.get("inputs") != _image(row["photo_id"]):
                 raise ValueError("son image a changé depuis (recadrée) : à refaire")
-            depths = made.around(panorama, row["pairs"]["view"]["heading"])
-            if depths is None:
+            walls = made.scene(panorama, (row.get("standing") or {}).get("chosen"))  # as fitted
+            if walls is None:
                 raise ValueError("pas de panorama voisin")
             with Image.open(image) as photo:
                 size = photo.size[::-1]  # height, width
-            one = placing.compared(row, made.by_id[panorama], size, depths)
+            one = placing.compared(row, made.by_id[panorama], size, walls)
         except Exception as error:  # the matcher, a fit refused: this photo, not the others
             typer.echo(f"{row['photo_id']} : laissée de côté ({error})")
             skipped += 1
@@ -1752,7 +1828,10 @@ def place_photos(
         for me in walk
         if _exported(me.id).exists()
     }
-    spheres = _spheres()
+    if live:  # at their heights (parallax needs them), BD TOPO's facades read
+        spheres, segments = _placing_world()
+    else:
+        spheres, segments = _spheres(), lambda x, y: []
     by_id = {p.id: p for p in spheres}
     computed = json.loads(PROPOSALS.read_text()) if PROPOSALS.exists() else {}
     store = chain.Store(DATA / "raw", None)  # the photos' features: a matcher once one is loaded
@@ -1850,15 +1929,14 @@ def place_photos(
             rgb = cv2.resize(rgb, size, interpolation=cv2.INTER_AREA)
         return np.ascontiguousarray(rgb[:, :, ::-1])  # as OpenCV reads pictures
 
-    matching = threading.Lock()  # the matcher: proposals, and depth when it must be made
-    depths_made = _Depths(spheres, fixed, models, matching)
+    matching = threading.Lock()  # the matcher: proposals, and walls when they must be made
+    walls_made = _Scenes(spheres, fixed, models, matching, segments, WALLS)
 
-    def depths(panorama: str, heading: float) -> depth.Depths | None:
-        """The depth of today's details around a panorama the way a view faces, kept per view
-        as the view turns (see _Depths); live only."""
+    def walls_at(panorama: str, chosen: tuple[str, ...] | None) -> facades.Scene | None:
+        """Today's walls around a panorama (see _Scenes); live only."""
         if not live:
             raise ValueError("pas de parallaxe sans le modèle : relancer sans --no-live")
-        return depths_made.around(panorama, heading)
+        return walls_made.scene(panorama, chosen)
 
     sources = placing.Sources(
         photos,
@@ -1869,7 +1947,8 @@ def place_photos(
         graph,
         carried_now,
         full=full,
-        depths=depths,
+        scene=walls_at,
+        segments=segments,
         matching=matching,
     )
     with httpx.Client(timeout=10, follow_redirects=True) as client:

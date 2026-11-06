@@ -64,7 +64,7 @@ def test_a_side_street_between_two_facades_on_one_line_leaves_a_gap():
     walls = facades.fit(_street(gap=(20, 30)), GROUND)
     left = [w for w in _found(walls, 0, 4.0) if max(w.a[0], w.b[0]) < 0]
 
-    through = np.array([[-4.0, 25.0, -1.0]])
+    through = np.array([[-4.0, 25.0, -2.0]])
     through /= np.linalg.norm(through)
     _, met = facades.cast(_scene(walls), through)
 
@@ -205,3 +205,12 @@ def test_a_wall_drawn_again_after_its_removal_comes_back(tmp_path):
     facades.record(path, "a", drawn, [])  # drawn there again
 
     assert facades.saved_near(path, 0.0, 30.0)[0] == drawn
+
+
+def test_a_ray_barely_down_meets_no_street_far_off():
+    walls = [facades.Wall((4.0, 0.0), (4.0, 60.0), 12.0, "fitted")]
+    ray = np.array([[0.0, np.cos(np.radians(1)), -np.sin(np.radians(1))]])  # 143 m to the street
+
+    metres, met = facades.cast(_scene(walls), ray)
+
+    assert np.isnan(metres[0]) and met[0] == facades.NOTHING

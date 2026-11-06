@@ -111,8 +111,8 @@ const [deep, pairsAt] = await onPoints({
     return route.fulfill({ json: {
       registration: { ...registration, panorama: body.panorama }, ...stood, height_above_ground: 1.6, heading: 120,
       standing: { position: [0, 0, 0], turn: [0, 0, 0], focal: 500, shift: [0, 0], size: [600, 800] },
-      used: Array(n).fill(true), metres: Array(n).fill(12), from: Array(n).fill(['p2']),
-      only_unfixed: Array(n).fill(false), errors: [0.005, 0.02, 0.05, ...Array(n).fill(0.001)].slice(0, n),
+      used: Array(n).fill(true), metres: Array(n).fill(12), source: Array(n).fill('wall'),
+      neighbours: ['p2'], errors: [0.005, 0.02, 0.05, ...Array(n).fill(0.001)].slice(0, n),
       held_out: { flat: Array(n).fill(0.04), parallax: Array(n).fill(0.01) } } });
   },
   '**/api/composite': (route) => {
