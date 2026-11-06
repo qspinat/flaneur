@@ -188,6 +188,7 @@ def test_the_queue_leaves_out_photos_answered_and_puts_skipped_ones_last(page, t
 def test_the_page_is_told_the_rules_it_shows():
     assert placing.settings() == {
         "min_points": registration.MIN_POINTS,
+        "min_standing": registration.MIN_STANDING,
         "view_step": 30,
         "near_m": placing.NEAR_M,
     }
@@ -571,6 +572,8 @@ def test_parallax_gives_where_the_photographer_stood(page, one):
     assert np.hypot(stood.x - camera.position[0], stood.y - camera.position[1]) < 0.2
     assert found["height_above_ground"] == pytest.approx(1.5, abs=0.2)
     assert found["from"][0] == ["p2"] and len(found["held_out"]["parallax"]) == len(photo_px)
+    assert registration.from_json(found["registration"]).panorama == "p1"  # the flat fit too
+    assert found["heading"] == pytest.approx(140.0, abs=0.5)  # the way its camera looked
 
 
 def test_parallax_without_neighbours_says_why(page, one):
@@ -733,3 +736,21 @@ def test_a_composite_with_no_standing_camera_is_the_flat_one(page, one):
     status, _ = one(sources, "POST", "/api/composite", body)
 
     assert status == 200
+
+
+def test_a_photo_reopened_says_which_fit_it_kept(page, one):
+    sources, proposal = page
+    placings.record(
+        sources.placings,
+        "pm:1",
+        "points",
+        3.0,
+        lon=2.3466,
+        lat=48.852,
+        heading=40.0,
+        registration=proposal,
+    )
+
+    _, found = one(sources, "GET", "/api/reopen/pm:1")
+
+    assert json.loads(found)["fit"] is None  # placed before pairs were kept

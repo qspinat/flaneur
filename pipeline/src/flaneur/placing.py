@@ -77,6 +77,7 @@ def settings() -> dict:
     """What the page shows the user by the server's rules."""
     return {
         "min_points": registration.MIN_POINTS,
+        "min_standing": registration.MIN_STANDING,
         "view_step": 360 // len(match.VIEW_HEADINGS),
         "near_m": NEAR_M,
     }
@@ -129,10 +130,12 @@ def parallax(
     found, used = registration.fit_standing(*fitting)
     stood = to_degrees(Point(found.position[0], found.position[1]))
     return {
+        "registration": registration.to_json(start),  # the flat fit, which an answer keeps too
         "standing": registration.standing_to_json(found),
         "lon": stood.x,
         "lat": stood.y,
         "height_above_ground": found.position[2] - ground,
+        "heading": round(found.heading, 1),
         "used": used.tolist(),
         "metres": _listed(metres),
         "from": came,
@@ -229,6 +232,7 @@ def reopened(sources: Sources, photo_id: str) -> dict:
         "id": photo_id,
         **_shown(sources.photos[photo_id]),
         **{k: row[k] for k in ("lon", "lat", "heading", "answer", "carried_from", "flipped")},
+        "fit": row.get("fit"),  # kept in parallax: the page says so (its camera is not shown again)
         "registration": row["registration"] if same_image else None,  # made on another image
     }
 

@@ -198,6 +198,12 @@ class Standing:
         with np.errstate(divide="ignore", invalid="ignore"):
             return np.where(seen[:, 2:] > 0, seen[:, :2] / seen[:, 2:], np.nan)
 
+    @property
+    def heading(self) -> float:
+        """The compass heading its camera looked (degrees from north, clockwise)."""
+        ahead = cv2.Rodrigues(np.array(self.turn))[0][2]  # its z axis, in the world
+        return float(np.degrees(np.arctan2(ahead[0], ahead[1])) % 360)
+
     def rays(self, pixels: np.ndarray) -> np.ndarray:
         """The world directions (unit) of pixels of the photo."""
         local = np.column_stack([pixels, np.ones(len(pixels))]) @ np.linalg.inv(self._lens()).T
