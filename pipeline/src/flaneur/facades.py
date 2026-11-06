@@ -85,7 +85,10 @@ Line = tuple[np.ndarray, float]  # unit normal on the plan, and offset: normal Â
 
 
 def fit(
-    points: np.ndarray, ground: float, candidates: list[Segment] = (), seed: int = 0
+    points: np.ndarray,
+    ground: float,
+    candidates: list[Segment] = (),
+    seed: int = 0,
 ) -> list[Wall]:
     """The walls along today's details (n Ã— 3, Lambert-93 and height), those on the street left
     out; BD TOPO's facade segments (`candidates`) proposed beside the lines details suggest,
@@ -183,9 +186,9 @@ def _shared(xy: np.ndarray, tree: cKDTree, lines: list[Line]) -> tuple[np.ndarra
     for _ in range(ROUNDS):
         costs = _costs(xy, lines)
         before, labels = labels, _labelled(costs, graph)
-        kept = _worth_keeping(costs, labels)
+        kept, given = _worth_keeping(costs, labels)  # each kept line fitted to the details it holds
         stable = len(kept) == len(lines) and np.array_equal(before, labels)
-        lines = [_total_least_squares(xy[labels == i]) for i in kept]
+        lines = [_total_least_squares(xy[given == i]) for i in kept]
         if stable:
             break
     return _labelled(_costs(xy, lines), graph), lines
@@ -213,10 +216,11 @@ def _labelled(costs: np.ndarray, graph: csr_matrix) -> np.ndarray:
     return labels
 
 
-def _worth_keeping(costs: np.ndarray, labels: np.ndarray) -> list[int]:
+def _worth_keeping(costs: np.ndarray, labels: np.ndarray) -> tuple[list[int], np.ndarray]:
     """The lines whose details would cost WALL_COST or more elsewhere, the least worth first;
     a line dropped gives its details to the best of those left before the next is weighed (two
-    lines sharing one facade: the first goes, the second then holds it alone)."""
+    lines sharing one facade: the first goes, the second then holds it alone). And the details'
+    labels so given."""
     labels = labels.copy()
     standing = np.ones(costs.shape[1], bool)  # the last: none, always there
 
@@ -232,7 +236,7 @@ def _worth_keeping(costs: np.ndarray, labels: np.ndarray) -> list[int]:
         if worth < WALL_COST:
             standing[i] = False
             labels[mine] = others[costs[mine][:, others].argmin(axis=1)]
-    return np.flatnonzero(standing[:-1]).tolist()
+    return np.flatnonzero(standing[:-1]).tolist(), labels
 
 
 def _stretches(t: np.ndarray) -> list[np.ndarray]:

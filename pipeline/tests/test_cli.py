@@ -117,7 +117,7 @@ def _scenes(monkeypatch, tmp_path):
     """Scenes around a panorama with a neighbour beside it (and one too far), every view's
     matches with it being the street's two facades; and the matches asked."""
     home = match.Panorama("home", 0.0, 0.0, 0.0, 0.0, tmp_path / "h.jpg")
-    beside = match.Panorama("beside", 4.0, 0.0, 0.0, 0.0, tmp_path / "b.jpg")
+    beside = match.Panorama("beside", 2.0, 1.0, 0.0, 0.0, tmp_path / "b.jpg")  # in the street
     far = match.Panorama("far", 40.0, 0.0, 0.0, 0.0, tmp_path / "f.jpg")
     asked = []
 

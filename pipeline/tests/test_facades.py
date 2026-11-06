@@ -235,3 +235,13 @@ def test_walls_drawn_near_say_where_they_were_drawn(tmp_path):
     drawn, _ = facades.saved_near(path, 0.0, 0.0)
 
     assert [w.at for w in drawn] == ["a"]
+
+
+def test_a_line_kept_for_the_details_of_one_dropped_is_fitted_to_them():
+    xy = np.column_stack([np.zeros(20), np.arange(20.0)])  # twenty details along x = 0
+    same = (np.array([1.0, 0.0]), 0.0)
+    tree = facades.cKDTree(xy)
+
+    labels, lines = facades._shared(xy, tree, [same, same])  # the first dropped, the second holds
+
+    assert len(lines) == 1 and (labels == 0).all()
