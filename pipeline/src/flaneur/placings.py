@@ -146,6 +146,23 @@ def _check_pairs(pairs: dict, answer: str) -> None:
     side = pairs.get("side")
     if not (type(side) is int and side > 0):
         raise ValueError("des paires : la taille de la vue où elles ont été cliquées")
+    seconds = pairs.get("second_clicks")
+    if seconds is not None and not (
+        isinstance(seconds, list) and len(seconds) == len(photo) and all(map(_second, seconds))
+    ):
+        raise ValueError(
+            "un second clic par paire, ou aucun : le panorama voisin et la direction cliquée"
+        )
+
+
+def _second(s: Any) -> bool:
+    """Whether a pair's second click is none, or a neighbour and a direction in its picture."""
+    return s is None or (
+        isinstance(s, dict)
+        and isinstance(s.get("neighbour"), str)
+        and _vectors([s.get("own")], 3)
+        and any(s["own"])
+    )
 
 
 def _check_standing(standing: dict, pairs: dict | None) -> None:

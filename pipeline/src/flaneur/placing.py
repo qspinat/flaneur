@@ -21,7 +21,9 @@ from shapely.geometry import Point
 
 from flaneur import depth, facades, localpage, match, placings, queueing, registration
 from flaneur.gazetteer import to_degrees, to_metres
+from flaneur.panoramas import PANORAMA_HEIGHT_M
 from flaneur.registration import ViewOf
+from flaneur.sources import number
 
 PAGE = Path(__file__).with_name("placing_page.html")
 NEAR_M = queueing.NEAR_M  # the panoramas offered around a photo's spot (where proposals are made)
@@ -31,6 +33,12 @@ FULL_WIDTH = round(SHOWN * 360 / match.VIEW_FOV)  # 6144 px around: SHOWN px in 
 KEPT_PICTURES = 6  # 360° pictures kept decoded (57 MB each at FULL_WIDTH)
 KEPT_VIEWS = 8  # views' depth kept (6.6 MB each at SHOWN, float32), refitted on the same view
 RETRY_S = 60.0  # a larger picture not had (offline...) is asked for again after this
+EPIPOLAR_M = (1.0, 200.0)  # a detail clicked in a view may stand this far: its ray, sampled
+EPIPOLAR_SAMPLES = 1000
+TINT_M = (2.0, 60.0)  # the view tinted by depth: warm this near, cool this far
+WARM, COOL = np.array([40, 120, 255], np.float32), np.array([255, 160, 40], np.float32)  # BGR
+Second = tuple[match.Panorama, np.ndarray]  # a pair's second click: its neighbour, its ray
+NOT_MET = "les deux rayons ne se rencontrent pas : cliquer le même détail dans les deux vues"
 
 
 @dataclass
@@ -53,6 +61,8 @@ class Sources:
     scene: Callable[[str, tuple[str, ...] | None], facades.Scene | None] = lambda *_: None
     # BD TOPO's facades near a spot (Lambert-93): shown under the walls, to draw along
     segments: Callable[[float, float], list[facades.Segment]] = lambda *_: []
+    fixed: set[str] = field(default_factory=set)  # the panoramas COLMAP placed itself
+    walls: Path | None = None  # where walls drawn and removed by hand are kept (see facades)
     # the matcher, one thing at a time: proposals, and depth when it must be made
     matching: threading.Lock = field(default_factory=threading.Lock)
 
@@ -139,6 +149,43 @@ def _depth(scene: facades.Scene, rays: np.ndarray) -> tuple[np.ndarray, list[str
     return metres, [named[m] for m in met]
 
 
+def _at(p: match.Panorama) -> np.ndarray:
+    """Where a panorama's camera stands (Lambert-93, height)."""
+    return np.array([p.x, p.y, p.z])
+
+
+def _second_depth(sphere: match.Panorama, ray: np.ndarray, second: Second) -> float:
+    """How far along `ray` (from the panorama) its second click's ray meets it; refused when
+    they do not meet."""
+    other, seen = second
+    met = depth.meeting(_at(sphere), ray, _at(other), seen)
+    if met is None:
+        raise ValueError(NOT_MET)
+    return met
+
+
+def _pairs_depth(
+    scene: facades.Scene,
+    sphere: match.Panorama,
+    rays: np.ndarray,
+    seconds: list[Second | None],
+    refuse: bool = True,
+) -> tuple[np.ndarray, list[str | None]]:
+    """Each pair's depth along its ray from the panorama (`rays`): where its second click's
+    ray meets it ("click"), else where it meets today's walls (see _depth). A second click
+    whose rays do not meet is refused, or (`refuse` False: one saved, the panoramas placed
+    again since) left to the walls."""
+    metres, source = _depth(scene, rays)
+    for i, second in enumerate(seconds):
+        if second is not None:
+            try:
+                metres[i], source[i] = _second_depth(sphere, rays[i], second), "click"
+            except ValueError as refused:
+                if refuse:
+                    raise ValueError(f"paire {i + 1} : {refused}") from refused
+    return metres, source
+
+
 def _standing(
     photo_px: np.ndarray,
     view_px: np.ndarray,
@@ -148,11 +195,13 @@ def _standing(
     scene: facades.Scene,
     pin: tuple[float, float],
     start: registration.Registration,
+    seconds: list[Second | None] = (),
+    refuse: bool = True,
 ) -> _Standing:
     """The camera where the photographer stood: from the pairs whose panorama point has a
-    depth (see depth_at), started from the flat fit `start` and the user's `pin`."""
+    depth (see _pairs_depth), started from the flat fit `start` and the user's `pin`."""
     rays = _rays(view_px, view, sphere)
-    metres, source = _depth(scene, rays)
+    metres, source = _pairs_depth(scene, sphere, rays, seconds, refuse)
     world = np.array(scene.origin) + metres[:, None] * rays
     fitting = (photo_px, world, size, start, sphere.axes, pin, scene.ground)
     camera, used = registration.fit_standing(*fitting)
@@ -183,6 +232,7 @@ def parallax(
     scene: facades.Scene,
     pin: tuple[float, float],
     held_out: bool = True,
+    seconds: list[Second | None] = (),
 ) -> dict:
     """The photo's camera where the photographer stood (see _standing), as the page has it:
     where it stood, each pair's depth and what gave it, the neighbours the walls were fitted
@@ -193,7 +243,7 @@ def parallax(
     else:
         start, _ = registration.fit(photo_px, view_px, size, SHOWN, sphere.id, view, sphere.axes)
     try:
-        s = _standing(photo_px, view_px, view, sphere, size, scene, pin, start)
+        s = _standing(photo_px, view_px, view, sphere, size, scene, pin, start, seconds)
     except registration.NotFitted as refused:
         if scene.walls:
             raise
@@ -226,40 +276,72 @@ def parallax(
     }
 
 
-def kept_pairs(pairs: dict, sphere: match.Panorama) -> dict:
+def kept_pairs(pairs: dict, sphere: match.Panorama, spheres: dict[str, match.Panorama]) -> dict:
     """Pairs clicked in a view shown at SHOWN, as an answer keeps them: the panorama's as
-    directions in its own picture (unmoved when it is levelled again)."""
+    directions in its own picture (unmoved when it is levelled again), and so their second
+    clicks in the neighbours (`spheres`), if any."""
     view = ViewOf(**pairs["view"])
-    own = registration.own_directions(np.array(pairs["view_px"], float), view, sphere.axes, SHOWN)
-    return {
+
+    def own(px: list, p: match.Panorama) -> list:
+        return registration.own_directions(np.array(px, float), view, p.axes, SHOWN).tolist()
+
+    found = {
         "photo_px": pairs["photo_px"],
-        "own": own.tolist(),
+        "own": own(pairs["view_px"], sphere),
         "view": {"heading": view.heading, "pitch": view.pitch, "fov": view.fov},
         "side": SHOWN,
     }
 
+    def kept(s: dict) -> dict:
+        return {"neighbour": s["neighbour"], "own": own([s["px"]], spheres[s["neighbour"]])[0]}
 
-def compared(row: dict, sphere: match.Panorama, size: tuple, scene: facades.Scene) -> dict:
+    if any(pairs.get("second_clicks") or []):
+        found["second_clicks"] = [None if s is None else kept(s) for s in pairs["second_clicks"]]
+    return found
+
+
+def _kept_seconds(pairs: dict, spheres: dict[str, match.Panorama]) -> list[Second | None]:
+    """An answer's second clicks (see kept_pairs), as rays of the neighbours as placed now."""
+
+    def ray(s: dict) -> Second:
+        other = spheres[s["neighbour"]]
+        return other, np.array(s["own"]) @ other.axes
+
+    return [None if s is None else ray(s) for s in pairs.get("second_clicks") or []]
+
+
+def compared(
+    row: dict,
+    sphere: match.Panorama,
+    size: tuple,
+    scene: facades.Scene,
+    spheres: dict[str, match.Panorama],
+) -> dict:
     """An answer's two fits made again from its saved pairs: the flat one, and the camera where
     the photographer stood (started from the pin its parallax fit started from, else from the
     answer's place). For each, the median of each pair's error held out (shares of the
     photo's diagonal), on the same pairs, those with a depth; a refit refused counts as the
-    worst, and a camera refused outright as infinitely bad. How far it stood from its start."""
+    worst, and a camera refused outright as infinitely bad. How far it stood from its start.
+    Second clicks give depth as they did (their neighbours among `spheres`)."""
     pairs = row["pairs"]
+    seconds = _kept_seconds(pairs, spheres)
     view = ViewOf(**pairs["view"])
     photo_px = np.array(pairs["photo_px"], float)
     view_px = registration.view_pixels(np.array(pairs["own"], float), view, sphere.axes, SHOWN)
     started = (row.get("standing") or {}).get("start") or row
     pin = _metres(started["lon"], started["lat"])
     found = {"photo_id": row["photo_id"], "fit": row.get("fit") or "flat", "pairs": len(photo_px)}
-    same = ~np.isnan(depth_at(scene, sphere, view_px, view)[0])  # both fits: those with depth
+    rays = _rays(view_px, view, sphere)
+    same = ~np.isnan(
+        _pairs_depth(scene, sphere, rays, seconds, refuse=False)[0]
+    )  # both fits: those with depth
     flat_off = registration.held_out_flat(
         photo_px[same], view_px[same], size, SHOWN, view, sphere.axes
     )
     found |= {"with_depth": int(same.sum()), "refused": {"flat": int(np.isinf(flat_off).sum())}}
     try:
         start = registration.fit(photo_px, view_px, size, SHOWN, sphere.id, view, sphere.axes)[0]
-        s = _standing(photo_px, view_px, view, sphere, size, scene, pin, start)
+        s = _standing(photo_px, view_px, view, sphere, size, scene, pin, start, seconds, False)
     except registration.NotFitted as refused:
         flat_median = float(np.median(flat_off)) if len(flat_off) else np.inf
         return {
@@ -298,18 +380,49 @@ def _no_walls(scene: facades.Scene) -> str:
     )
 
 
+def _ends(sent: dict) -> facades.Segment:
+    """A segment drawn on the map: its two ends (degrees), as Lambert-93."""
+    if not isinstance(sent, dict):
+        raise ValueError("un mur : ses deux bouts (longitude, latitude)")
+    try:
+        ends = tuple(_metres(*sent[k]) for k in ("a", "b"))
+    except (KeyError, TypeError) as error:
+        raise ValueError("un mur : ses deux bouts (longitude, latitude)") from error
+    if ends[0] == ends[1]:
+        raise ValueError("un mur : deux bouts distincts")
+    return ends
+
+
+def _drawn(sent: dict, ground: float) -> facades.Wall:
+    """A wall drawn on the map, with its top if the page gives one (else see with_drawn)."""
+    top = sent.get("top") if isinstance(sent, dict) else None
+    if top is not None and not (number(top) and top > ground):
+        raise ValueError("un mur : son haut, au-dessus de la rue")
+    return facades.Wall(*_ends(sent), None if top is None else float(top), "drawn")
+
+
+def _tinted(view: np.ndarray, metres: np.ndarray) -> np.ndarray:
+    """A view tinted by how far each pixel stands: warm near, cool far; the sky untouched."""
+    low, high = TINT_M
+    t = np.log(np.clip(metres, low, high).astype(np.float32) / low) / float(np.log(high / low))
+    tint = (1 - t)[..., None] * WARM + t[..., None] * COOL
+    mixed = cv2.addWeighted(view.astype(np.float32), 0.55, tint, 0.45, 0)
+    return np.where(np.isfinite(metres)[..., None], mixed, view).astype(np.uint8)
+
+
 def _degrees(x: float, y: float) -> list[float]:
     at = to_degrees(Point(x, y))
     return [at.x, at.y]
 
 
 def _walls_shown(scene: facades.Scene, segments: list[facades.Segment]) -> dict:
-    """A panorama's walls as the page draws them on the map (degrees), with BD TOPO's facades
-    near it, the neighbours they were fitted from and how many details; why there are none."""
+    """A panorama's walls as the page draws them on the map (degrees; a wall drawn, with the
+    panorama where it was: the page sends back its own), with BD TOPO's facades near it, the
+    neighbours they were fitted from and how many details; why there are none."""
     return {
         "details": scene.details,
         "walls": [
-            {"a": _degrees(*w.a), "b": _degrees(*w.b), "top": w.top, "made": w.made}
+            {"a": _degrees(*w.a), "b": _degrees(*w.b), "top": w.top, "made": w.made, "at": w.at}
             for w in scene.walls
         ],
         "neighbours": list(scene.neighbours),
@@ -412,7 +525,15 @@ def serve(sources: Sources, port: int) -> HTTPServer:
         found = []
         for p, metres in around.near(*_metres(lon, lat)):
             east, north = _degrees(p.x, p.y)
-            found.append({"id": p.id, "lon": east, "lat": north, "metres": round(metres, 1)})
+            found.append(
+                {
+                    "id": p.id,
+                    "lon": east,
+                    "lat": north,
+                    "metres": round(metres, 1),
+                    "fixed": p.id in sources.fixed,  # placed by COLMAP itself: depth surer
+                }
+            )
         return found
 
     def proposal(photo_id: str, panorama: str) -> dict | None:
@@ -494,6 +615,41 @@ def serve(sources: Sources, port: int) -> HTTPServer:
         pairs = (np.array(body["photo_px"], float), np.array(body["view_px"], float))
         return *pairs, ViewOf(**body["view"]), size
 
+    def neighbour(body: dict) -> match.Panorama:
+        other = spheres.get(body.get("neighbour"))
+        if other is None:
+            raise ValueError(f"panorama voisin inconnu : {body.get('neighbour')}")
+        return other
+
+    def ray_at(px: list, view: ViewOf, sphere: match.Panorama) -> np.ndarray:
+        return _rays(np.array([px], float), view, sphere)[0]
+
+    def second_of(sent: dict, view: ViewOf) -> Second:
+        if not isinstance(sent, dict):
+            raise ValueError("un second clic : le panorama voisin et le point cliqué")
+        other = neighbour(sent)
+        return other, ray_at(sent["px"], view, other)
+
+    def seconds_of(body: dict, view: ViewOf) -> list[Second | None]:
+        """The pairs' second clicks a request sends (each none, or a neighbour and where in its
+        view facing as `view`), as rays."""
+        sent = body.get("second_clicks") or []
+        if sent and not (isinstance(sent, list) and len(sent) == len(body["photo_px"])):
+            raise ValueError("un second clic par paire, ou aucun")
+        return [None if s is None else second_of(s, view) for s in sent]
+
+    def walls_shown(sphere: match.Panorama, body: dict) -> dict:
+        """A panorama's walls as the page draws them (see _walls_shown), with its own walls
+        drawn and removed as saved (`mine`, however far: what the page edits and sends back to
+        /api/walls)."""
+        drawn, removed = facades.saved_at(sources.walls, sphere.id) if sources.walls else ([], [])
+        scene = scene_of(sphere, chosen(body))
+        mine = {
+            "drawn": [{"a": _degrees(*w.a), "b": _degrees(*w.b), "top": w.top} for w in drawn],
+            "removed": [{"a": _degrees(*a), "b": _degrees(*b)} for a, b in removed],
+        }
+        return _walls_shown(scene, sources.segments(sphere.x, sphere.y)) | {"mine": mine}
+
     def chosen(body: dict) -> tuple[str, ...] | None:
         """The neighbours the user chose for the walls (none: picked by their geometry)."""
         named = body.get("neighbours")
@@ -523,7 +679,7 @@ def serve(sources: Sources, port: int) -> HTTPServer:
         """The view with the photo laid by its standing camera, through the walls there."""
         view = ViewOf(**body["view"])
         camera = registration.standing_from_json(body["standing"])
-        origin = np.array([sphere.x, sphere.y, sphere.z])
+        origin = _at(sphere)
         metres = metres_in(scene_of(sphere, chosen(body)), view)
         return registration.composite_standing(
             cut(sphere.id, view), image, camera, origin, view, metres
@@ -537,7 +693,8 @@ def serve(sources: Sources, port: int) -> HTTPServer:
         photo_px, view_px, view, size = clicked({**body, **body["pairs"]}, photo_id)
         start = _metres(body["parallax"]["lon"], body["parallax"]["lat"])
         scene = scene_of(sphere, chosen(body))
-        found = parallax(photo_px, view_px, view, sphere, size, scene, start, held_out=False)
+        seconds = seconds_of(body["pairs"], view)
+        found = parallax(photo_px, view_px, view, sphere, size, scene, start, False, seconds)
         return {
             "camera": found["standing"],
             "metres": found["metres"],
@@ -596,7 +753,7 @@ def serve(sources: Sources, port: int) -> HTTPServer:
                         if pairs is None:
                             raise ValueError("une réponse en parallaxe garde ses paires")
                         standing = answered_in_parallax(body, photo_id, kept)
-                    saved = None if pairs is None else kept_pairs(pairs, kept)
+                    saved = None if pairs is None else kept_pairs(pairs, kept, spheres)
                     held = placings.holding(sources.placings).get(photo_id)
                     if (  # saved again on the same fit (reopened, its cone turned): kept
                         saved is None
@@ -628,15 +785,43 @@ def serve(sources: Sources, port: int) -> HTTPServer:
                     photo_px, view_px, view, size = clicked(body, photo_id)
                     self._json(flat(photo_px, view_px, view, sphere, size)[0])
                 elif self.path == "/api/depth":
+                    self._json(walls_shown(here(sphere), body))
+                elif self.path == "/api/walls":  # the panorama's own walls drawn and removed
                     sphere = here(sphere)
-                    scene = scene_of(sphere, chosen(body))
-                    self._json(_walls_shown(scene, sources.segments(sphere.x, sphere.y)))
+                    if sources.walls is None:
+                        raise ValueError("pas de fichier où garder les murs dessinés")
+                    ground = sphere.z - PANORAMA_HEIGHT_M
+                    sent = [body.get(k) for k in ("drawn", "removed")]
+                    if not all(isinstance(s, list) for s in sent):
+                        raise ValueError("les murs dessinés et ceux retirés : deux listes")
+                    drawn = [_drawn(w, ground) for w in sent[0]]
+                    facades.record(sources.walls, sphere.id, drawn, [_ends(r) for r in sent[1]])
+                    self._json(walls_shown(sphere, body))
+                elif self.path == "/api/second":
+                    sphere, view = here(sphere), ViewOf(**body["view"])
+                    second = second_of({**body, "px": body["neighbour_px"]}, view)
+                    met = _second_depth(sphere, ray_at(body["view_px"], view, sphere), second)
+                    self._json({"metres": met})
+                elif self.path == "/api/epipolar":
+                    sphere, other, view = here(sphere), neighbour(body), ViewOf(**body["view"])
+                    along = np.geomspace(*EPIPOLAR_M, EPIPOLAR_SAMPLES)[:, None]
+                    seen = _at(sphere) + along * ray_at(body["view_px"], view, sphere) - _at(other)
+                    seen /= np.linalg.norm(seen, axis=1, keepdims=True)
+                    px = registration.view_pixels(seen @ other.axes.T, view, other.axes, SHOWN)
+                    self._json({"line": px[np.isfinite(px).all(axis=1)].tolist()})
+                elif self.path == "/api/depthview":
+                    sphere, view = here(sphere), ViewOf(**body["view"])
+                    metres = metres_in(scene_of(sphere, chosen(body)), view)
+                    self._send(200, _jpeg(_tinted(cut(sphere.id, view), metres)), "image/jpeg")
                 elif self.path == "/api/parallax":
                     sphere = here(sphere)
                     photo_px, view_px, view, size = clicked(body, photo_id)
                     scene = scene_of(sphere, chosen(body))
                     pin = _metres(body["lon"], body["lat"])
-                    self._json(parallax(photo_px, view_px, view, sphere, size, scene, pin))
+                    seconds = seconds_of(body, view)
+                    self._json(
+                        parallax(photo_px, view_px, view, sphere, size, scene, pin, True, seconds)
+                    )
                 elif self.path == "/api/composite" and body.get("standing") is not None:
                     image = photo_image(photo_id, bool(body.get("flipped")))
                     self._send(200, _jpeg(laid_standing(body, image, here(sphere))), "image/jpeg")

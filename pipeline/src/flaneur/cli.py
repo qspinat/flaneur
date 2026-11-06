@@ -410,7 +410,8 @@ class _Scenes:
             self.fitting,
         )
         drawn = facades.saved_near(self.walls_path, home.x, home.y)
-        return replace(fitted, walls=tuple(facades.with_drawn(list(fitted.walls), *drawn)))
+        walls = facades.with_drawn(list(fitted.walls), *drawn, fitted.ground)
+        return replace(fitted, walls=tuple(walls))
 
     def _fit(self, home: match.Panorama, chosen: tuple[str, ...] | None) -> facades.Scene:
         if chosen is None:  # picked by their geometry, view by view
@@ -1779,7 +1780,7 @@ def compare_parallax(answers: Path = PLACINGS) -> None:
                 raise ValueError("pas de panorama voisin")
             with Image.open(image) as photo:
                 size = photo.size[::-1]  # height, width
-            one = placing.compared(row, made.by_id[panorama], size, walls)
+            one = placing.compared(row, made.by_id[panorama], size, walls, made.by_id)
         except Exception as error:  # the matcher, a fit refused: this photo, not the others
             typer.echo(f"{row['photo_id']} : laissée de côté ({error})")
             skipped += 1
@@ -1949,6 +1950,8 @@ def place_photos(
         full=full,
         scene=walls_at,
         segments=segments,
+        fixed=fixed,
+        walls=WALLS,
         matching=matching,
     )
     with httpx.Client(timeout=10, follow_redirects=True) as client:

@@ -10,7 +10,7 @@ them."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 import numpy as np
@@ -52,6 +52,7 @@ ABOVE_M = 1.0  # and this far above its high ones
 OVERLAP_DEG = 20.0  # a drawn or removed wall replaces the stretch of a wall this close in angle
 OVERLAP_M = 1.5  # and to its line, alongside it
 MIN_PIECE_M = 1.0  # what is left of a wall shorter than this goes too
+DRAWN_ABOVE_M = 20.0  # a wall drawn where none was fitted reaches this high over the street
 REMOVED_MARGIN_M = 3.0  # a wall removed takes this much more of a wall fitted along it (fitted
 # again from other details, its ends move)
 NEAR_M = 30.0  # walls drawn serve panoramas this close
@@ -61,8 +62,9 @@ NEAR_M = 30.0  # walls drawn serve panoramas this close
 class Wall:
     a: tuple[float, float]  # its ends on the plan (Lambert-93)
     b: tuple[float, float]
-    top: float  # height, as the panoramas'
+    top: float | None  # height, as the panoramas' (drawn without one: see with_drawn)
     made: str  # "fitted" or "drawn"
+    at: str = field(default="", compare=False)  # drawn: the panorama where it was
 
 
 @dataclass(frozen=True)
@@ -287,10 +289,19 @@ def in_view(scene: Scene, view: ViewOf, side: int) -> np.ndarray:
     return np.where(np.isnan(metres), np.inf, metres).reshape(side, side)
 
 
-def with_drawn(fitted: list[Wall], drawn: list[Wall], removed: list[Segment]) -> list[Wall]:
-    """The walls drawn by hand, and what the drawn and removed ones leave of the fitted."""
+def with_drawn(
+    fitted: list[Wall], drawn: list[Wall], removed: list[Segment], ground: float
+) -> list[Wall]:
+    """The walls drawn by hand, and what the drawn and removed ones leave of the fitted. A wall
+    drawn without its top takes that of the fitted walls it replaces (fitted again, it follows
+    them), else DRAWN_ABOVE_M over the street (`ground`)."""
+
+    def topped(w: Wall) -> Wall:
+        tops = [f.top for f in fitted if _left_of(f, (w.a, w.b), 0.0) != [f]]
+        return w if w.top is not None else replace(w, top=max(tops, default=ground + DRAWN_ABOVE_M))
+
     left = _uncovered(fitted, [(w.a, w.b) for w in drawn])
-    return list(drawn) + _uncovered(left, removed, REMOVED_MARGIN_M)
+    return [topped(w) for w in drawn] + _uncovered(left, removed, REMOVED_MARGIN_M)
 
 
 def _uncovered(walls: list[Wall], covering: list[Segment], margin: float = 0.0) -> list[Wall]:
@@ -332,20 +343,38 @@ def record(path: Path, panorama: str, drawn: list[Wall], removed: list[Segment])
     append_row(path, {**row, "drawn": [{"a": w.a, "b": w.b, "top": w.top} for w in drawn]})
 
 
+def _latest(path: Path) -> dict[str, dict]:
+    """The latest row of each panorama, in the order saved last."""
+    latest: dict[str, dict] = {}
+    for row in rows(path):
+        latest.pop(row["panorama"], None)
+        latest[row["panorama"]] = row
+    return latest
+
+
+def _read(row: dict) -> tuple[list[Wall], list[Segment]]:
+    drawn = [
+        Wall(tuple(w["a"]), tuple(w["b"]), w["top"], "drawn", at=row["panorama"])
+        for w in row["drawn"]
+    ]
+    return drawn, [(tuple(a), tuple(b)) for a, b in row["removed"]]
+
+
+def saved_at(path: Path, panorama: str) -> tuple[list[Wall], list[Segment]]:
+    """The walls drawn and removed at a panorama (its latest row)."""
+    row = _latest(path).get(panorama)
+    return _read(row) if row else ([], [])
+
+
 def saved_near(
     path: Path, x: float, y: float, radius: float = NEAR_M
 ) -> tuple[list[Wall], list[Segment]]:
     """The walls drawn and removed (the latest row of each panorama) reaching within `radius`
     of (x, y); a wall drawn at one panorama and removed at another afterwards stays removed.
     (A panorama's row holds the walls drawn there, not those drawn at others.)"""
-    latest: dict[str, dict] = {}
-    for row in rows(path):
-        latest.pop(row["panorama"], None)  # in the order saved last
-        latest[row["panorama"]] = row
     near = []
-    for row in latest.values():
-        drawn = [Wall(tuple(w["a"]), tuple(w["b"]), float(w["top"]), "drawn") for w in row["drawn"]]
-        removed = [(tuple(a), tuple(b)) for a, b in row["removed"]]
+    for row in _latest(path).values():
+        drawn, removed = _read(row)
         near.append(
             (
                 [w for w in drawn if _distance((x, y), (w.a, w.b)) <= radius],

@@ -114,7 +114,7 @@ def test_a_wall_drawn_replaces_the_fitted_one_and_a_removed_one_stays_removed():
     ]
     drawn = [facades.Wall((-3.8, 0.0), (-3.8, 60.0), 20.0, "drawn")]
 
-    kept = facades.with_drawn(fitted, drawn, [((4.0, 0.0), (4.0, 60.0))])
+    kept = facades.with_drawn(fitted, drawn, [((4.0, 0.0), (4.0, 60.0))], GROUND)
 
     assert kept == drawn
 
@@ -123,7 +123,7 @@ def test_a_short_wall_drawn_aslant_replaces_only_the_stretch_it_covers():
     fitted = [facades.Wall((4.0, 2.0), (4.0, 58.0), 12.0, "fitted")]
     drawn = [facades.Wall((3.5, 28.0), (4.5, 33.0), 20.0, "drawn")]  # 11° off, 5 m long
 
-    kept = facades.with_drawn(fitted, drawn, [])
+    kept = facades.with_drawn(fitted, drawn, [], GROUND)
 
     pieces = sorted((w.a[1], w.b[1]) for w in kept if w.made == "fitted")
     assert pieces == [pytest.approx((2, 28)), pytest.approx((33, 58))]
@@ -194,7 +194,7 @@ def test_a_wall_drawn_after_a_removal_near_it_stays(tmp_path):
 def test_a_removed_wall_fitted_again_a_little_longer_stays_removed():
     fitted = [facades.Wall((4.0, 0.0), (4.0, 60.0), 12.0, "fitted")]
 
-    assert facades.with_drawn(fitted, [], [((4.0, 2.0), (4.0, 58.0))]) == []
+    assert facades.with_drawn(fitted, [], [((4.0, 2.0), (4.0, 58.0))], GROUND) == []
 
 
 def test_a_wall_drawn_again_after_its_removal_comes_back(tmp_path):
@@ -214,3 +214,24 @@ def test_a_ray_barely_down_meets_no_street_far_off():
     metres, met = facades.cast(_scene(walls), ray)
 
     assert np.isnan(metres[0]) and met[0] == facades.NOTHING
+
+
+def test_a_wall_drawn_without_its_top_takes_that_of_the_wall_it_replaces_else_twenty_metres():
+    fitted = [facades.Wall((-4.0, 2.0), (-4.0, 58.0), 12.0, "fitted")]
+    drawn = [
+        facades.Wall((-3.8, 0.0), (-3.8, 60.0), None, "drawn"),
+        facades.Wall((-5.0, 70.0), (5.0, 70.0), None, "drawn"),  # where none was fitted
+    ]
+
+    kept = facades.with_drawn(fitted, drawn, [], GROUND)
+
+    assert [w.top for w in kept] == [12.0, GROUND + facades.DRAWN_ABOVE_M]  # over the street
+
+
+def test_walls_drawn_near_say_where_they_were_drawn(tmp_path):
+    path = tmp_path / "walls.jsonl"
+    facades.record(path, "a", [facades.Wall((0.0, 5.0), (10.0, 5.0), None, "drawn")], [])
+
+    drawn, _ = facades.saved_near(path, 0.0, 0.0)
+
+    assert [w.at for w in drawn] == ["a"]

@@ -367,3 +367,41 @@ def test_an_answer_kept_in_parallax_under_the_old_rule_is_saved_again(tmp_path):
     )
 
     assert row["fit"] == "parallax"
+
+
+@pytest.mark.parametrize(
+    "seconds",
+    [
+        [None] * 6,  # one short
+        [None] * 6 + [{"neighbour": "p2"}],  # no direction
+        [None] * 6 + [{"neighbour": 2, "own": [0.1, 0.2, 1.0]}],  # not a panorama
+    ],
+    ids=["one short", "no direction", "not a panorama"],
+)
+def test_second_clicks_that_do_not_go_with_their_pairs_are_refused(tmp_path, seconds):
+    with pytest.raises(ValueError, match="second clic"):
+        placings.record(
+            tmp_path / "p.jsonl",
+            "pm:1",
+            "points",
+            3.0,
+            **SPOT,
+            registration=R,
+            pairs={**PAIRS, "second_clicks": seconds},
+        )
+
+
+def test_second_clicks_are_kept_with_their_pairs(tmp_path):
+    seconds = [None] * 6 + [{"neighbour": "p2", "own": [0.1, 0.2, 1.0]}]
+
+    row = placings.record(
+        tmp_path / "p.jsonl",
+        "pm:1",
+        "points",
+        3.0,
+        **SPOT,
+        registration=R,
+        pairs={**PAIRS, "second_clicks": seconds},
+    )
+
+    assert row["pairs"]["second_clicks"][6]["neighbour"] == "p2"
