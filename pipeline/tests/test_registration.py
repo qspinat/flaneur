@@ -573,3 +573,24 @@ def test_a_pair_held_out_is_refitted_with_the_lens_shift_given():
 
     assert held_at(raised.shift) < 1e-3  # the fit shown's: right
     assert held_at((0.0, 0.0)) > 2e-3  # a wrong one is kept, not fitted
+
+
+def test_where_the_photo_would_be_stretched_thin_the_view_stays():
+    side = 64
+    rows, cols = np.mgrid[0:side, 0:side].astype(np.float32)
+    at = np.stack([cols * 0.6, rows * 0.6], axis=-1)  # the photo laid as a whole: 0.6 px a pixel
+    at[:, 40:, 0] = 40 * 0.6 + (cols[:, 40:] - 40) * 0.02  # a wall seen edge on: 50 times finer
+    inside = np.ones((side, side), bool)
+
+    thin = registration._stretched(at, inside)
+
+    assert thin[:, 45:].all()  # its pixels: today's view, not the photo smeared
+    assert not thin[:, :35].any()
+
+
+def test_where_the_photo_has_nothing_to_show_the_view_is_hatched():
+    view = np.full((32, 32, 3), 200, np.uint8)
+
+    hatched = registration._hatched(view)
+
+    assert set(np.unique(hatched)) == {90, 170}  # darkened in stripes, still seen through

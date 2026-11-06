@@ -106,9 +106,10 @@ const CENTRE = [2.3459, 48.8518];  // the map's, when a test needs a spot
 const wallsAround = (lon, lat, panorama, neighbour) => {
   const at = (east, north) => [lon + east / (111320 * Math.cos(lat * Math.PI / 180)), lat + north / 111320];
   return { details: 900, neighbours: [neighbour], best: neighbour, why: '',
+    candidates: [{ id: neighbour, metres: 4.2, fixed: true }],
     walls: [{ a: at(-6, 0), b: at(-6, 30), top: 12, made: 'fitted', at: '', mine: null },
             { a: at(6, 0), b: at(6, 30), top: 20, made: 'drawn', at: panorama, mine: 0 }],
-    segments: [[at(-6.5, -5), at(-6.5, 35)]],
+    segments: [[at(-12, -5), at(-12, 35)]],
     mine: { drawn: [{ a: at(6, 0), b: at(6, 30), top: null }], removed: [] } };
 };
 const asked = { depth: [], parallax: [], standingLaid: 0, answer: null, epipolar: 0, second: null, walls: [], tint: 0 };
@@ -136,6 +137,8 @@ const [deep, pairsAt] = await onPoints({
   '**/api/epipolar': (route) => { asked.epipolar++; return route.fulfill({ json: { line: [[100, 600], [700, 640], [1200, 700]] } }); },
   '**/api/second': (route) => { asked.second = route.request().postDataJSON(); return route.fulfill({ json: { metres: 14.2 } }); },
   '**/api/depthview': (route) => { asked.tint++; return route.fulfill(JPEG); },
+  '**/api/wallsview': (route) => route.fulfill({ json: { walls: [
+    { i: 0, made: 'fitted', foot: [[100, 900], [500, 800]], top: [[100, 300], [500, 400]] }] } }),
   '**/api/composite': (route) => {
     if (route.request().postDataJSON().standing) asked.standingLaid++;
     return route.fulfill(JPEG);
@@ -162,32 +165,53 @@ check(asked.depth.length === 1, `the toggle makes the panorama's walls ahead (${
 const drawn = await deep.evaluate(() => [map.getSource('walls').serialize().data.features.length,
                                          map.getSource('segments').serialize().data.features.length]);
 check(drawn[0] === 2 && drawn[1] === 1, `the walls and BD TOPO's facades are drawn on the map (${drawn})`);
-check(await deep.locator('#third-box').isVisible(), 'pairing in parallax shows the best neighbour\'s view beside');
+await deep.waitForTimeout(300);
+const overlaid = await deep.locator('#view-stage .in-view polyline').count();
+check(overlaid >= 3, `the walls are drawn over the view too: foot, top, ends (${overlaid})`);
+check(!(await deep.locator('#third-box').isVisible()), 'pairing keeps two large pictures: the photo and the view');
 await pairsAt(SIX);
 await deep.waitForTimeout(1000);
 check(asked.parallax.length > 0 && asked.standingLaid > 0, `six pairs refit by parallax and laid through depth (${asked.parallax.length}, ${asked.standingLaid})`);
 check((await deep.locator('#view-stage .dot.off').count()) >= 1, 'a pair far from the fit shows on its dot');
+check((await deep.locator('#strip button.wall').count()) === 6, 'each pair\'s plate says its depth came from a wall');
+await deep.locator('#strip button').nth(5).click();  // pair 6: its depth by the neighbour's view
+await deep.waitForTimeout(500);
+check(await deep.locator('#third-box').isVisible() && !(await deep.locator('#photo-box').isVisible()),
+  'a pair\'s plate shows the neighbour\'s view in the photo\'s place');
 check(asked.epipolar > 0 && (await deep.locator('#line').getAttribute('points')).length > 0,
-  `the last pair's line is drawn in the neighbour's view (${asked.epipolar})`);
+  `the pair's line is drawn in the neighbour's view (${asked.epipolar})`);
 const third = await deep.locator('#third').boundingBox();
 await deep.mouse.click(third.x + third.width * 0.5, third.y + third.height * 0.5);
 await deep.waitForTimeout(1000);
 check(asked.second?.neighbour === here.neighbour && asked.second?.neighbour_px?.length === 2,
   'a click in the neighbour\'s view asks the last pair\'s depth there');
 check((await deep.locator('#view-stage .dot.click').count()) === 1, 'that pair\'s dot says its depth came from a second click');
+check(await deep.locator('#photo-box').isVisible(), 'and the photo comes back');
 check(asked.parallax.at(-1).second_clicks?.[5]?.neighbour === here.neighbour, 'the parallax fit is made again with the second click');
-await clickMap(here.at, 'Shift');
+await deep.locator('#tab-neighbours').click();
+check(await deep.locator(`#nb-${here.neighbour}`).isChecked(), 'the neighbour used is ticked in the list');
+await deep.locator(`#nb-${here.neighbour}`).uncheck();
+await deep.waitForTimeout(700);
 check(Array.isArray(asked.depth.at(-1).neighbours) && !asked.depth.at(-1).neighbours.includes(here.neighbour),
-  `Shift-click on a neighbour used leaves it out of the walls (${JSON.stringify(asked.depth.at(-1).neighbours)})`);
-await clickMap([here.lon, here.lat], 'Shift');
-check(asked.depth.at(-1).neighbours === undefined, `Shift-click on the panorama shown gives the neighbours back to geometry (${asked.depth.length}: ${JSON.stringify(asked.depth.at(-1).neighbours)})`);
-await deep.keyboard.press('w');
+  `a neighbour unticked is left out of the walls (${JSON.stringify(asked.depth.at(-1).neighbours)})`);
+await deep.locator('#automatic').click();
+await deep.waitForTimeout(700);
+check(asked.depth.at(-1).neighbours === undefined, 'the automatic choice comes back with its button');
+await deep.locator('#tab-walls').click();
+check((await deep.textContent('#mapmode')).includes('choisir'), 'the walls tool says a click chooses a wall');
+await deep.locator('#draw-walls').click();
 const metres = (east, north) => [here.lon + east / (111320 * Math.cos(here.lat * Math.PI / 180)), here.lat + north / 111320];
 await clickMap(metres(-15, -10)); await clickMap(metres(-15, 10));
 check(asked.walls.at(-1)?.drawn?.length === 2 && asked.walls.at(-1).removed.length === 0,
   `a wall drawn in two clicks on the map is saved with the panorama's own (${asked.walls.at(-1)?.drawn?.length})`);
+await deep.locator('#draw-walls').click();  // drawing done: a click chooses again
+const before = asked.walls.length;
+await clickMap(metres(-12, 25));  // BD TOPO's facade, grey, away from the walls
+check(asked.walls.length === before + 1 && asked.walls.at(-1).drawn.length === 2,
+  'a BD TOPO facade clicked is saved as a wall drawn here');
 await clickMap(metres(-6, 15));  // the fitted wall
-await deep.keyboard.press('Backspace');
+check(await deep.locator('#chosen-wall').isVisible(), 'a wall chosen shows what it is and how to remove it');
+await deep.locator('#remove-wall').click();
 await deep.waitForTimeout(700);
 check(asked.walls.at(-1)?.removed?.length === 1, `a fitted wall chosen and ⌫ is saved as removed here (${asked.walls.at(-1)?.removed?.length})`);
 await clickMap(metres(6, 15));  // the wall drawn here
@@ -198,14 +222,21 @@ await deep.waitForTimeout(700);
 const moved = asked.walls.at(-1);
 check(moved?.drawn?.length === 1 && moved.drawn[0].a[0] !== wallsAround(here.lon, here.lat, '', '').mine.drawn[0].a[0],
   'dragging an end of a wall drawn here moves it');
-await deep.keyboard.press('w');
-await deep.keyboard.press('d');
+await deep.locator('#tab-walls').click();  // the tool put away
+await deep.locator('#tint').check();
 await deep.waitForTimeout(600);
-check(asked.tint > 0, 'D shows the view tinted by depth');
-await deep.keyboard.press('d');
+check(asked.tint > 0, 'the tint box shows the view tinted by depth');
+const plates = await deep.locator('#strip button').count();
+check(plates === 6, `the strip shows the six pairs (${plates})`);
+await deep.locator('#strip button').nth(2).click();
+check((await deep.textContent('#third-label')).includes('Paire 3'), 'a plate clicked aims the next click beside at its pair');
+await deep.keyboard.press('Escape');
+check(await deep.locator('#photo-box').isVisible(), 'Échap brings the photo back');
+await deep.locator('#tint').uncheck();
 await deep.waitForTimeout(1500);  // the view itself again
 await deep.screenshot({ path: 'screenshots/placing-walls.png' });
-await deep.locator('.stood').click();
+check(await deep.locator('#stood-ok').isVisible(), 'a button offers to put the camera where the fit found it');
+await deep.locator('#stood-ok').click();
 await deep.waitForTimeout(300);
 const pin = await deep.evaluate(() => spot);
 check(Math.abs(pin.lon - stood.lon) < 1e-9 && Math.abs(pin.lat - stood.lat) < 1e-9 && pin.heading === 120,

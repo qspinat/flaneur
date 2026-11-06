@@ -460,6 +460,35 @@ def composite(
     return laid
 
 
+STRETCHED = 6.0  # a part of the photo laid this many times larger than the photo as a whole
+
+
+def _stretched(at: np.ndarray, inside: np.ndarray) -> np.ndarray:
+    """Where the photo laid in a view (`at`: each view pixel's place in the photo, side × side
+    × 2; `inside`: those it reaches) would cover STRETCHED times more of the view than it does
+    as a whole: a wall the photographer saw edge on, its few pixels smeared into streaks."""
+    with np.errstate(invalid="ignore"):
+        du_dy, du_dx = np.gradient(np.where(inside, at[..., 0], np.nan))
+        dv_dy, dv_dx = np.gradient(np.where(inside, at[..., 1], np.nan))
+        # how little of the photo one view pixel spans, the way it is most squeezed: the lesser
+        # singular value of the map's local derivative (a streak is squeezed one way only)
+        square = du_dx**2 + du_dy**2 + dv_dx**2 + dv_dy**2
+        det = du_dx * dv_dy - du_dy * dv_dx
+        least = np.sqrt(np.maximum(square - np.sqrt(np.maximum(square**2 - 4 * det**2, 0)), 0) / 2)
+        scale = np.sqrt(np.abs(det))  # the photo's scale there, both ways
+    known = np.isfinite(least) & (scale > 0)
+    if not known.any():
+        return np.zeros_like(inside)
+    return known & (least < np.median(scale[known]) / STRETCHED)
+
+
+def _hatched(view: np.ndarray) -> np.ndarray:
+    """A view darkened in diagonal stripes, still seen through."""
+    rows, cols = np.indices(view.shape[:2])
+    shade = np.where((rows + cols) // 6 % 2 == 0, 0.45, 0.85)
+    return (view * shade.reshape(*shade.shape, *[1] * (view.ndim - 2))).astype(view.dtype)
+
+
 def composite_standing(
     view_bgr: np.ndarray,
     photo_bgr: np.ndarray,
@@ -472,7 +501,9 @@ def composite_standing(
     depth: each pixel's point of today (`metres` along its ray; the sky infinitely far) seen by
     the standing camera, unless a nearer point hides it from the camera (HIDDEN times farther
     than the nearest seen in that part of the photo, as wide as a pixel of the view). Where the
-    photo does not reach, or the depth is unknown (NaN), the view as it was."""
+    photo does not reach, or the depth is unknown (NaN), the view as it was; where the photo
+    would be stretched thin (see _stretched), the view hatched: the photo has nothing to show
+    there (a wall the photographer saw edge on — or a wall misplaced)."""
     side = view_bgr.shape[0]
     if view_bgr.shape[1] != side:
         raise ValueError("une vue est carrée")
@@ -500,11 +531,15 @@ def composite_standing(
     nearest = np.full((h // cell + 1) * (w // cell + 1), np.inf)
     np.minimum.at(nearest, key[inside], away[inside])
     inside &= ~(away > HIDDEN * nearest[key])
+    thin = _stretched(at.reshape(side, side, 2), inside.reshape(side, side)).ravel()
+    inside &= ~thin
     maps = np.where(inside[:, None], at - 0.5, -1.0).astype(np.float32).reshape(side, side, 2)
     warped = cv2.remap(
         photo_bgr, maps[..., 0], maps[..., 1], cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE
     )
-    return np.where(inside.reshape(side, side, *[1] * (view_bgr.ndim - 2)), warped, view_bgr)
+    shape = (side, side, *[1] * (view_bgr.ndim - 2))
+    base = np.where(thin.reshape(shape), _hatched(view_bgr), view_bgr) if thin.any() else view_bgr
+    return np.where(inside.reshape(shape), warped, base)
 
 
 def carried(

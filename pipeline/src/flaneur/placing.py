@@ -35,10 +35,19 @@ KEPT_VIEWS = 8  # views' depth kept (6.6 MB each at SHOWN, float32), refitted on
 RETRY_S = 60.0  # a larger picture not had (offline...) is asked for again after this
 EPIPOLAR_M = (1.0, 200.0)  # a detail clicked in a view may stand this far: its ray, sampled
 EPIPOLAR_SAMPLES = 1000
+WALL_SAMPLES = 40  # points along a wall drawn in a view (a straight wall bends there)
 TINT_M = (2.0, 60.0)  # the view tinted by depth: warm this near, cool this far
 WARM, COOL = np.array([40, 120, 255], np.float32), np.array([255, 160, 40], np.float32)  # BGR
 Second = tuple[match.Panorama, np.ndarray]  # a pair's second click: its neighbour, its ray
-NOT_MET = "les deux rayons ne se rencontrent pas : cliquer le même détail dans les deux vues"
+NOT_MET = (
+    "les deux rayons ne se rencontrent pas : ils passent à {:.1f} m l'un de l'autre ({:g} m au"
+    " plus) — pas le même détail, ou la position d'un des deux panoramas est fausse"
+)
+BEHIND = "les deux rayons se croisent derrière un des panoramas : pas le même détail"
+IN_LINE = (
+    "ce voisin voit le détail presque dans l'axe (moins de {:g}°) : en montrer un plus de côté"
+    " (Voisins)"
+)
 
 
 @dataclass
@@ -160,7 +169,14 @@ def _second_depth(sphere: match.Panorama, ray: np.ndarray, second: Second) -> fl
     other, seen = second
     met = depth.meeting(_at(sphere), ray, _at(other), seen)
     if met is None:
-        raise ValueError(NOT_MET)
+        apart = np.degrees(np.arccos(np.clip(ray @ seen / np.linalg.norm(seen), -1, 1)))
+        if apart < match.MEET_DEG:
+            raise ValueError(IN_LINE.format(match.MEET_DEG))
+        origins, rays = np.vstack([_at(sphere), _at(other)]), np.vstack([ray, seen])
+        at, miss = match.meet(origins, rays)
+        if (((at - origins) * rays).sum(axis=1) <= 0).any():
+            raise ValueError(BEHIND)
+        raise ValueError(NOT_MET.format(2 * miss, match.MEET_M))  # each ray half the gap off
     return met
 
 
@@ -421,6 +437,29 @@ def _tinted(view: np.ndarray, metres: np.ndarray) -> np.ndarray:
     tint = (1 - t)[..., None] * WARM + t[..., None] * COOL
     mixed = cv2.addWeighted(view.astype(np.float32), 0.55, tint, 0.45, 0)
     return np.where(np.isfinite(metres)[..., None], mixed, view).astype(np.uint8)
+
+
+def _pixels_in(points: np.ndarray, sphere: match.Panorama, view: ViewOf) -> np.ndarray:
+    """Where points of today (n × 3) fall in a view of the panorama, SHOWN square (NaN behind)."""
+    rays = points - _at(sphere)
+    rays /= np.linalg.norm(rays, axis=1, keepdims=True)
+    return registration.view_pixels(rays @ sphere.axes.T, view, sphere.axes, SHOWN)
+
+
+def _walls_in_view(scene: facades.Scene, sphere: match.Panorama, view: ViewOf) -> list[dict]:
+    """Each wall's foot (on the street) and top as a view of the panorama shows them: points of
+    a view SHOWN square along it (none where behind the camera)."""
+    s = np.linspace(0.0, 1.0, WALL_SAMPLES)[:, None]
+    found = []
+    for i, w in enumerate(scene.walls):
+        plan = np.asarray(w.a) + s * (np.asarray(w.b) - np.asarray(w.a))
+        lines = {}
+        for name, height in (("foot", scene.ground), ("top", w.top)):
+            px = _pixels_in(np.column_stack([plan, np.full(len(plan), height)]), sphere, view)
+            lines[name] = [p.tolist() if np.isfinite(p).all() else None for p in px]
+        if any(lines["foot"]) or any(lines["top"]):
+            found.append({"i": i, "made": w.made, **lines})
+    return found
 
 
 def _degrees(x: float, y: float) -> list[float]:
@@ -686,7 +725,17 @@ def serve(sources: Sources, port: int) -> HTTPServer:
         }
         own = {(w.a, w.b): k for k, w in enumerate(drawn)}
         shown = _walls_shown(scene, sources.segments(sphere.x, sphere.y), own)
-        return shown | {"mine": mine, "best": best(sphere, scene, body.get("heading"))}
+        low, high = depth.NEAR_M
+        candidates = [  # the panoramas the walls may come from: 2–15 m from this one
+            {"id": p.id, "metres": round(float(d), 1), "fixed": p.id in sources.fixed}
+            for p, d in around.near(sphere.x, sphere.y, high)
+            if d >= low and p.id != sphere.id
+        ]
+        return shown | {
+            "mine": mine,
+            "best": best(sphere, scene, body.get("heading")),
+            "candidates": candidates,
+        }
 
     def best(sphere: match.Panorama, scene: facades.Scene, heading) -> str | None:
         """The neighbour of the walls that sees best what a view facing `heading` shows (see
@@ -854,10 +903,13 @@ def serve(sources: Sources, port: int) -> HTTPServer:
                 elif self.path == "/api/epipolar":
                     sphere, other, view = here(sphere), neighbour(body), ViewOf(**body["view"])
                     along = np.geomspace(*EPIPOLAR_M, EPIPOLAR_SAMPLES)[:, None]
-                    seen = _at(sphere) + along * ray_at(body["view_px"], view, sphere) - _at(other)
-                    seen /= np.linalg.norm(seen, axis=1, keepdims=True)
-                    px = registration.view_pixels(seen @ other.axes.T, view, other.axes, SHOWN)
+                    seen = _at(sphere) + along * ray_at(body["view_px"], view, sphere)
+                    px = _pixels_in(seen, other, view)
                     self._json({"line": px[np.isfinite(px).all(axis=1)].tolist()})
+                elif self.path == "/api/wallsview":
+                    sphere, view = here(sphere), ViewOf(**body["view"])
+                    scene = scene_of(sphere, chosen(body))
+                    self._json({"walls": _walls_in_view(scene, sphere, view)})
                 elif self.path == "/api/depthview":
                     sphere, view = here(sphere), ViewOf(**body["view"])
                     metres = metres_in(scene_of(sphere, chosen(body)), view)
