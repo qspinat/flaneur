@@ -13,9 +13,58 @@
   #side { display: grid; grid-template-rows: auto 1fr auto; min-height: 0; border-right: 1px solid #444; }
   #head { padding: 10px 12px; }
   #head h1 { font-size: 15px; margin: 0 0 4px; }
-  #map { min-height: 0; }
-  #keys { padding: 8px 12px; font-size: 12px; color: #c9bfae; }
-  #keys kbd { background: #3a352e; border-radius: 3px; padding: 0 4px; color: var(--paper); }
+  #map-box { position: relative; min-height: 0; }
+  #map { position: absolute; inset: 0; }
+  #mapmode { position: absolute; top: 8px; left: 8px; z-index: 2; margin: 0; max-width: 80%;
+             padding: 4px 10px; border-radius: 4px; background: var(--enamel); color: var(--paper);
+             box-shadow: 0 0 0 2px #2f6b4f; font-size: 13px; pointer-events: none; }
+  #mapmode:empty { display: none; }
+  kbd { background: #3a352e; border-radius: 3px; padding: 0 4px; color: var(--paper);
+        font: 11px/1.5 system-ui, sans-serif; }
+  #tools { padding: 8px 12px 10px; font-size: 13px; color: #d8cfbf; overflow-y: auto; max-height: 46vh; }
+  #depth { border-bottom: 1px solid #4a443b; padding-bottom: 10px; margin-bottom: 8px; }
+  #depth .row { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; }
+  #depth-sum { margin: 0 0 8px; color: var(--paper); }
+  .lead { margin: 6px 0; color: #b3a893; font-size: 12px; }
+  .toggle { display: flex; align-items: center; gap: 6px; white-space: nowrap; cursor: pointer; }
+  .tabs, .segmented { display: flex; gap: 0; margin: 6px 0; }
+  .tabs button, .segmented button { flex: 1; font: inherit; color: var(--paper); background: #3a352e;
+                                    border: 1px solid #6b6255; padding: 4px 8px; cursor: pointer; }
+  .tabs button + button, .segmented button + button { border-left: none; }
+  .tabs button[aria-selected=true], .segmented button[aria-pressed=true] {
+    background: var(--enamel); border-color: #8fa6c9; }
+  #tools button:focus-visible, #tools input:focus-visible, #strip button:focus-visible {
+    outline: 2px solid #f2c14e; outline-offset: 1px; }
+  #neighbours { list-style: none; margin: 4px 0; padding: 0; }
+  #neighbours li { display: grid; grid-template-columns: auto 1fr auto auto; gap: 8px; align-items: center;
+                   padding: 3px 0; border-bottom: 1px solid #3a352e; }
+  #neighbours .placed { font-size: 11px; color: #b3a893; }
+  #neighbours .placed.yes { color: #9fd3b0; }
+  .quiet { font: inherit; font-size: 12px; background: none; border: 1px solid #6b6255; color: #d8cfbf;
+           border-radius: 3px; padding: 2px 8px; cursor: pointer; }
+  .quiet:disabled { opacity: 0.4; cursor: default; }
+  #neighbours .beside[aria-pressed=true] { background: #2f6b4f; border-color: #4caf7a; color: var(--paper); }
+  #chosen-wall { margin: 8px 0; padding: 8px; background: #3a352e; border-radius: 4px; }
+  #chosen-wall p { margin: 0 0 6px; }
+  #remove-wall { font: inherit; background: #8a3b12; color: var(--paper); border: none; border-radius: 3px;
+                 padding: 4px 10px; cursor: pointer; }
+  .legend { list-style: none; padding: 0; margin: 8px 0 0; display: flex; flex-wrap: wrap; gap: 4px 14px;
+            font-size: 12px; color: #b3a893; }
+  .legend i { display: inline-block; width: 16px; height: 4px; margin-right: 6px; vertical-align: middle; }
+  .legend .fitted { background: #3b7dd8; } .legend .drawn { background: #e8892b; }
+  .legend .bdtopo { background: #8c867c; }
+  #keys summary { cursor: pointer; color: #b3a893; }
+  #keys dl { display: grid; grid-template-columns: auto 1fr; gap: 3px 10px; margin: 6px 0 0; font-size: 12px; }
+  #keys dd { margin: 0; }
+  /* the pairs, as little enamel street plates: the rim says where each depth comes from */
+  #strip { display: flex; gap: 5px; list-style: none; margin: 0; padding: 0; }
+  #strip button { width: 26px; height: 20px; border-radius: 3px; background: var(--enamel); color: var(--paper);
+                  font: 600 12px/16px system-ui, sans-serif; border: 2px solid #ede4d3; cursor: pointer;
+                  padding: 0; font-variant-numeric: tabular-nums; }
+  #strip .wall { border-color: #3b7dd8; } #strip .drawn { border-color: #e8892b; }
+  #strip .ground { border-color: #8c867c; } #strip .click { border-color: #4caf7a; }
+  #strip .none { border: 2px dashed #e0523a; background: #2e2a25; }
+  #strip button[aria-current=true] { outline: 2px solid #f2c14e; outline-offset: 1px; }
   #main { position: relative; display: grid; grid-template-rows: auto 1fr auto; min-height: 0; }
   #bar { padding: 8px 12px; display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
   #message { color: #f2c14e; min-height: 1.4em; }
@@ -28,10 +77,15 @@
             border: 2px solid var(--paper); box-shadow: 0 2px 8px #000a; z-index: 2; }
   #pair { display: none; grid-template-columns: 1fr 1fr; gap: 8px; height: 100%; padding: 8px; }
   #pair.on { display: grid; }
-  #pair.three { grid-template-columns: 1fr 1fr 1fr; }
+  #pair:not(.depth) #third-box, #pair.depth #photo-box { display: none; }
+  #view-box { order: 1; }  /* the view stays on the right; the photo, or the neighbour's, left */
   #third-box .label { position: absolute; top: 4px; left: 6px; z-index: 3; font-size: 12px;
                       background: #000b; padding: 1px 6px; border-radius: 3px; }
   #epipolar { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+  .in-view { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+  .in-view polyline { fill: none; stroke-width: 3; vector-effect: non-scaling-stroke; opacity: 0.85; }
+  .in-view .fitted { stroke: #3b7dd8; } .in-view .drawn { stroke: #e8892b; }
+  .in-view .chosen { stroke-width: 6; opacity: 1; }
   #epipolar polyline { fill: none; stroke: #4caf7a; stroke-width: 3; vector-effect: non-scaling-stroke; }
   #pair .box { position: relative; overflow: hidden; display: flex; align-items: center; justify-content: center; }
   #pair .zoomed-stage { position: relative; max-width: 100%; max-height: 100%; }
@@ -52,6 +106,8 @@
               border-radius: 4px; padding: 2px 10px; cursor: pointer; }
   #parallax.on { background: var(--enamel); border-color: #8fa6c9; }
   #parallax:disabled { opacity: 0.4; cursor: default; }
+  #stood-ok { font: inherit; background: var(--enamel); color: var(--paper); border: 1px solid #8fa6c9;
+              border-radius: 4px; padding: 2px 10px; cursor: pointer; }
   .stood { width: 18px; height: 18px; border-radius: 50%; background: var(--enamel);
            border: 3px solid #ede4d3; box-shadow: 0 1px 4px #000a; cursor: pointer; }
   #foot { padding: 8px 12px; display: flex; gap: 10px; align-items: center; }
@@ -65,41 +121,78 @@
     <h1 id="title">…</h1>
     <div id="progress"></div>
   </div>
-  <div id="map"></div>
-  <div id="keys">
-    Plan : glisser le point (où se tenait le photographe), <kbd>←</kbd><kbd>→</kbd> tourner
-    (<kbd>⇧</kbd> : 1°), <kbd>A</kbd> vue aérienne 1949, clic sur un panorama pour s'y rendre,
-    sur une photo déjà placée (point vert, ou gris si trop loin) pour la rouvrir.<br>
-    Photo : <kbd>Entrée</kbd> elle tombe juste · <kbd>F</kbd> poser par points · <kbd>X</kbd> trop loin
-    · <kbd>S</kbd> passer · <kbd>R</kbd> retourner l'image · <kbd>[</kbd><kbd>]</kbd> tourner la vue ·
-    <kbd>,</kbd><kbd>.</kbd> panorama voisin · <kbd>P</kbd> parallaxe (le photographe ailleurs que
-    le panorama : point bleu sur le plan, clic pour l'accepter).<br>
-    Parallaxe : <kbd>⇧</kbd>+clic sur un panorama le prend (ou le laisse) pour les murs (cerclés de
-    vert ; sur celui montré : choisis à nouveau par leur géométrie), <kbd>⌥</kbd>+clic le montre à
-    droite · <kbd>W</kbd> murs : deux clics en tracent un (<kbd>⇧</kbd> : accroché à un coin BD TOPO),
-    clic pour en choisir un, <kbd>⌫</kbd> le retire, ses bouts se déplacent · <kbd>D</kbd> la vue
-    teintée par la distance · <kbd>N</kbd> le panorama recalé par COLMAP le plus proche · par points,
-    un clic sur le même détail dans la vue de droite donne sa profondeur à la dernière paire.
+  <div id="map-box"><div id="map"></div><p id="mapmode"></p></div>
+  <div id="tools">
+    <section id="depth" hidden aria-label="Profondeur">
+      <div class="row">
+        <p id="depth-sum">Murs en cours…</p>
+        <label class="toggle"><input type="checkbox" id="tint"> teinter la vue <kbd>D</kbd></label>
+      </div>
+      <div class="tabs" role="tablist">
+        <button role="tab" id="tab-neighbours" data-tool="neighbours">Voisins <kbd>V</kbd></button>
+        <button role="tab" id="tab-walls" data-tool="walls">Murs <kbd>W</kbd></button>
+      </div>
+      <div id="pane-neighbours" class="pane" hidden>
+        <p class="lead">Les panoramas dont les détails donnent les murs : cochez-les. « Voir » montre sa
+          vue à la place de la photo, pour donner sa profondeur à une paire.</p>
+        <ul id="neighbours"></ul>
+        <button id="automatic" class="quiet">Revenir au choix automatique</button>
+      </div>
+      <div id="pane-walls" class="pane" hidden>
+        <p class="lead">Sur le plan, cliquez un mur pour le choisir (le retirer, glisser ses bouts),
+          ou une façade grise de la BD TOPO pour en faire un mur.</p>
+        <div class="segmented"><button id="draw-walls">Tracer un mur : deux clics sur le plan</button></div>
+        <label class="toggle"><input type="checkbox" id="snap"> accrocher aux coins BD TOPO (3 m) <kbd>⇧</kbd></label>
+        <div id="chosen-wall" hidden>
+          <p id="chosen-what"></p>
+          <button id="remove-wall">Retirer ce mur <kbd>⌫</kbd></button>
+          <p class="lead">Glissez ses bouts sur le plan pour le déplacer.</p>
+        </div>
+        <ul class="legend">
+          <li><i class="fitted"></i>trouvé dans les panoramas</li>
+          <li><i class="drawn"></i>dessiné à la main</li>
+          <li><i class="bdtopo"></i>façades BD TOPO</li>
+        </ul>
+      </div>
+    </section>
+    <details id="keys">
+      <summary>Raccourcis clavier</summary>
+      <dl>
+        <dt><kbd>←</kbd><kbd>→</kbd></dt><dd>tourner le cône (<kbd>⇧</kbd> : 1°)</dd>
+        <dt><kbd>Entrée</kbd></dt><dd>garder : la photo tombe juste</dd>
+        <dt><kbd>F</kbd></dt><dd>poser par points (paires photo / vue)</dd>
+        <dt><kbd>X</kbd> <kbd>S</kbd></dt><dd>aucun panorama ne la voit · passer</dd>
+        <dt><kbd>R</kbd></dt><dd>retourner l'image</dd>
+        <dt><kbd>[</kbd><kbd>]</kbd> <kbd>,</kbd><kbd>.</kbd></dt><dd>tourner la vue · panorama voisin</dd>
+        <dt><kbd>P</kbd></dt><dd>parallaxe : le photographe ailleurs que le panorama</dd>
+        <dt><kbd>N</kbd></dt><dd>le panorama recalé par COLMAP le plus proche</dd>
+        <dt><kbd>A</kbd></dt><dd>vue aérienne de 1949</dd>
+        <dt><kbd>⌫</kbd></dt><dd>reprendre la dernière paire (ou retirer le mur choisi)</dd>
+      </dl>
+    </details>
   </div>
 </section>
 <section id="main">
   <div id="bar"><span id="where"></span>
     <button id="parallax" title="P : la photo posée d'où se tenait le photographe, pas du panorama">parallaxe</button>
-    <span id="message"></span></div>
+    <span id="message"></span>
+    <button id="stood-ok" hidden>Placer l'appareil au point bleu</button></div>
   <div id="stage">
     <div class="square" id="square">
       <img id="today" alt="">
       <img id="laid" alt="">
+      <svg class="in-view" viewBox="0 0 1280 1280" preserveAspectRatio="none" aria-hidden="true"></svg>
     </div>
     <img id="pinned" alt="">
     <div id="pair">
       <div class="box" id="photo-box"><div class="zoomed-stage" id="photo-stage"><img id="photo" alt=""></div></div>
-      <div class="box" id="view-box"><div class="zoomed-stage" id="view-stage"><img id="view" alt=""><img id="view-laid" alt=""></div></div>
-      <div class="box" id="third-box" style="display: none"><span class="label" id="third-label"></span><div class="zoomed-stage" id="third-stage"><img id="third" alt=""><svg id="epipolar" preserveAspectRatio="none"><polyline id="line"/></svg></div></div>
+      <div class="box" id="view-box"><div class="zoomed-stage" id="view-stage"><img id="view" alt=""><img id="view-laid" alt=""><svg class="in-view" viewBox="0 0 1280 1280" preserveAspectRatio="none" aria-hidden="true"></svg></div></div>
+      <div class="box" id="third-box"><span class="label" id="third-label"></span><div class="zoomed-stage" id="third-stage"><img id="third" alt=""><svg id="epipolar" preserveAspectRatio="none"><polyline id="line"/></svg></div></div>
     </div>
   </div>
   <div id="foot">
     aujourd'hui <input id="fade" type="range" min="0" max="100" value="60"> autrefois
+    <ol id="strip" aria-label="Paires"></ol>
     <span id="points-help"></span>
   </div>
 </section>
@@ -128,7 +221,8 @@ const post = async (url, body) => {
   const r = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' },
                                body: JSON.stringify(body) });
   if (!r.ok) throw new Error(await r.text());
-  return r.headers.get('Content-Type').startsWith('image/') ? URL.createObjectURL(await r.blob()) : r.json();
+  const type = r.headers.get('Content-Type') || '';  // none: an empty answer
+  return type.startsWith('image/') ? URL.createObjectURL(await r.blob()) : type ? r.json() : null;
 };
 
 let photo = null, left = 0, shownAt = 0;
@@ -151,7 +245,12 @@ let deepened = null;     // the walls last asked for (panorama|neighbours chosen
 let scene = null;        // the walls around the panorama shown (see /api/depth): fitted, drawn
                          // (`mine`: those drawn and removed here, as saved), BD TOPO's facades
 const choices = {};      // the neighbours chosen by hand, by panorama (none: by their geometry)
-let wallsMode = false, drawingFrom = null, selected = null;  // walls drawn on the map (W)
+let tool = null;         // what a click on the map does with parallax on: 'neighbours', 'walls'
+let drawing = false;     // walls: two clicks draw one (else a click chooses one, or takes a facade)
+let snap = false;        // walls: an end drawn goes to BD TOPO's nearest corner within 3 m
+let drawingFrom = null, selected = null;  // a wall's first end drawn; the wall chosen
+let target = null;       // the pair a click in the neighbour's view gives its depth (none: the last)
+let deepening = false;   // the neighbour's view shown in the photo's place, for that pair's depth
 let tinted = false;      // the view tinted by depth (D)
 let third = null;        // the neighbour whose view shows beside, for second clicks
 const chosenHere = () => (at >= 0 ? choices[near[at].id] : undefined);
@@ -177,21 +276,23 @@ const map = new maplibregl.Map({
         'circle-color': ['case', ['get', 'shown'], '#1b3a6b', ['get', 'fixed'], '#ffffff', 'rgba(0,0,0,0)'],
         'circle-stroke-color': '#1b3a6b', 'circle-stroke-width': 2 } }]),
   center: [2.3459, 48.8518], zoom: 18, keyboard: false,
-  boxZoom: false,  // Shift-click takes or leaves a neighbour (see the map's click)
+  boxZoom: false,  // Shift-click: an end drawn put on a BD TOPO corner (see snapped)
 });
 const marker = new maplibregl.Marker({ color: '#8a3b12', draggable: true });
 marker.on('dragend', () => { const p = marker.getLngLat(); spot.lon = p.lng; spot.lat = p.lat; drawCone(); findNear(); });
-/** A click on the map, by what it hit and the mode: a panorama (Shift: taken or left for the
- *  walls; ⌥: shown beside), in walls mode a wall or a wall's end, else a photo placed. */
+/** A click on the map: with the walls tool, on a wall to choose it, on a BD TOPO facade to take
+ *  it, or (Tracer) an end of a wall drawn; else on a panorama to go there, on a photo placed to
+ *  open it again. */
 map.on('click', (e) => {
-  const hit = (layer) => map.queryRenderedFeatures(e.point, { layers: [layer] })[0]?.properties;
-  const { shiftKey: shift, altKey: alt } = e.originalEvent, panorama = hit('near');
-  if (panorama && shift) toggleNeighbour(panorama.id);
-  else if (panorama && alt) showBeside(panorama.id);
-  else if (wallsMode) {
-    const wall = hit('walls');
-    if (wall && !drawingFrom) { if (editable()) choose(wall.i); } else drawWall(snapped([e.lngLat.lng, e.lngLat.lat], shift));
-  } else if (panorama) goTo(near.findIndex((p) => p.id === panorama.id));
+  const box = [[e.point.x - 6, e.point.y - 6], [e.point.x + 6, e.point.y + 6]];  // a line is thin
+  const hit = (layer) => map.queryRenderedFeatures(box, { layers: [layer] })[0]?.properties;
+  if (tool === 'walls') {
+    const wall = hit('walls'), facade = hit('segments');
+    if (drawing) drawWall(snapped([e.lngLat.lng, e.lngLat.lat], snap || e.originalEvent.shiftKey));
+    else if (wall) { if (editable()) choose(wall.i); }
+    else if (facade) adopt(facade.k);
+    else choose(null);
+  } else if (hit('near')) goTo(near.findIndex((p) => p.id === hit('near').id));
   else if (hit('placed') && !answering) reopen(hit('placed').id);
 });
 /** A photo placed, shown again with its answer. */
@@ -208,6 +309,7 @@ const stood = new maplibregl.Marker({ element: stoodSpot });
 stoodSpot.addEventListener('click', (e) => { e.stopPropagation(); acceptStood(); });
 /** Where the parallax fit puts the photographer, on the map (none: hidden). */
 function showStood(found) {
+  $('stood-ok').hidden = !found?.standing;
   if (!found?.standing) { stood.remove(); return; }
   stoodSpot.title = `Le photographe se tenait là, à ${found.height_above_ground.toFixed(1)} m `
     + 'au-dessus de la rue : clic pour y mettre le point';
@@ -218,7 +320,7 @@ function showStood(found) {
 function acceptStood() {
   if (!fitted?.standing) return;
   spot.lon = fitted.lon; spot.lat = fitted.lat; spot.heading = Math.round(fitted.heading) % 360;
-  drawCone(); findNear(); say('Position acceptée.');
+  drawCone(); findNear(); $('stood-ok').hidden = true; say('Appareil placé au point bleu.');
 }
 
 function drawPlaced(placed) {
@@ -291,6 +393,7 @@ function where() {
 async function showView() {
   where(); depthAhead();
   $('today').src = at < 0 ? '' : viewUrl(); if (tinted) showTint();
+  if (parallaxOn && scene) wallsInView();  // the view turned or changed: its walls drawn again
   shown($('laid'), '');
   if (proposal && at >= 0) {
     const seen = { ...proposal, view };  // the same registration seen from the view shown
@@ -309,13 +412,15 @@ function setParallax(on, why = '') {
   $('parallax').title = why || PARALLAX_TITLE;
   if (!on) dropScene();
   else { if (scene && !third) third = scene.best; drawWalls(); showThird(); }
+  if (!on) { inView = []; drawInView(); }
+  renderTools();
 }
 /** Everything made from the walls shown let go: walls mode, the wall chosen and its ends, the
  *  tint, the neighbour beside (a panorama left, or parallax off). */
 function dropScene() {
   walling++;  // the walls on their way no longer wanted
   if (at < 0 || near[at]?.id !== scene?.panorama) scene = null;
-  setWalls(false); third = null; picked = false;
+  setTool(null); third = null; picked = false;
   if (tinted) { tinted = false; showTint(); }
   drawWalls(); showThird();
 }
@@ -323,6 +428,7 @@ async function toggleParallax() {
   if ($('parallax').disabled || at < 0) return;
   setParallax(!parallaxOn);
   if (parallaxOn && !(await depthAhead())) return;
+  if (parallaxOn && !inView.length) wallsInView();  // the walls had: drawn over the view again
   // a fit changes only from the pairs that may stand off the panorama: Entrée keeps the new one
   if (pairs.length >= rules.min_standing) { forgetFit(); fitPairs(); } else { drawDots(); help(); }
 }
@@ -349,17 +455,53 @@ async function depthAhead(again = false) {
     return false;
   }
 }
+let inView = [], viewing = 0;  // the walls as the view shows them (see /api/wallsview)
+/** The walls of the scene as the view shown sees them, asked again. */
+async function wallsInView() {
+  const mine = ++viewing;
+  inView = [];
+  if (parallaxOn && scene && at >= 0) {
+    try {
+      const found = await post('/api/wallsview', about());
+      if (mine !== viewing) return;
+      inView = found.walls;
+    } catch { /* none drawn: the walls are still on the map */ }
+  }
+  drawInView();
+}
+/** Each wall's foot, top and ends over today's view, coloured as on the map. */
+function drawInView() {
+  const lines = inView.flatMap((w) => {
+    const runs = [];
+    for (const name of ['foot', 'top']) {
+      let run = [];
+      for (const p of [...w[name], null]) {
+        if (p) run.push(p); else { if (run.length > 1) runs.push(run); run = []; }
+      }
+    }
+    for (const k of [0, w.foot.length - 1]) if (w.foot[k] && w.top[k]) runs.push([w.foot[k], w.top[k]]);
+    return runs.map((run) => {
+      const line = document.createElementNS('http://www.w3.org/2000/svg', 'polyline');
+      line.setAttribute('points', run.map(([x, y]) => `${x},${y}`).join(' '));
+      line.setAttribute('class', `${w.made}${w.i === selected ? ' chosen' : ''}`);
+      return line;
+    });
+  });
+  document.querySelectorAll('.in-view').forEach((svg) => svg.replaceChildren(...lines.map((l) => l.cloneNode())));
+}
+/** What the walls shown came from, or why there are none. */
+const sceneSaid = () => scene.why
+  || `${scene.walls.length} murs, de ${scene.details} détails vus avec ${scene.neighbours.length} voisin(s)`;
 /** The walls just made: drawn on the map, the neighbour beside (the best for the view unless
  *  one was picked), and what they came from said. */
 function applyScene(found) {
-  scene = { ...found, panorama: near[at].id }; choose(null);
+  scene = { ...found, panorama: near[at].id }; choose(null); wallsInView();
   if (!picked || !scene.neighbours.includes(third)) { third = scene.best; picked = false; }
-  showThird();
+  showThird(); renderTools();
   const nearest = near.findIndex((p) => p.fixed);
   const unsure = near[at].fixed ? '' : ' Profondeur peu sûre ici : ce panorama n\'a pas été recalé par COLMAP'
     + (nearest >= 0 ? ` (N : le plus proche recalé, à ${near[nearest].metres} m).` : '.');
-  say((scene.why || `Murs : ${scene.walls.length}, de ${scene.details} détails vus avec `
-       + `${scene.neighbours.length} voisin(s).`) + unsure);
+  say(sceneSaid() + unsure);
 }
 function drawWalls() {
   const on = parallaxOn && scene;
@@ -367,19 +509,16 @@ function drawWalls() {
   map.getSource('walls').setData({ type: 'FeatureCollection', features: on
     ? scene.walls.map((w, i) => line(w.a, w.b, { i, made: w.made, selected: selected === i })) : [] });
   map.getSource('segments').setData({ type: 'FeatureCollection', features: on
-    ? scene.segments.map(([a, b]) => line(a, b, {})) : [] });
+    ? scene.segments.map(([a, b], k) => line(a, b, { k })) : [] });
   drawNear();
 }
-/** A neighbour taken for the walls, or left (Shift-click on the map; on the panorama shown:
- *  back to those picked by their geometry): the walls made again. */
+/** A neighbour taken for the walls, or left (its box in the list): the walls made again. */
 async function toggleNeighbour(id) {
   if (!parallaxOn || at < 0) return;
-  if (id === near[at].id) delete choices[id];
-  else {
-    const chosen = new Set(chosenHere() ?? scene?.neighbours ?? []);
-    if (chosen.has(id)) chosen.delete(id); else { chosen.add(id); third = id; picked = true; }
-    choices[near[at].id] = [...chosen].sort();  // none left: only the walls drawn by hand
-  }
+  const chosen = new Set(chosenHere() ?? scene?.neighbours ?? []);
+  if (chosen.has(id)) chosen.delete(id); else { chosen.add(id); third = id; picked = true; }
+  choices[near[at].id] = [...chosen].sort();  // none left: only the walls drawn by hand
+  renderTools();
   if (await depthAhead(true)) depthChanged();
 }
 /** The walls changed: the parallax fit and the tinted view made again. */
@@ -391,16 +530,61 @@ function refit() {
   if (pairing && pairs.length >= rules.min_standing) { forgetFit(); fitPairs(); }
 }
 
-// --- walls drawn by hand on the map (W)
-function setWalls(on) {
-  wallsMode = on; drawingFrom = null; choose(null);
-  map.getCanvas().style.cursor = on ? 'crosshair' : '';
+// --- the tools: neighbours and walls, chosen on the map
+/** The map's tool (none: placing), shown in the panel and on the map. */
+function setTool(name) {
+  tool = name && parallaxOn && scene ? name : null;
+  drawingFrom = null;
+  map.getCanvas().style.cursor = tool === 'walls' ? 'crosshair' : '';
+  choose(null);
 }
-function toggleWalls() {
-  if (!parallaxOn || !scene) { say('Murs : la parallaxe d\'abord (P), puis W.'); return; }
-  setWalls(!wallsMode);
-  say(wallsMode ? 'Murs : deux clics en tracent un (⇧ : accroché à un coin BD TOPO), un clic sur un mur le '
-    + 'choisit (⌫ le retire, ses bouts se déplacent) ; W pour finir.' : '');
+function toggleTool(name) {
+  if (!parallaxOn || !scene) { say('La parallaxe d\'abord (P) : les murs viennent avec elle.'); return; }
+  setTool(tool === name ? null : name);
+}
+/** The panel and the map's label, as the walls, the neighbours and the tool now stand. */
+function renderTools() {
+  $('depth').hidden = !parallaxOn;
+  $('mapmode').textContent = tool !== 'walls' ? ''
+    : drawing ? (drawingFrom ? 'Clic : le second bout du mur' : 'Clic : le premier bout d\'un mur')
+    : selected != null ? 'Glissez ses bouts, ou retirez-le'
+    : 'Clic sur un mur pour le choisir, sur une façade grise pour en faire un mur';
+  if (!parallaxOn) return;
+  $('depth-sum').textContent = scene ? sceneSaid() : 'Murs en cours…';
+  $('tint').checked = tinted;
+  for (const name of ['neighbours', 'walls']) {
+    $(`tab-${name}`).setAttribute('aria-selected', String(tool === name));
+    $(`pane-${name}`).hidden = tool !== name;
+  }
+  // the neighbours: those 2–15 m off, and any used or chosen
+  const chosen = chosenHere(), used = chosen ?? scene?.neighbours ?? [];
+  const offered = scene?.candidates ?? [];
+  const list = [...offered, ...used.filter((id) => !offered.some((p) => p.id === id))
+    .map((id) => ({ id, metres: null, fixed: false }))];  // chosen, though not 2–15 m off
+  $('neighbours').replaceChildren(...list.map((p) => {
+    const row = document.createElement('li');
+    const box = Object.assign(document.createElement('input'), { type: 'checkbox', checked: used.includes(p.id), id: `nb-${p.id}` });
+    box.addEventListener('change', () => toggleNeighbour(p.id));
+    const name = Object.assign(document.createElement('label'), { htmlFor: box.id, textContent: p.metres == null ? 'choisi' : `à ${p.metres} m` });
+    const placed = Object.assign(document.createElement('span'), {
+      className: `placed${p.fixed ? ' yes' : ''}`, textContent: p.fixed ? 'recalé par COLMAP' : 'position empruntée' });
+    const beside = Object.assign(document.createElement('button'), { className: 'quiet beside', textContent: 'voir',
+      title: 'Sa vue, à la place de la photo, pour donner leur profondeur aux paires', disabled: !scene?.neighbours.includes(p.id) });
+    beside.setAttribute('aria-pressed', String(third === p.id));
+    beside.addEventListener('click', () => showBeside(p.id));
+    row.append(box, name, placed, beside);
+    return row;
+  }));
+  $('automatic').disabled = chosen === undefined;
+  // the walls
+  $('draw-walls').setAttribute('aria-pressed', String(drawing));
+  $('snap').checked = snap;
+  const wall = selected != null ? scene?.walls[selected] : null;
+  $('chosen-wall').hidden = !wall;
+  if (wall) {
+    $('chosen-what').textContent = wall.made === 'fitted' ? 'Mur trouvé dans les panoramas'
+      : wall.mine != null ? 'Mur dessiné ici' : 'Mur dessiné depuis un autre panorama';
+  }
 }
 /** A point clicked on the map; with Shift, BD TOPO's nearest corner within 3 m instead. */
 function snapped(point, shift) {
@@ -411,13 +595,18 @@ function snapped(point, shift) {
 /** An end of a wall being drawn: the first, then the second, which draws it. */
 function drawWall(end) {
   if (!editable()) return;
-  if (!drawingFrom) { choose(null); drawingFrom = end; say('Murs : le second bout.'); return; }
+  if (!drawingFrom) { choose(null); drawingFrom = end; renderTools(); return; }
   scene.mine.drawn.push({ a: drawingFrom, b: end }); drawingFrom = null; saveWalls();
+}
+/** A BD TOPO facade (`k`, among those shown) drawn as a wall here. */
+function adopt(k) {
+  if (!editable()) return;
+  const [a, b] = scene.segments[k];
+  scene.mine.drawn.push({ a, b }); saveWalls();
 }
 /** The wall shown at `i` chosen (none: null), its ends to drag. */
 function choose(i) {
-  selected = i; drawWalls(); endMarkers();
-  if (i != null) say('Mur choisi : ⌫ le retire ; ses bouts se déplacent (un mur trouvé ainsi déplacé devient dessiné).');
+  selected = i; drawWalls(); endMarkers(); renderTools(); drawInView();
 }
 /** A wall shown taken out: one drawn here, from those; another, as a wall removed here. */
 function takeOut(wall) {
@@ -428,7 +617,7 @@ let ends = [];
 /** The chosen wall's ends, to drag: one drawn here moves; another becomes one drawn here. */
 function endMarkers() {
   ends.forEach((m) => m.remove()); ends = [];
-  if (selected == null || !wallsMode) return;
+  if (selected == null || tool !== 'walls') return;
   const wall = scene.walls[selected];
   ends = ['a', 'b'].map((end) => {
     const handle = document.createElement('div'); handle.className = 'wall-end';
@@ -474,39 +663,48 @@ async function showTint() {
   try {
     const drawn = await post('/api/depthview', about());
     if (mine === tinting) shown(img, drawn); else URL.revokeObjectURL(drawn);
-  } catch (error) { if (mine === tinting) { tinted = false; say(error.message); } }
+  } catch (error) { if (mine === tinting) { tinted = false; renderTools(); say(error.message); } }
 }
 function toggleTint() {
   if (!parallaxOn) { say('La vue teintée par la distance : la parallaxe d\'abord (P).'); return; }
-  tinted = !tinted; showTint();
+  tinted = !tinted; showTint(); renderTools();
 }
 
 // --- a pair's depth by a second click, in a neighbour's view facing the same way
 let picked = false;  // the neighbour beside picked by hand, not the best for the view
+/** The pair a click in the neighbour's view gives its depth: the one chosen on the strip, else
+ *  the last (-1: none). */
+const aimed = () => (target != null && target < pairs.length ? target : pairs.length - 1);
 /** A neighbour of the walls shown beside (⌥-click on the map). */
 function showBeside(id) {
-  if (!scene?.neighbours.includes(id)) { if (scene) say('Ce panorama ne donne pas les murs : ⇧+clic pour l\'y prendre.'); return; }
-  third = id; picked = true; showThird();
+  if (!scene?.neighbours.includes(id)) return;
+  third = id; picked = true; showThird(); renderTools();
 }
+/** The neighbour's view in the photo's place (a pair's plate clicked), or the photo back. */
 function showThird() {
-  const on = !!(pairing && parallaxOn && third);
-  $('pair').classList.toggle('three', on);
-  $('third-box').style.display = on ? '' : 'none';
-  if (!on) return;
-  const away = near.find((p) => p.id === third)?.metres;
-  $('third-label').textContent = `un voisin${away != null ? ` à ${away} m` : ''} : le même détail y donne `
-    + 'sa profondeur à la dernière paire';
-  if (!$('third').src.endsWith(viewUrl(third))) $('third').src = viewUrl(third);
+  if (!(pairing && parallaxOn && third && pairs.length)) deepening = false;
+  $('pair').classList.toggle('depth', deepening);
+  if (deepening) {
+    const away = near.find((p) => p.id === third)?.metres;
+    $('third-label').textContent = `Paire ${aimed() + 1} : cliquez le même détail sur la ligne verte`
+      + ` (voisin${away != null ? ` à ${away} m` : ''}) · Échap : la photo`;
+    if (!$('third').src.endsWith(viewUrl(third))) $('third').src = viewUrl(third);
+  }
   drawDots();
 }
-let lined = '';
+/** The neighbour's view shown for pair `i` (again: the photo back). */
+function deepen(i) {
+  deepening = !(deepening && target === i);
+  target = i; showThird();
+}
+let lined = '', lineAt = [];  // the line's points in the neighbour's view
 /** Where the last pair's detail may stand in the neighbour's view: the line its ray draws there
  *  (asked again only when the last pair or the neighbour changes). */
 async function drawLine() {
-  const last = pairs.at(-1);
-  const key = pairing && last && third ? `${third}|${last[1]}` : '';
+  const last = pairs[aimed()];
+  const key = deepening && last && third ? `${third}|${last[1]}` : '';
   if (key === lined) return;
-  lined = key;
+  lined = key; lineAt = [];
   $('line').setAttribute('points', '');
   if (!key) return;
   try {
@@ -514,19 +712,33 @@ async function drawLine() {
     if (lined !== key) return;
     const side = $('third').naturalWidth || 1280;
     $('epipolar').setAttribute('viewBox', `0 0 ${side} ${$('third').naturalHeight || side}`);
+    lineAt = found.line;
     $('line').setAttribute('points', found.line.map(([x, y]) => `${x},${y}`).join(' '));
   } catch { if (lined === key) lined = ''; }  // no line (asked again later): the click still works
 }
+/** A point clicked near the green line, put on it (the detail lies on it: only how far along
+ *  matters); one clicked away from it, as clicked. */
+function onLine(px) {
+  const img = $('third'), slip = 8 * img.naturalWidth / img.getBoundingClientRect().width;
+  let best = px, gap = slip;  // 8 pixels of the screen: a click's slip, not a detail elsewhere
+  for (let k = 1; k < lineAt.length; k++) {
+    const [a, b] = [lineAt[k - 1], lineAt[k]], d = [b[0] - a[0], b[1] - a[1]];
+    const s = Math.max(0, Math.min(1, ((px[0] - a[0]) * d[0] + (px[1] - a[1]) * d[1]) / (d[0] ** 2 + d[1] ** 2 || 1)));
+    const foot = [a[0] + s * d[0], a[1] + s * d[1]], off = Math.hypot(px[0] - foot[0], px[1] - foot[1]);
+    if (off < gap) { gap = off; best = foot; }
+  }
+  return best;
+}
 $('third').addEventListener('click', async (e) => {
   if (!pairing || !pairs.length || !third) return;
-  const pair = pairs.at(-1), px = pixelOf($('third'), e), neighbour = third;
+  const pair = pairs[aimed()], px = onLine(pixelOf($('third'), e)), neighbour = third;
   try {
     const found = await post('/api/second', about({ view_px: pair[1], neighbour, neighbour_px: px }));
     const i = pairs.indexOf(pair);
     if (i < 0) return;  // that pair taken back meanwhile
     pair[2] = { neighbour, px };
     say(`Paire ${i + 1} : à ${found.metres.toFixed(1)} m, par le second clic.`);
-    drawDots(); refit();
+    deepening = false; showThird(); refit();
   } catch (error) { say(error.message); }
 });
 
@@ -552,13 +764,13 @@ function enterPairing() {
   showThird(); drawDots(); help();
 }
 function leavePairing() {
-  pairing = false; $('pair').classList.remove('on', 'three'); $('third-box').style.display = 'none';
+  pairing = false; deepening = false; $('pair').classList.remove('on', 'depth');
   $('square').style.display = ''; $('pinned').style.display = '';
   document.querySelectorAll('.dot').forEach((d) => d.remove()); $('points-help').textContent = '';
   fadeable();
 }
 function help() {
-  const deeper = ' ; à la dernière, un second clic à droite, ou un mur dessiné (W)';
+  const deeper = ' ; aux autres, un clic sur leur plaque, ou un mur dessiné (Murs)';
   const counted = fitted?.used?.filter(Boolean).length;
   const deep = fitted?.used
     ? ` · parallaxe : ${counted}/${pairs.length} paire(s) avec profondeur (il en faut ${rules.min_standing})`
@@ -588,7 +800,25 @@ function drawDots() {
     place($('photo'), a, i + 1); place($('view'), b, i + 1);
     if (second && second.neighbour === third) place($('third'), second.px, i + 1);
   });
-  drawLine();
+  drawLine(); drawStrip();
+}
+/** The pairs as little enamel plates: their rim says where each depth comes from; a click on one
+ *  chooses it for the next click in the neighbour's view. */
+function drawStrip() {
+  const aim = aimed();
+  $('strip').replaceChildren(...(pairing ? pairs : []).map((pair, i) => {
+    const known = fitted?.source && i < fitted.source.length;  // added since: not known yet
+    const from = pair[2] ? 'click' : known ? fitted.source[i] ?? 'none' : '';
+    const plate = Object.assign(document.createElement('button'), { textContent: i + 1, className: from });
+    plate.title = (from === 'none' ? `Paire ${i + 1} : sans profondeur`
+      : from ? `Paire ${i + 1} : profondeur par ${DEPTH_FROM[from]}` : `Paire ${i + 1}`)
+      + (parallaxOn ? ' — clic : la donner par le même détail dans la vue d\'un voisin' : '');
+    plate.setAttribute('aria-current', String(deepening && i === aim));
+    plate.addEventListener('click', () => (parallaxOn && third ? deepen(i) : say(
+      parallaxOn ? 'Aucun voisin pour donner une profondeur ici.' : 'La profondeur d\'une paire : la parallaxe d\'abord (P).')));
+    const item = document.createElement('li'); item.append(plate);
+    return item;
+  }));
   if (waiting) place($('photo'), waiting, pairs.length + 1, true);
 }
 /** How far pair `i` lies from the fit shown (shares of the photo's diagonal): its dot's class. */
@@ -615,24 +845,24 @@ function pairAt(img, side, e) {
 $('photo').addEventListener('click', (e) => {
   if (!pairing) return;
   const i = pairAt($('photo'), 0, e);
-  if (i >= 0) { pairs.splice(i, 1); pickedUp(); }  // its photo point placed again (fitted once done)
+  if (i >= 0) { pairs.splice(i, 1); target = null; pickedUp(); }  // its photo point placed again
   waiting = pixelOf($('photo'), e); drawDots();
 });
 $('view').addEventListener('click', async (e) => {
   if (!pairing) return;
   const i = pairAt($('view'), 1, e);
-  if (i >= 0 && !waiting) { waiting = pairs[i][0]; pairs.splice(i, 1); pickedUp(); return; }  // its view point
+  if (i >= 0 && !waiting) { waiting = pairs[i][0]; pairs.splice(i, 1); target = null; pickedUp(); return; }
   if (!waiting) return;
-  pairs.push([waiting, pixelOf($('view'), e)]); waiting = null; drawDots(); help();
+  pairs.push([waiting, pixelOf($('view'), e)]); waiting = null; target = null; drawDots(); showThird(); help();
   if (pairs.length >= rules.min_points) await fitPairs();
 });
 /** A pair picked up to be clicked again: no fit until it is (the fit shown was of all the pairs). */
 function pickedUp() {
-  forgetFit(); proposal = null; shown($('view-laid'), ''); drawDots(); help();
+  forgetFit(); proposal = null; shown($('view-laid'), ''); showThird(); help();
 }
 /** The pairs changed: the warp comes again from those left, or goes. */
 function pairsChanged() {
-  drawDots(); help();
+  showThird(); help();
   if (pairs.length >= rules.min_points) fitPairs(); else { forgetFit(); proposal = null; shown($('view-laid'), ''); }
 }
 async function fitPairs(deep = true) {
@@ -694,6 +924,7 @@ document.addEventListener('keydown', (e) => {
     spot.heading = ((spot.heading ?? 0) + (e.key === 'ArrowLeft' ? -turn : turn) + 360) % 360;
     drawCone(); e.preventDefault();
   } else if (e.key === 'Enter') {
+    e.preventDefault();  // not also a click on the button last pressed
     // placing by points keeps only a warp from the pairs clicked, never the one set out to correct
     if (pairing && pairs.length < rules.min_points) say(`Il faut ${rules.min_points} paires de points.`);
     else if (!proposal) say(pairing ? refused || 'Recalage en cours…' : 'Pas de proposition : F pour poser par points.');
@@ -712,20 +943,35 @@ document.addEventListener('keydown', (e) => {
     if (pairing) enterPairing(); else { pairs = []; parallaxAfresh(); showView(); }  // pairs of that view gone
   } else if (e.key === ',' || e.key === '.') goTo(at + (e.key === ',' ? -1 : 1));
   else if (e.key === 'p' || e.key === 'P') toggleParallax();
-  else if (e.key === 'w' || e.key === 'W') toggleWalls();
+  else if (e.key === 'Escape' && deepening) { deepening = false; showThird(); }
+  else if (e.key === 'w' || e.key === 'W') toggleTool('walls');
+  else if (e.key === 'v' || e.key === 'V') toggleTool('neighbours');
   else if (e.key === 'd' || e.key === 'D') toggleTint();
   else if (e.key === 'n' || e.key === 'N') {
     const placed = near.findIndex((p) => p.fixed);
     if (placed < 0) say('Aucun panorama recalé par COLMAP ici.');
     else if (placed === at) say('C\'est déjà le panorama recalé le plus proche.');
     else goTo(placed);
-  } else if (e.key === 'Backspace' && wallsMode && selected != null) removeChosen();
+  } else if (e.key === 'Backspace' && tool === 'walls' && selected != null) removeChosen();
   else if (e.key === 'a' || e.key === 'A') toggleAerial(map); else if (e.key === 'Backspace' && pairing) {
-    if (waiting) waiting = null; else pairs.pop();
+    if (waiting) waiting = null; else { pairs.pop(); target = null; }
     pairsChanged();
   }
 });
 $('parallax').addEventListener('click', toggleParallax);
+$('stood-ok').addEventListener('click', acceptStood);
+// the panel's controls: each does what its key does
+$('tab-neighbours').addEventListener('click', () => toggleTool('neighbours'));
+$('tab-walls').addEventListener('click', () => toggleTool('walls'));
+$('tint').addEventListener('change', () => { if ($('tint').checked !== tinted) toggleTint(); });
+$('automatic').addEventListener('click', async () => {  // back to those picked by their geometry
+  if (at < 0) return;
+  delete choices[near[at].id];
+  if (await depthAhead(true)) depthChanged();
+});
+$('draw-walls').addEventListener('click', () => { drawing = !drawing; drawingFrom = null; choose(null); });
+$('snap').addEventListener('change', () => { snap = $('snap').checked; });
+$('remove-wall').addEventListener('click', removeChosen);
 $('fade').addEventListener('input', () => {
   $('laid').style.opacity = $('view-laid').style.opacity = $('fade').value / 100;
 });

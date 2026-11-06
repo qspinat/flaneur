@@ -1033,6 +1033,7 @@ def test_a_second_click_whose_rays_do_not_meet_is_refused(page, one):
     status, reason = one(sources, "POST", "/api/second", body)
 
     assert status == 400 and "ne se rencontrent pas" in reason.decode()
+    assert "m l'un de l'autre" in reason.decode()  # by how much: a panorama off, or not the same
 
 
 def test_the_line_where_a_detail_may_be_in_the_neighbour_passes_through_it(page, one):
@@ -1232,3 +1233,59 @@ def test_a_wall_removed_elsewhere_stays_removed_when_its_panorama_saves_again(pa
     drawn, _ = facades.saved_near(sources.walls, sphere.x, sphere.y)
     assert not [w for w in drawn if abs(w.a[0] - theirs.a[0]) < 0.1]  # still removed
     assert len(drawn) == 1  # the new one
+
+
+def test_a_second_click_from_a_neighbour_in_line_with_the_detail_says_so(page, one):
+    sources, _ = page
+    sphere = sources.spheres[0]
+    _, world, _, _, _ = _street(sphere)
+    ahead = (world[4] - [sphere.x, sphere.y, sphere.z])[:2]  # the detail 30 m up the view
+    spot = np.array([sphere.x, sphere.y]) - 3 * ahead / np.linalg.norm(ahead)
+    behind = match.Panorama("p2", *spot, sphere.z, 198.0, sphere.path)
+    sources.spheres.append(behind)  # 3 m behind the panorama, on the detail's line
+    body = _second(sphere, behind, 4)
+
+    status, reason = one(sources, "POST", "/api/second", body)
+
+    assert status == 400 and "dans l'axe" in reason.decode()
+
+
+def test_the_walls_are_drawn_in_the_view_their_foot_under_their_top(page, one):
+    sources, _ = page
+    sphere = sources.spheres[0]
+    sources.scene = lambda panorama, chosen: _street(sphere)[4]
+    body = {"photo_id": "pm:1", "panorama": "p1", "view": {"heading": 140.0, "pitch": 5, "fov": 75}}
+
+    status, answer = one(sources, "POST", "/api/wallsview", body)
+
+    walls = json.loads(answer)["walls"]
+    end = next(w for w in walls if w["made"] == "drawn")  # the street's end, across the view
+    assert status == 200 and all(p is not None for p in end["foot"] + end["top"])
+    assert all(f[1] > t[1] for f, t in zip(end["foot"], end["top"], strict=True))  # foot lower
+
+
+def test_the_neighbours_offered_are_measured_from_the_panorama(page, one):
+    sources, _ = page
+    sphere = sources.spheres[0]
+    sources.scene = lambda panorama, chosen: _street(sphere)[4]
+    sources.fixed = {"p2"}
+    _beside(sources, sphere)  # 3 m east of the panorama
+    far = match.Panorama("p3", sphere.x + 30.0, sphere.y, sphere.z, 0.0, sphere.path)
+    sources.spheres.append(far)
+    body = {"photo_id": "pm:1", "panorama": "p1", "heading": 140.0}
+
+    _, answer = one(sources, "POST", "/api/depth", body)
+
+    assert json.loads(answer)["candidates"] == [{"id": "p2", "metres": 3.0, "fixed": True}]
+
+
+def test_a_second_click_whose_rays_cross_behind_a_panorama_says_so(page, one):
+    sources, _ = page
+    sphere = sources.spheres[0]
+    other = _beside(sources, sphere)
+    body = _second(sphere, other, 0)  # a detail on the left facade
+    body["neighbour_px"] = [20, body["neighbour_px"][1]]  # far left: the two rays part ahead
+
+    status, reason = one(sources, "POST", "/api/second", body)
+
+    assert status == 400 and "derrière" in reason.decode()
