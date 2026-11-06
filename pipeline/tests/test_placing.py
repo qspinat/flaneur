@@ -609,8 +609,9 @@ def test_parallax_uses_the_scene_of_the_panorama_and_the_neighbours_chosen(page,
 
     one(sources, "POST", "/api/parallax", body)
     one(sources, "POST", "/api/parallax", {**body, "neighbours": ["p3", "p2"]})
+    one(sources, "POST", "/api/parallax", {**body, "neighbours": []})  # none: walls drawn only
 
-    assert asked == [("p1", None), ("p1", ("p2", "p3"))]
+    assert asked == [("p1", None), ("p1", ("p2", "p3")), ("p1", ())]
 
 
 def test_pairs_on_the_street_or_meeting_nothing_say_so(page, one):
@@ -1152,3 +1153,38 @@ def test_a_second_click_saved_whose_rays_no_longer_meet_leaves_its_pair_to_the_w
     found = placing.compared(row, sphere, (60, 80), scene, {"p2": other})
 
     assert found["with_depth"] == len(photo_px)  # its wall's depth, not the photo dropped
+
+
+def test_walls_shown_say_which_are_the_panorama_s_own(page, one, tmp_path):
+    sources, _ = page
+    sphere = sources.spheres[0]
+    sources.walls = tmp_path / "walls.jsonl"
+    mine = facades.Wall((sphere.x + 4, sphere.y), (sphere.x + 4, sphere.y + 20), None, "drawn")
+    facades.record(sources.walls, "p1", [mine], [])
+    street = _street(sphere)[4]
+    shown = dataclasses.replace(mine, top=20.0, at="p1")
+    scene = dataclasses.replace(street, walls=street.walls[:1] + (shown,))
+    sources.scene = lambda panorama, chosen: scene
+
+    _, answer = one(
+        sources, "POST", "/api/depth", {"photo_id": "pm:1", "panorama": "p1", "heading": 0}
+    )
+
+    assert [w["mine"] for w in json.loads(answer)["walls"]] == [None, 0]  # fitted; drawn here
+
+
+def test_the_neighbour_shown_beside_is_the_best_by_geometry_the_way_the_view_looks(page, one):
+    sources, _ = page
+    sphere = sources.spheres[0]
+    east = _beside(sources, sphere)  # 3 m east
+    north = match.Panorama("p3", sphere.x, sphere.y + 6.0, sphere.z, 198.0, sphere.path)
+    sources.spheres.append(north)
+    scene = dataclasses.replace(_street(sphere)[4], neighbours=("p2", "p3"))
+    sources.scene = lambda panorama, chosen: scene
+    body = {"photo_id": "pm:1", "panorama": "p1"}
+
+    _, facing_north = one(sources, "POST", "/api/depth", body | {"heading": 0.0})
+    _, facing_east = one(sources, "POST", "/api/depth", body | {"heading": 90.0})
+
+    assert json.loads(facing_north)["best"] == east.id  # across the line of sight
+    assert json.loads(facing_east)["best"] == north.id

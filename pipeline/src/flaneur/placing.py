@@ -368,6 +368,8 @@ def compared(
 
 
 def _no_walls(scene: facades.Scene) -> str:
+    if scene.chosen == ():
+        return "aucun mur ici : aucun voisin choisi ; en dessiner sur le plan, ou en choisir"
     if not scene.neighbours:
         low, high = depth.NEAR_M
         return (
@@ -415,14 +417,29 @@ def _degrees(x: float, y: float) -> list[float]:
     return [at.x, at.y]
 
 
-def _walls_shown(scene: facades.Scene, segments: list[facades.Segment]) -> dict:
+def _walls_shown(
+    scene: facades.Scene, segments: list[facades.Segment], own: dict | None = None
+) -> dict:
     """A panorama's walls as the page draws them on the map (degrees; a wall drawn, with the
     panorama where it was: the page sends back its own), with BD TOPO's facades near it, the
-    neighbours they were fitted from and how many details; why there are none."""
+    neighbours they were fitted from and how many details; why there are none. A wall drawn at
+    this panorama says where it stands among its own (`own`: by its ends; `mine`, else none)."""
+
+    def mine(w: facades.Wall) -> int | None:
+        here = w.made == "drawn" and w.at == scene.panorama
+        return (own or {}).get((w.a, w.b)) if here else None
+
     return {
         "details": scene.details,
         "walls": [
-            {"a": _degrees(*w.a), "b": _degrees(*w.b), "top": w.top, "made": w.made, "at": w.at}
+            {
+                "a": _degrees(*w.a),
+                "b": _degrees(*w.b),
+                "top": w.top,
+                "made": w.made,
+                "at": w.at,
+                "mine": mine(w),
+            }
             for w in scene.walls
         ],
         "neighbours": list(scene.neighbours),
@@ -648,14 +665,25 @@ def serve(sources: Sources, port: int) -> HTTPServer:
             "drawn": [{"a": _degrees(*w.a), "b": _degrees(*w.b), "top": w.top} for w in drawn],
             "removed": [{"a": _degrees(*a), "b": _degrees(*b)} for a, b in removed],
         }
-        return _walls_shown(scene, sources.segments(sphere.x, sphere.y)) | {"mine": mine}
+        own = {(w.a, w.b): k for k, w in enumerate(drawn)}
+        shown = _walls_shown(scene, sources.segments(sphere.x, sphere.y), own)
+        return shown | {"mine": mine, "best": best(sphere, scene, body.get("heading"))}
+
+    def best(sphere: match.Panorama, scene: facades.Scene, heading) -> str | None:
+        """The neighbour of the walls that sees best what a view facing `heading` shows (see
+        depth.neighbours): the one shown beside, for second clicks."""
+        used = [spheres[n] for n in scene.neighbours if n in spheres]
+        ranked = (
+            depth.neighbours(sphere, used, sources.fixed, float(heading)) if number(heading) else []
+        )
+        return ranked[0].id if ranked else next(iter(scene.neighbours), None)
 
     def chosen(body: dict) -> tuple[str, ...] | None:
         """The neighbours the user chose for the walls (none: picked by their geometry)."""
         named = body.get("neighbours")
         if named is not None and not (placings.names(named) and all(n in spheres for n in named)):
             raise ValueError("des panoramas voisins connus, ou aucun")
-        return tuple(sorted(set(named))) or None if named is not None else None
+        return None if named is None else tuple(sorted(set(named)))  # (): none, walls drawn only
 
     def scene_of(sphere: match.Panorama, neighbours: tuple[str, ...] | None) -> facades.Scene:
         """Today's walls around a panorama; refused without neighbours."""

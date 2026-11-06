@@ -190,3 +190,11 @@ def test_walls_drawn_give_a_scene_where_no_neighbour_is_matched(monkeypatch, tmp
     found = scenes.scene("home", ("nowhere",))  # a choice of none known
 
     assert found.walls == (drawn,) and found.details == 0 and not asked
+
+
+def test_no_neighbour_chosen_matches_none(monkeypatch, tmp_path):
+    asked, scenes, _ = _scenes(monkeypatch, tmp_path)
+
+    found = scenes.scene("home", ())  # all left out by hand: only walls drawn
+
+    assert found.neighbours == () and found.chosen == () and not asked

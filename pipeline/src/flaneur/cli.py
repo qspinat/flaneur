@@ -401,7 +401,7 @@ class _Scenes:
         home = self.by_id.get(panorama)
         if home is None:
             return None
-        chosen = tuple(sorted(set(chosen))) if chosen else None
+        chosen = None if chosen is None else tuple(sorted(set(chosen)))  # (): none, by hand
         fitted = self._kept(
             self.fitted,
             (panorama, chosen),
