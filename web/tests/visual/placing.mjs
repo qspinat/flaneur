@@ -242,6 +242,24 @@ await unsure.waitForTimeout(600);
 const doubt = await unsure.textContent('#message');
 check(doubt.includes('COLMAP'), `a panorama COLMAP did not place says its depth is unsure (« ${doubt} »)`);
 
+// walls asked at one panorama, coming after the page went to the next: not taken for its own
+let slow = true;
+const [late] = await onPoints({
+  '**/api/depth': async (route) => {
+    const first = slow;
+    slow = false;
+    if (first) await new Promise((done) => setTimeout(done, 2500));
+    return route.fulfill({ json: { ...wallsAround(...CENTRE, 'x', 'y'), details: first ? 111 : 222 } });
+  },
+});
+await late.keyboard.press('p');  // the walls asked here: slow
+await late.waitForTimeout(300);
+await late.keyboard.press('p');  // parallax off, and on to the next panorama while they come
+await late.keyboard.press('.');
+await late.waitForTimeout(3500);
+const kept = await late.evaluate(() => scene?.details);
+check(kept !== 111, `walls coming late from the panorama left are not taken for the one shown (${kept})`);
+
 // no depth to be had: the toggle says why
 const [none] = await onPoints({
   '**/api/depth': (route) => route.fulfill({ status: 400, body: 'pas de panorama voisin à 2–15 m' }),

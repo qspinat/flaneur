@@ -313,6 +313,7 @@ function setParallax(on, why = '') {
 /** Everything made from the walls shown let go: walls mode, the wall chosen and its ends, the
  *  tint, the neighbour beside (a panorama left, or parallax off). */
 function dropScene() {
+  walling++;  // the walls on their way no longer wanted
   if (at < 0 || near[at]?.id !== scene?.panorama) scene = null;
   setWalls(false); third = null; picked = false;
   if (tinted) { tinted = false; showTint(); }
@@ -335,12 +336,13 @@ async function depthAhead(again = false) {
   const key = `${near[at].id}|${JSON.stringify(chosenHere() ?? null)}|${view.heading}`;
   if (key === deepened && !again) return true;  // asked already for these
   deepened = key;
-  const mine = ++walling;
+  const mine = ++walling, here = near[at].id;
   say('Murs autour du panorama en cours…');
   try {
     const found = await post('/api/depth', about());
-    if (mine === walling) applyScene(found);
-    return mine === walling;
+    const still = mine === walling && near[at]?.id === here;  // nothing asked or left since
+    if (still) applyScene(found);
+    return still;
   } catch (error) {
     if (mine !== walling) return false;  // others asked since: this failure is not theirs
     deepened = null; setParallax(false, error.message); say(error.message);

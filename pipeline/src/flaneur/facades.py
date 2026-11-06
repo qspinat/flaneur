@@ -65,6 +65,7 @@ class Wall:
     top: float | None  # height, as the panoramas' (drawn without one: see with_drawn)
     made: str  # "fitted" or "drawn"
     at: str = field(default="", compare=False)  # drawn: the panorama where it was
+    since: int = field(default=0, compare=False)  # drawn: the save it first was in (0: new)
 
 
 @dataclass(frozen=True)
@@ -341,57 +342,85 @@ def _left_of(wall: Wall, one: Segment, margin: float) -> list[Wall]:
     ]
 
 
-def record(path: Path, panorama: str, drawn: list[Wall], removed: list[Segment]) -> None:
-    """Keep the walls drawn at a panorama and those removed there (a row; the latest holds)."""
-    row = {"panorama": panorama, "removed": list(removed)}
-    append_row(path, {**row, "drawn": [{"a": w.a, "b": w.b, "top": w.top} for w in drawn]})
+def record(
+    path: Path,
+    panorama: str,
+    drawn: list[Wall],
+    removed: list[Segment],
+    removed_since: list[int] | None = None,
+) -> None:
+    """Keep the walls drawn at a panorama and those removed there (a row; the latest holds),
+    each with the save it first was in (`since`; `removed_since` for the removals): a wall or a
+    removal new, or sent back unchanged."""
+    now = 1 + max((s for row in rows(path) for s in _ages(row)), default=0)
+    ages = removed_since or [0] * len(removed)
+    append_row(
+        path,
+        {
+            "panorama": panorama,
+            "drawn": [{"a": w.a, "b": w.b, "top": w.top, "since": w.since or now} for w in drawn],
+            "removed": [
+                {"a": a, "b": b, "since": s or now} for (a, b), s in zip(removed, ages, strict=True)
+            ],
+        },
+    )
+
+
+def _ages(row: dict) -> list[int]:
+    return [x["since"] for x in row["drawn"] + row["removed"]]
 
 
 def _latest(path: Path) -> dict[str, dict]:
-    """The latest row of each panorama, in the order saved last."""
+    """The latest row of each panorama."""
     latest: dict[str, dict] = {}
     for row in rows(path):
-        latest.pop(row["panorama"], None)
         latest[row["panorama"]] = row
     return latest
 
 
-def _read(row: dict) -> tuple[list[Wall], list[Segment]]:
+def _read(row: dict) -> tuple[list[Wall], list[Segment], list[int]]:
+    """A row's walls drawn and its removals, and the save each removal first was in."""
     drawn = [
-        Wall(tuple(w["a"]), tuple(w["b"]), w["top"], "drawn", at=row["panorama"])
+        Wall(tuple(w["a"]), tuple(w["b"]), w["top"], "drawn", at=row["panorama"], since=w["since"])
         for w in row["drawn"]
     ]
-    return drawn, [(tuple(a), tuple(b)) for a, b in row["removed"]]
+    removed = [(tuple(r["a"]), tuple(r["b"])) for r in row["removed"]]
+    return drawn, removed, [r["since"] for r in row["removed"]]
 
 
-def saved_at(path: Path, panorama: str) -> tuple[list[Wall], list[Segment]]:
-    """The walls drawn and removed at a panorama (its latest row)."""
+def saved_at(path: Path, panorama: str) -> tuple[list[Wall], list[Segment], list[int]]:
+    """The walls drawn and removed at a panorama (its latest row), and when each removal was."""
     row = _latest(path).get(panorama)
-    return _read(row) if row else ([], [])
+    return _read(row) if row else ([], [], [])
 
 
 def saved_near(
     path: Path, x: float, y: float, radius: float = NEAR_M
 ) -> tuple[list[Wall], list[Segment]]:
     """The walls drawn and removed (the latest row of each panorama) reaching within `radius`
-    of (x, y); a wall drawn at one panorama and removed at another afterwards stays removed.
-    (A panorama's row holds the walls drawn there, not those drawn at others.)"""
-    near = []
-    for row in _latest(path).values():
-        drawn, removed = _read(row)
-        near.append(
-            (
-                [w for w in drawn if _distance((x, y), (w.a, w.b)) <= radius],
-                [r for r in removed if _distance((x, y), r) <= radius],
-            )
+    of (x, y). A wall drawn at one panorama loses the stretches removed at others after it was
+    drawn (a wall drawn after a removal near it stays). (A panorama's row holds the walls drawn
+    there, not those drawn at others.)"""
+    drawn: list[Wall] = []
+    removals: list[tuple[Segment, int, str]] = []
+    for panorama, row in _latest(path).items():
+        walls, removed, ages = _read(row)
+        drawn += [w for w in walls if _distance((x, y), (w.a, w.b)) <= radius]
+        removals += [
+            (r, s, panorama)
+            for r, s in zip(removed, ages, strict=True)
+            if _distance((x, y), r) <= radius
+        ]
+    kept = [
+        piece
+        for wall in drawn
+        for piece in _uncovered(
+            [wall],
+            [r for r, s, at in removals if at != wall.at and s > wall.since],
+            REMOVED_MARGIN_M,
         )
-    removed = [r for _, theirs in near for r in theirs]
-    drawn = [
-        wall
-        for i, (walls, _) in enumerate(near)
-        for wall in _uncovered(walls, [r for _, rs in near[i + 1 :] for r in rs], REMOVED_MARGIN_M)
     ]
-    return drawn, removed
+    return kept, [r for r, _, _ in removals]
 
 
 def _distance(point: tuple[float, float], segment: Segment) -> float:

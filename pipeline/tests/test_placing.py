@@ -979,7 +979,7 @@ def test_walls_drawn_and_removed_are_saved_for_the_panorama(page, one, tmp_path)
 
     status, answer = one(sources, "POST", "/api/walls", body)
 
-    drawn, removed = facades.saved_at(sources.walls, "p1")
+    drawn, removed, _ = facades.saved_at(sources.walls, "p1")
     assert status == 200
     assert "walls" in json.loads(answer)
     assert [w.top for w in drawn] == [15.0, None]  # its top when given; else made with the scene
@@ -1188,3 +1188,47 @@ def test_the_neighbour_shown_beside_is_the_best_by_geometry_the_way_the_view_loo
 
     assert json.loads(facing_north)["best"] == east.id  # across the line of sight
     assert json.loads(facing_east)["best"] == north.id
+
+
+def test_an_answer_in_parallax_with_no_neighbour_chosen_is_saved(page, one):
+    sources, proposal = page
+    sphere = sources.spheres[0]
+    camera, _, photo_px, view_px, scene = _street(sphere)
+    drawn_only = dataclasses.replace(scene, neighbours=(), chosen=())  # walls drawn by hand only
+    sources.scene = lambda panorama, chosen: drawn_only
+    pin = _parallax_body(sphere, photo_px, view_px)
+    body = {
+        **ANSWER,
+        "answer": "points",
+        "registration": registration.to_json(proposal),
+        "lon": pin["lon"],
+        "lat": pin["lat"],
+        "neighbours": [],
+        "parallax": {"lon": pin["lon"], "lat": pin["lat"]},
+        "pairs": {"photo_px": photo_px.tolist(), "view_px": view_px.tolist(), "view": pin["view"]},
+    }
+
+    status, reason = one(sources, "POST", "/api/answer", body)
+
+    assert status == 200, reason
+    assert placings.holding(sources.placings)["pm:1"]["standing"]["chosen"] == []
+
+
+def test_a_wall_removed_elsewhere_stays_removed_when_its_panorama_saves_again(page, one, tmp_path):
+    sources, _ = page
+    sphere = sources.spheres[0]
+    sources.scene = lambda panorama, chosen: _street(sphere)[4]
+    sources.walls = tmp_path / "walls.jsonl"
+    theirs = facades.Wall((sphere.x + 4, sphere.y), (sphere.x + 4, sphere.y + 20), None, "drawn")
+    facades.record(sources.walls, "p1", [theirs], [])  # drawn at p1
+    facades.record(sources.walls, "p9", [], [(theirs.a, theirs.b)])  # then removed at p9
+    asked = {"photo_id": "pm:1", "panorama": "p1", "heading": 140.0}
+    _, answer = one(sources, "POST", "/api/depth", asked)
+    mine = json.loads(answer)["mine"]  # p1's own walls, as the page holds them
+    mine["drawn"].append(_wall(sphere, 0, -6, 20, -6))  # another drawn there
+
+    one(sources, "POST", "/api/walls", asked | mine)
+
+    drawn, _ = facades.saved_near(sources.walls, sphere.x, sphere.y)
+    assert not [w for w in drawn if abs(w.a[0] - theirs.a[0]) < 0.1]  # still removed
+    assert len(drawn) == 1  # the new one

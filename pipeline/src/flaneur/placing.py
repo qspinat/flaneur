@@ -260,7 +260,7 @@ def parallax(
         "metres": _listed(s.metres),
         "source": s.source,
         "neighbours": list(scene.neighbours),
-        "chosen": scene.chosen and list(scene.chosen),
+        "chosen": None if scene.chosen is None else list(scene.chosen),
         "errors": _listed(registration.errors_standing(s.camera, photo_px, s.world)),
         "held_out": held_out
         and {
@@ -395,12 +395,23 @@ def _ends(sent: dict) -> facades.Segment:
     return ends
 
 
+def _since(sent: dict) -> int:
+    """The save a wall or a removal sent back first was in (0: new)."""
+    since = sent.get("since") if isinstance(sent, dict) else None
+    if since is None:
+        return 0
+    if not (type(since) is int and since > 0):
+        raise ValueError("un mur : l'enregistrement où il est apparu")
+    return since
+
+
 def _drawn(sent: dict, ground: float) -> facades.Wall:
     """A wall drawn on the map, with its top if the page gives one (else see with_drawn)."""
     top = sent.get("top") if isinstance(sent, dict) else None
     if top is not None and not (number(top) and top > ground):
         raise ValueError("un mur : son haut, au-dessus de la rue")
-    return facades.Wall(*_ends(sent), None if top is None else float(top), "drawn")
+    top = None if top is None else float(top)
+    return facades.Wall(*_ends(sent), top, "drawn", since=_since(sent))
 
 
 def _tinted(view: np.ndarray, metres: np.ndarray) -> np.ndarray:
@@ -659,11 +670,19 @@ def serve(sources: Sources, port: int) -> HTTPServer:
         """A panorama's walls as the page draws them (see _walls_shown), with its own walls
         drawn and removed as saved (`mine`, however far: what the page edits and sends back to
         /api/walls)."""
-        drawn, removed = facades.saved_at(sources.walls, sphere.id) if sources.walls else ([], [])
+        drawn, removed, ages = (
+            facades.saved_at(sources.walls, sphere.id) if sources.walls else ([], [], [])
+        )
         scene = scene_of(sphere, chosen(body))
-        mine = {
-            "drawn": [{"a": _degrees(*w.a), "b": _degrees(*w.b), "top": w.top} for w in drawn],
-            "removed": [{"a": _degrees(*a), "b": _degrees(*b)} for a, b in removed],
+        mine = {  # with the save each first was in, sent back unchanged (see facades.record)
+            "drawn": [
+                {"a": _degrees(*w.a), "b": _degrees(*w.b), "top": w.top, "since": w.since}
+                for w in drawn
+            ],
+            "removed": [
+                {"a": _degrees(*a), "b": _degrees(*b), "since": s}
+                for (a, b), s in zip(removed, ages, strict=True)
+            ],
         }
         own = {(w.a, w.b): k for k, w in enumerate(drawn)}
         shown = _walls_shown(scene, sources.segments(sphere.x, sphere.y), own)
@@ -823,7 +842,9 @@ def serve(sources: Sources, port: int) -> HTTPServer:
                     if not all(isinstance(s, list) for s in sent):
                         raise ValueError("les murs dessinés et ceux retirés : deux listes")
                     drawn = [_drawn(w, ground) for w in sent[0]]
-                    facades.record(sources.walls, sphere.id, drawn, [_ends(r) for r in sent[1]])
+                    removed = [_ends(r) for r in sent[1]]
+                    ages = [_since(r) for r in sent[1]]
+                    facades.record(sources.walls, sphere.id, drawn, removed, ages)
                     self._json(walls_shown(sphere, body))
                 elif self.path == "/api/second":
                     sphere, view = here(sphere), ViewOf(**body["view"])
