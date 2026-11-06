@@ -139,6 +139,21 @@ def _standing(
     return _Standing(camera, used, world, metres, only_unfixed, came, ground, fitting)
 
 
+def _flat_without(
+    photo_px: np.ndarray, view_px: np.ndarray, view: ViewOf, sphere: match.Panorama, size: tuple
+) -> Callable[[int], registration.Registration]:
+    """The flat fit made without pair i: where a pair held out starts its standing camera."""
+
+    def made(i: int) -> registration.Registration:
+        rest = np.arange(len(photo_px)) != i
+        fitted = registration.fit(
+            photo_px[rest], view_px[rest], size, SHOWN, sphere.id, view, sphere.axes
+        )
+        return fitted[0]
+
+    return made
+
+
 def parallax(
     photo_px: np.ndarray,
     view_px: np.ndarray,
@@ -173,7 +188,11 @@ def parallax(
         "held_out": held_out
         and {
             "flat": shown["held_out"],
-            "parallax": _listed(registration.held_out_standing(*s.fitting)),
+            "parallax": _listed(
+                registration.held_out_standing(
+                    *s.fitting, restart=_flat_without(photo_px, view_px, view, sphere, size)
+                )
+            ),
         },
     }
 
@@ -223,7 +242,8 @@ def compared(row: dict, sphere: match.Panorama, size: tuple, depths: depth.Depth
             "refused": {**found["refused"], "parallax": int(same.sum())},
             "why": str(refused),
         }
-    standing_off = registration.held_out_standing(*s.fitting)[same]
+    restart = _flat_without(photo_px, view_px, view, sphere, size)
+    standing_off = registration.held_out_standing(*s.fitting, restart=restart)[same]
     standing_off[np.isnan(standing_off)] = np.inf  # a point it cannot see: the worst
     return {
         **found,
@@ -503,6 +523,16 @@ def serve(sources: Sources, port: int) -> HTTPServer:
                         if pairs is None:
                             raise ValueError("une réponse en parallaxe garde ses paires")
                         standing = answered_in_parallax(body, photo_id, kept)
+                    saved = None if pairs is None else kept_pairs(pairs, kept)
+                    held = placings.holding(sources.placings).get(photo_id)
+                    if (  # saved again on the same fit (reopened, its cone turned): kept
+                        saved is None
+                        and body.get("answer") == "points"
+                        and held
+                        and held.get("pairs")
+                        and placings.registration_of(held) == found
+                    ):
+                        saved, standing = held["pairs"], held.get("standing")
                     self._json(
                         placings.record(
                             sources.placings,
@@ -516,7 +546,7 @@ def serve(sources: Sources, port: int) -> HTTPServer:
                             flipped=body.get("flipped", False),
                             carried_from=body.get("carried_from"),
                             inputs=sources.photos[photo_id].get("inputs", ""),
-                            pairs=None if pairs is None else kept_pairs(pairs, kept),
+                            pairs=saved,
                             standing=standing,
                         )
                     )

@@ -353,21 +353,27 @@ class _Depths:
         self.by_id = {p.id: p for p in spheres}
         self.spheres, self.fixed, self.views, self.lock = spheres, fixed, views, lock
         self.made: OrderedDict[tuple[str, int], depth.Depths] = OrderedDict()  # 1.4 MB each
+        self.guard = threading.Lock()
 
     def toward(self, panorama: str, k: int) -> depth.Depths | None:
-        if (panorama, k) in self.made:
-            self.made.move_to_end((panorama, k))  # used lately: kept longest
-        else:
-            with self.lock:  # the matcher, one thing at a time
-                if (panorama, k) not in self.made:
-                    home = self.by_id[panorama]
-                    found = depth.of_panorama(home, self.spheres, self.fixed, self.views(), [k])
-                    if found is None:
-                        return None
-                    self.made[panorama, k] = found
-                    while len(self.made) > KEPT_DEPTHS:
-                        self.made.popitem(last=False)
-        return self.made.get((panorama, k))
+        key = (panorama, k)
+        with self.guard:  # the kept views, read and changed one thread at a time
+            if key in self.made:
+                self.made.move_to_end(key)  # used lately: kept longest
+                return self.made[key]
+        with self.lock:  # the matcher, one thing at a time
+            with self.guard:
+                if key in self.made:  # made meanwhile, by the request that held the matcher
+                    return self.made[key]
+            home = self.by_id[panorama]
+            found = depth.of_panorama(home, self.spheres, self.fixed, self.views(), [k])
+            if found is None:
+                return None
+            with self.guard:
+                self.made[key] = found
+                while len(self.made) > KEPT_DEPTHS:
+                    self.made.popitem(last=False)
+            return found
 
     def around(self, panorama: str, heading: float) -> depth.Depths | None:
         if panorama not in self.by_id:

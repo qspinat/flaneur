@@ -393,7 +393,7 @@ async function fitPairs(deep = true) {
   try {
     const found = await post(route, sent);
     if (mine !== fitting) return;  // the pairs changed meanwhile: a newer fit is on its way
-    fitted = { ...found, start: found.standing ? start : null };
+    fitted = { ...found, start: found.standing ? start : null, asked };  // the pairs it was made from
     proposal = fitted.registration; made = 'points'; showStood(fitted); say(done);
     drawDots(); help();
     const laid = fitted.standing
@@ -422,8 +422,9 @@ async function answer(kind) {
   if (kind !== 'skip') Object.assign(body, { lon: spot.lon, lat: spot.lat, heading: spot.heading });
   if (kind === 'fits' || kind === 'points') body.registration = proposal;
   if (kind === 'fits' && carried) body.carried_from = carried;
-  if (kind === 'points' && fitted && pairs.length >= rules.min_points) {  // the pairs of the fit shown
-    body.pairs = { photo_px: pairs.map((p) => p[0]), view_px: pairs.map((p) => p[1]), view };
+  if (kind === 'points' && fitted) {  // the pairs of the fit shown (not those clicked since)
+    const { photo_px, view_px } = fitted.asked;
+    body.pairs = { photo_px, view_px, view: fitted.asked.view };
     if (fitted?.start) body.parallax = fitted.start;  // the camera refitted from it
   }
   try { await post('/api/answer', body); await next(); }

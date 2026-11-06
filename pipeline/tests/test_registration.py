@@ -502,3 +502,21 @@ def test_a_near_wall_hides_what_stands_behind_it_from_the_photo(monkeypatch, sca
     fine = _hidden(STANDING, monkeypatch, np.inf) - _hidden(STANDING, monkeypatch, 1.1)
 
     assert seen_all - seen > 0.8 * fine > 0  # as much hidden whatever the photo's resolution
+
+
+def test_a_pair_held_out_is_left_out_of_the_fit_the_standing_camera_starts_from():
+    world = _street_points()
+    photo_px, view_px = _clicked_both(world)
+    flat, _ = registration.fit(photo_px, view_px, SIZE, SIDE, "p", NORTH, LEVEL)
+    restarted = []
+
+    def without(i: int) -> registration.Registration:
+        restarted.append(i)
+        rest = np.arange(len(world)) != i
+        return registration.fit(photo_px[rest], view_px[rest], SIZE, SIDE, "p", NORTH, LEVEL)[0]
+
+    registration.held_out_standing(
+        photo_px, world, SIZE, flat, LEVEL, (1.5, -1.0), GROUND, restart=without
+    )
+
+    assert restarted == list(range(len(world)))

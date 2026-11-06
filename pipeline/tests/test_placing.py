@@ -842,3 +842,33 @@ def test_an_answer_kept_in_parallax_is_compared_from_the_pin_its_fit_started_fro
     assert found["fit"] == "parallax" and found["moved_m"] == pytest.approx(
         np.hypot(1.0, 1.0), abs=0.3
     )
+
+
+def test_an_answer_saved_again_on_the_same_fit_keeps_its_pairs_and_camera(page, one):
+    sources, proposal = page
+    sphere = sources.spheres[0]
+    _, _, photo_px, view_px, depths = _street(sphere)
+    sources.depths = lambda panorama, heading: depths
+    pin = _parallax_body(sphere, photo_px, view_px)
+    first = {
+        **ANSWER,
+        "answer": "points",
+        "registration": registration.to_json(proposal),
+        "lon": pin["lon"],
+        "lat": pin["lat"],
+        "parallax": {"lon": pin["lon"], "lat": pin["lat"]},
+        "pairs": {"photo_px": photo_px.tolist(), "view_px": view_px.tolist(), "view": pin["view"]},
+    }
+    one(sources, "POST", "/api/answer", first)
+    reopened = {
+        **ANSWER,
+        "answer": "points",
+        "registration": registration.to_json(proposal),
+        "heading": 120.0,
+    }  # its cone turned, nothing clicked again
+
+    status, _ = one(sources, "POST", "/api/answer", reopened)
+
+    row = placings.holding(sources.placings)["pm:1"]
+    assert status == 200 and row["heading"] == 120.0
+    assert row["pairs"] is not None and row["fit"] == "parallax" and placings.standing_of(row)

@@ -364,14 +364,17 @@ def held_out_standing(
     axes: np.ndarray,
     pin: tuple[float, float],
     ground: float,
+    restart: Callable[[int], Registration] | None = None,
 ) -> np.ndarray:
     """Each pair's error by the standing camera fitted without it (NaN without depth, infinite
-    when that fit is refused)."""
+    when that fit is refused), started from `restart(i)`: the flat fit made without it too
+    (else `start`, which saw it)."""
 
     def without(i: int) -> Standing:
         rest = world.copy()
         rest[i] = np.nan
-        return fit_standing(photo_px, rest, size, start, axes, pin, ground)[0]
+        begun = start if restart is None else restart(i)
+        return fit_standing(photo_px, rest, size, begun, axes, pin, ground)[0]
 
     return _held_out(
         ~np.isnan(world).any(axis=1),
