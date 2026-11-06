@@ -190,7 +190,9 @@ def parallax(
             "flat": shown["held_out"],
             "parallax": _listed(
                 registration.held_out_standing(
-                    *s.fitting, restart=_flat_without(photo_px, view_px, view, sphere, size)
+                    *s.fitting,
+                    restart=_flat_without(photo_px, view_px, view, sphere, size),
+                    shift=s.camera.shift,
                 )
             ),
         },
@@ -243,7 +245,9 @@ def compared(row: dict, sphere: match.Panorama, size: tuple, depths: depth.Depth
             "why": str(refused),
         }
     restart = _flat_without(photo_px, view_px, view, sphere, size)
-    standing_off = registration.held_out_standing(*s.fitting, restart=restart)[same]
+    standing_off = registration.held_out_standing(
+        *s.fitting, restart=restart, shift=s.camera.shift
+    )[same]
     standing_off[np.isnan(standing_off)] = np.inf  # a point it cannot see: the worst
     return {
         **found,

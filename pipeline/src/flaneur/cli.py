@@ -366,7 +366,13 @@ class _Depths:
                 if key in self.made:  # made meanwhile, by the request that held the matcher
                     return self.made[key]
             home = self.by_id[panorama]
-            found = depth.of_panorama(home, self.spheres, self.fixed, self.views(), [k])
+            found = depth.of_panorama(
+                home,
+                depth.neighbours(home, self.spheres, self.fixed, match.VIEW_HEADINGS[k]),
+                self.fixed,
+                self.views(),
+                [k],
+            )
             if found is None:
                 return None
             with self.guard:

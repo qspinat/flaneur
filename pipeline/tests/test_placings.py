@@ -128,17 +128,34 @@ def test_only_an_accepted_proposal_is_carried_from_another_photo(tmp_path, answe
 # --- the pairs clicked, and the camera standing where the photographer stood
 
 PAIRS = {
-    "photo_px": [[100.0, 80.0], [500.0, 90.0], [300.0, 400.0], [120.0, 380.0], [400.0, 300.0]],
-    "own": [[0.1, 0.0, 1.0], [0.4, 0.0, 1.0], [0.25, 0.3, 1.0], [0.1, 0.3, 1.0], [0.3, 0.2, 1.0]],
+    "photo_px": [
+        [100.0, 80.0],
+        [500.0, 90.0],
+        [300.0, 400.0],
+        [120.0, 380.0],
+        [400.0, 300.0],
+        [650.0, 200.0],
+        [700.0, 500.0],
+    ],
+    "own": [
+        [0.1, 0.0, 1.0],
+        [0.4, 0.0, 1.0],
+        [0.25, 0.3, 1.0],
+        [0.1, 0.3, 1.0],
+        [0.3, 0.2, 1.0],
+        [0.5, 0.1, 1.0],
+        [0.55, 0.35, 1.0],
+    ],
     "view": {"heading": 40.0, "pitch": 5.0, "fov": 75.0},
     "side": 1280,
 }
 CAMERA = Standing((652_000.0, 6_861_000.0, -1.0), (0.1, 0.2, 0.3), 700.0, (0.0, -0.05), (600, 800))
 STANDING = {
     "camera": standing_to_json(CAMERA),
-    "metres": [12.0, 30.5, None, 8.2, 15.0],
-    "from": [["p2"], ["p2", "p3"], None, ["p3"], ["p2"]],
+    "metres": [12.0, 30.5, None, 8.2, 15.0, 20.0, 9.5],  # six with a depth
+    "from": [["p2"], ["p2", "p3"], None, ["p3"], ["p2"], ["p2"], ["p3"]],
 }
+LAST_TWO = [["p2"], ["p3"]]  # the sources of the last two pairs' depths
 
 
 def test_pairs_are_kept_with_an_answer_by_points(tmp_path):
@@ -258,11 +275,11 @@ def test_answers_written_before_pairs_still_load(tmp_path):
     [
         {
             **STANDING,
-            "metres": [12.0, None, None, None, 3.0],
-            "from": [["p2"], None, None, None, ["p2"]],
+            "metres": [12.0, None, None, None, 3.0, 20.0, None],  # three
+            "from": [["p2"], None, None, None, ["p2"], ["p2"], None],
         },
-        {**STANDING, "from": [["p2"], None, None, ["p3"], ["p2"]]},  # a depth with no source
-        {**STANDING, "from": [["p2"], [3], None, ["p3"], ["p2"]]},  # a source not a panorama
+        {**STANDING, "from": [["p2"], None, None, ["p3"], ["p2"], *LAST_TWO]},  # a depth, no source
+        {**STANDING, "from": [["p2"], [3], None, ["p3"], ["p2"], *LAST_TWO]},  # not a panorama
         {**STANDING, "camera": {**STANDING["camera"], "size": [60, 80]}},  # clicks off its photo
     ],
     ids=["too few depths", "a depth with no source", "a source not a panorama", "photo too small"],
@@ -322,3 +339,24 @@ def test_a_parallax_camera_s_starting_pin_written_wrong_is_refused(tmp_path, sta
             pairs=PAIRS,
             standing={**STANDING, "start": start},
         )
+
+
+def test_an_answer_kept_in_parallax_under_the_old_rule_is_saved_again(tmp_path):
+    four = {
+        **STANDING,
+        "metres": [12.0, 30.5, None, 8.2, 15.0, None, None],  # made when four sufficed
+        "from": [["p2"], ["p2", "p3"], None, ["p3"], ["p2"], None, None],
+    }
+
+    row = placings.record(
+        tmp_path / "p.jsonl",
+        "pm:1",
+        "points",
+        30.0,
+        **SPOT,
+        registration=R,
+        pairs=PAIRS,
+        standing=four,
+    )
+
+    assert row["fit"] == "parallax"

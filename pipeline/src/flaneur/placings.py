@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import NamedTuple
 
 from flaneur.registration import (
-    MIN_STANDING,
+    LEAST_STANDING,
     Registration,
     Standing,
     from_json,
@@ -175,8 +175,10 @@ def _check_standing(standing: dict, pairs: dict | None) -> None:
         isinstance(start, dict) and number(start.get("lon")) and number(start.get("lat"))
     ):
         raise ValueError("une caméra en parallaxe : le point d'où son recalage est parti")
-    if sum(m is not None for m in metres) < MIN_STANDING:
-        raise ValueError(f"une caméra en parallaxe vient de {MIN_STANDING} paires avec profondeur")
+    if sum(m is not None for m in metres) < LEAST_STANDING:  # (an answer kept under older rules)
+        raise ValueError(
+            f"une caméra en parallaxe vient de {LEAST_STANDING} paires avec profondeur"
+        )
     h, w = camera.size
     if any(not (0 <= x <= w and 0 <= y <= h) for x, y in pairs["photo_px"]):
         raise ValueError("une caméra en parallaxe : les points cliqués tombent hors de sa photo")

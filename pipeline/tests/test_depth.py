@@ -3,6 +3,7 @@
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 from flaneur import depth, match
 from flaneur.registration import ViewOf
@@ -76,12 +77,53 @@ def _hit(direction: np.ndarray) -> float:
     return t if GROUND <= t * direction[2] <= TOP else np.inf
 
 
-def test_neighbours_are_the_nearest_fixed_first_within_reach():
-    near = [_panorama(f"p{d:g}", d, 0.0) for d in (0.5, 2, 5, 8, 11, 20)]
+def test_neighbours_across_the_line_of_sight_come_first():
+    along, across = _panorama("along", 0.0, 6.0), _panorama("across", 6.0, 0.0)
 
-    found = depth.neighbours(HOME, [HOME, *near], {"p8"})
+    found = depth.neighbours(HOME, [HOME, along, across], set(), heading=0.0)  # facing north
 
-    assert [p.id for p in found] == ["p8", "p2", "p5", "p11"]
+    assert [p.id for p in found] == ["across", "along"]
+
+
+def test_neighbours_placed_by_colmap_come_first():
+    near = [_panorama(f"p{d:g}", d, 0.0) for d in (3, 5, 8, 11)]
+
+    found = depth.neighbours(HOME, [HOME, *near], {"p3"}, heading=0.0)
+
+    assert [p.id for p in found] == ["p3", "p11", "p8", "p5"]
+
+
+def test_neighbours_nearer_than_two_metres_or_beyond_fifteen_are_left_out():
+    near = [_panorama(f"p{d:g}", d, 0.0) for d in (1.4, 2, 14, 16)]
+
+    found = depth.neighbours(HOME, [HOME, *near], set(), heading=0.0)
+
+    assert [p.id for p in found] == ["p14", "p2"]
+
+
+def test_a_second_click_s_rays_give_its_depth():
+    a, b, point = np.zeros(3), np.array([3.0, 0.0, 0.0]), np.array([1.0, 10.0, 2.0])
+
+    metres = depth.meeting(a, _unit(point - a), b, _unit(point - b))
+
+    assert metres == pytest.approx(np.linalg.norm(point))
+
+
+def test_rays_that_do_not_meet_give_no_depth():
+    a, b = np.zeros(3), np.array([3.0, 0.0, 0.0])
+    point = np.array([1.0, 10.0, 2.0])
+
+    passing_by = depth.meeting(a, _unit(point - a), b, _unit(point + [0, 0, 1.0] - b))
+    behind = depth.meeting(a, _unit(a - point), b, _unit(b - point))
+    alike = depth.meeting(a, _unit(point - a), b, _unit(point - a))  # parallel
+
+    assert passing_by is None
+    assert behind is None
+    assert alike is None
+
+
+def _unit(v: np.ndarray) -> np.ndarray:
+    return v / np.linalg.norm(v)
 
 
 def test_details_seen_from_two_panoramas_get_their_depth():
@@ -102,7 +144,7 @@ def test_details_straight_ahead_of_both_give_no_depth():
 
 
 def test_a_direction_far_from_every_detail_has_no_depth():
-    found = depth.of_panorama(HOME, [HOME, NEXT], set(), _Views())
+    found = depth.of_panorama(HOME, [NEXT], set(), _Views())
 
     metres, *_ = depth.at(found, np.array([[0.0, 0.0, 1.0]]))  # straight up
 
@@ -110,7 +152,7 @@ def test_a_direction_far_from_every_detail_has_no_depth():
 
 
 def test_a_depth_from_neighbours_colmap_did_not_fix_is_told():
-    found = depth.of_panorama(HOME, [HOME, NEXT], set(), _Views())
+    found = depth.of_panorama(HOME, [NEXT], set(), _Views())
 
     _, only_unfixed, _ = depth.at(found, found.directions[:1])
 
@@ -118,11 +160,11 @@ def test_a_depth_from_neighbours_colmap_did_not_fix_is_told():
 
 
 def test_a_panorama_without_neighbours_has_no_depths():
-    assert depth.of_panorama(HOME, [HOME], set(), _Views()) is None
+    assert depth.of_panorama(HOME, [], set(), _Views()) is None
 
 
 def test_the_sky_of_a_view_is_infinitely_far_and_the_walls_are_not():
-    found = depth.of_panorama(HOME, [HOME, NEXT], set(), _Views())
+    found = depth.of_panorama(HOME, [NEXT], set(), _Views())
     view = ViewOf(heading=0.0)
     axes = HOME.axes
 
@@ -160,7 +202,7 @@ def test_a_direction_between_near_and_far_details_has_no_depth():
 
 
 def test_a_depth_from_a_neighbour_colmap_fixed_is_not_flagged():
-    found = depth.of_panorama(HOME, [HOME, NEXT], {"next"}, _Views())
+    found = depth.of_panorama(HOME, [NEXT], {"next"}, _Views())
 
     _, only_unfixed, _ = depth.at(found, found.directions[:1])
 
@@ -175,13 +217,13 @@ class _Unreadable(_Views):
 def test_a_neighbour_whose_picture_cannot_be_read_is_passed_over():
     broken = _panorama("broken", 0.0, -3.0)
 
-    found = depth.of_panorama(HOME, [HOME, NEXT, broken], set(), _Unreadable())
+    found = depth.of_panorama(HOME, [NEXT, broken], set(), _Unreadable())
 
     assert found is not None and set(found.seen_from.tolist()) == {"next"}
 
 
 def test_a_view_with_too_few_details_has_no_depth_rather_than_sky():
-    found = depth.of_panorama(HOME, [HOME, NEXT], set(), _Views())
+    found = depth.of_panorama(HOME, [NEXT], set(), _Views())
     behind = ViewOf(heading=180.0)  # down the street, where nothing was matched
 
     metres = depth.in_view(found, behind, HOME.axes, SIDE)
@@ -210,15 +252,15 @@ def test_a_view_takes_the_depth_of_the_three_views_nearest_its_way():
 
 
 def test_details_are_made_only_for_the_views_asked():
-    only = depth.of_panorama(HOME, [HOME, NEXT], set(), _Views(), headings=[0])
-    everywhere = depth.of_panorama(HOME, [HOME, NEXT], set(), _Views())
+    only = depth.of_panorama(HOME, [NEXT], set(), _Views(), headings=[0])
+    everywhere = depth.of_panorama(HOME, [NEXT], set(), _Views())
 
     assert 0 < len(only.metres) < len(everywhere.metres)
 
 
 def test_depths_made_apart_are_joined():
-    a = depth.of_panorama(HOME, [HOME, NEXT], set(), _Views(), headings=[0])
-    b = depth.of_panorama(HOME, [HOME, NEXT], {"next"}, _Views(), headings=[1])
+    a = depth.of_panorama(HOME, [NEXT], set(), _Views(), headings=[0])
+    b = depth.of_panorama(HOME, [NEXT], {"next"}, _Views(), headings=[1])
 
     both = depth.joined([a, b])
 
@@ -230,7 +272,7 @@ def test_the_depth_around_a_view_is_its_facing_views_joined():
 
     def view(k: int):
         made.append(k)
-        return depth.of_panorama(HOME, [HOME, NEXT], set(), _Views(), headings=[k])
+        return depth.of_panorama(HOME, [NEXT], set(), _Views(), headings=[k])
 
     found = depth.around(0.0, view)
 
@@ -239,3 +281,19 @@ def test_the_depth_around_a_view_is_its_facing_views_joined():
 
 def test_no_depth_around_a_view_none_of_whose_views_has_any():
     assert depth.around(180.0, lambda k: None) is None
+
+
+def test_a_near_neighbour_across_beats_a_far_one_straight_ahead():
+    ahead, aside = _panorama("ahead", 0.0, 15.0), _panorama("aside", 4.0, 0.0)
+
+    found = depth.neighbours(HOME, [HOME, ahead, aside], set(), heading=0.0)
+
+    assert [p.id for p in found] == ["aside", "ahead"]
+
+
+def test_a_second_click_s_rays_need_not_be_unit():
+    a, b, point = np.zeros(3), np.array([3.0, 0.0, 0.0]), np.array([1.0, 10.0, 2.0])
+
+    metres = depth.meeting(a, 3 * (point - a), b, 0.5 * (point - b))
+
+    assert metres == pytest.approx(np.linalg.norm(point))

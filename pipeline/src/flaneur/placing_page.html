@@ -92,7 +92,7 @@
 <script src="map.js"></script>
 <script>
 const CONE_HALF_ANGLE = 25, CONE_LENGTH_M = 25;
-let rules = { min_points: 2, min_standing: 4, view_step: 30, near_m: 40 };  // as the server sends them
+let rules = { min_points: 2, min_standing: 6, view_step: 30, near_m: 40 };  // as the server sends them
 const $ = (id) => document.getElementById(id);
 const say = (text) => { $('message').textContent = text || ''; };
 /** Show a picture made by the server in `img`, freeing the one it showed before. */

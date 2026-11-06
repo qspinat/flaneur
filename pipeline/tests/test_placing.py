@@ -813,7 +813,7 @@ def test_a_photo_whose_parallax_fit_is_refused_counts_as_the_worst(page):
     sources, proposal = page
     sphere = sources.spheres[0]
     _, _, photo_px, view_px, depths = _street(sphere)
-    few = np.arange(len(depths.metres)) < 3  # three details with a depth: under four
+    few = np.arange(len(depths.metres)) < 3  # three details with a depth: under six
     depths = depth.Depths(
         depths.panorama,
         depths.directions[few],
@@ -825,7 +825,9 @@ def test_a_photo_whose_parallax_fit_is_refused_counts_as_the_worst(page):
 
     found = placing.compared(row, sphere, (60, 80), depths)
 
-    assert np.isinf(found["parallax"]) and found["moved_m"] is None and "4" in found["why"]
+    assert np.isinf(found["parallax"])
+    assert found["moved_m"] is None
+    assert "6" in found["why"]
 
 
 def test_an_answer_kept_in_parallax_is_compared_from_the_pin_its_fit_started_from(page):

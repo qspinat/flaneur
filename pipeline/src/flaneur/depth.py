@@ -1,7 +1,8 @@
-"""How far today's details stand from a panorama: its views matched with those of its nearest
-panoramas, each detail found in both placed where the two rays meet (the panoramas where
-they were taken, see cli._spheres). They agree with the panoramas by construction; measured on
-2026-11-06: hundreds of details a view, the rays passing within a few centimetres."""
+"""How far today's details stand from a panorama: its views matched with those of neighbouring
+panoramas (see neighbours), each detail found in both placed where the two rays meet (the
+panoramas where they were taken, see cli._spheres). They agree with the panoramas by
+construction; measured on 2026-11-06: hundreds of details a view, the rays passing within a few
+centimetres."""
 
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -14,7 +15,9 @@ from scipy.spatial import QhullError
 from flaneur import match, registration
 from flaneur.registration import ViewOf
 
-NEAR_M = (1.0, 12.0)  # a neighbour this far: nearer sees the same, farther fewer of the same
+NEAR_M = (2.0, 15.0)  # a neighbour this far: nearer tells little of depth, farther sees too
+# little of the same
+SPREAD_DEG = 30.0  # a neighbour is judged on rays at the view's heading and this either side
 MOST_NEIGHBOURS = 4
 REACH_DEG = 1.5  # a direction takes the depth of the details this near it
 MOST_SPREAD = 1.5  # unless they disagree: the farther of them this much farther than the nearer
@@ -34,16 +37,50 @@ class Depths:
 
 
 def neighbours(
-    home: match.Panorama, spheres: list[match.Panorama], fixed: set[str]
+    home: match.Panorama, spheres: list[match.Panorama], fixed: set[str], heading: float
 ) -> list[match.Panorama]:
     """The panoramas NEAR_M from `home`, at most MOST_NEIGHBOURS: those COLMAP placed itself
-    (`fixed`) first, then the nearest."""
+    (`fixed`) first, then those that see what a view facing `heading` shows from furthest
+    aside: the distance between the two panoramas across its rays, at its heading and
+    SPREAD_DEG either side, the least of the three (one along a ray tells little of how far
+    along it things stand)."""
+    bearings = np.radians(heading + np.array([-SPREAD_DEG, 0.0, SPREAD_DEG]))
+    rays = np.column_stack([np.sin(bearings), np.cos(bearings)])  # east, north
+
+    def across(p: match.Panorama) -> float:
+        east, north = p.x - home.x, p.y - home.y
+        return float(np.abs(rays[:, 0] * north - rays[:, 1] * east).min())
+
     near = [
-        (p.id not in fixed, np.hypot(p.x - home.x, p.y - home.y), p)
+        p
         for p in spheres
         if p.id != home.id and NEAR_M[0] <= np.hypot(p.x - home.x, p.y - home.y) <= NEAR_M[1]
     ]
-    return [p for *_, p in sorted(near, key=lambda n: n[:2])][:MOST_NEIGHBOURS]
+    return sorted(near, key=lambda p: (p.id not in fixed, -across(p), p.id))[:MOST_NEIGHBOURS]
+
+
+def meeting(a: np.ndarray, ray_a: np.ndarray, b: np.ndarray, ray_b: np.ndarray) -> float | None:
+    """How far along `ray_a` (from `a`) it meets `ray_b` (from `b`), by match.placed's rules
+    (passing within MEET_M, MEET_DEG or more apart, in front of both); None when they do not."""
+    rays = [np.asarray(r, float)[None] / np.linalg.norm(r) for r in (ray_a, ray_b)]
+    metres = _met(a, b, *rays)[1]
+    return float(metres[0]) if len(metres) else None
+
+
+def _met(
+    a: np.ndarray, b: np.ndarray, rays_a: np.ndarray, rays_b: np.ndarray
+) -> tuple[np.ndarray, np.ndarray]:
+    """Where pairs of rays (one from `a`, one from `b`; a row each) meet by match.placed's
+    rules: the points, and how far from `a`; those that do not meet left out."""
+    n = len(rays_a)
+    points, _, _, _ = match.placed(
+        np.tile(np.arange(n), 2),
+        np.repeat(["a", "b"], n),
+        np.vstack([np.tile(a, (n, 1)), np.tile(b, (n, 1))]),
+        np.vstack([rays_a, rays_b]),
+        np.full((2 * n, 3), np.nan),  # never cast onto a wall
+    )
+    return points, np.linalg.norm(points - a, axis=1)
 
 
 def facing(heading: float) -> list[int]:
@@ -98,30 +135,21 @@ def triangulated(
             rays_a.append(match.view_directions(mine[k].keypoints[ia], heading, side=side_a))
             rays_b.append(match.view_directions(theirs[j].keypoints[ib], headings[j], side=side_b))
     da, db = np.vstack(rays_a), np.vstack(rays_b)
-    n = len(da)
-    if not n:
+    if not len(da):
         return np.empty((0, 3)), np.empty(0)
-    points, _, _, _ = match.placed(
-        np.tile(np.arange(n), 2),
-        np.repeat([home.id, other.id], n),
-        np.vstack([np.tile(a, (n, 1)), np.tile(b, (n, 1))]),
-        np.vstack([da, db]),
-        np.full((2 * n, 3), np.nan),  # never cast onto a wall
-    )
-    metres = np.linalg.norm(points - a, axis=1)
+    points, metres = _met(a, b, da, db)
     return (points - a) / metres[:, None], metres
 
 
 def of_panorama(
     home: match.Panorama,
-    spheres: list[match.Panorama],
+    near: list[match.Panorama],
     fixed: set[str],
     views: match.Views,
     headings: list[int] | None = None,
 ) -> Depths | None:
-    """The details around `home` with their depth, from its neighbours (in its views
+    """The details around `home` with their depth, from the neighbours `near` (in its views
     `headings` only, see facing; else all around); none without any."""
-    near = neighbours(home, spheres, fixed)
     if not near:
         return None
     found = [(p, *triangulated(home, p, views, headings)) for p in near]
