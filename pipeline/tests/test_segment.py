@@ -2,6 +2,7 @@
 
 import threading
 
+import cv2
 import numpy as np
 import pytest
 
@@ -75,3 +76,23 @@ def test_an_unread_picture_is_asked_again(tmp_path):
     _kept(tmp_path, ["Building"])
 
     assert segmenter.masks(panorama).all()
+
+
+def test_a_segmenter_that_does_not_make_masks_says_so(tmp_path):
+    picture = tmp_path / "p.jpg"
+    cv2.imwrite(str(picture), np.zeros((32, 64, 3), np.uint8))  # readable: the model would run
+    segmenter = segment.Segmenter(tmp_path, threading.Lock(), lambda p: p.id, make=False)
+
+    with pytest.raises(segment.NotSegmented):
+        segmenter.masks(_panorama(picture))
+
+
+def test_classes_made_by_another_model_are_not_kept(tmp_path):
+    classes = np.zeros((len(match.VIEW_HEADINGS), SIDE, SIDE), np.uint8)
+    np.savez_compressed(tmp_path / "p.npz", classes=classes, labels=["Building"], model="old")
+    segmenter = segment.Segmenter(tmp_path, threading.Lock(), lambda p: p.id, make=False)
+    panorama = _panorama(tmp_path / "p.jpg")
+
+    assert not segmenter.kept(panorama)
+    with pytest.raises(segment.NotSegmented):
+        segmenter.masks(panorama)

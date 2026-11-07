@@ -54,13 +54,32 @@ class _NotRead(Exception):
     """A panorama whose picture could not be read: nothing kept, asked again next time."""
 
 
+def _by_model(path: Path) -> bool:
+    """Whether classes are kept at `path`, made by the model (another's are made again)."""
+    if not path.exists():
+        return False
+    with np.load(path) as kept:
+        return str(kept["model"]) == MODEL
+
+
+class NotSegmented(Exception):
+    """A panorama not segmented yet, by a segmenter that does not make them."""
+
+
 class Segmenter:
     """Each pixel's class in a panorama's views, made with the model on the graphics chip if
     there is one (loaded the first time, `lock` held while it runs) and kept in `folder`,
-    named as the panorama is levelled (its views change with it), for the model."""
+    named as the panorama is levelled (its views change with it), for the model. Without
+    `make`, only those kept are read (NotSegmented otherwise): the model takes gigabytes."""
 
-    def __init__(self, folder: Path, lock: threading.Lock, name: Callable[[match.Panorama], str]):
-        self.folder, self.lock, self.name = folder, lock, name
+    def __init__(
+        self,
+        folder: Path,
+        lock: threading.Lock,
+        name: Callable[[match.Panorama], str],
+        make: bool = True,
+    ):
+        self.folder, self.lock, self.name, self.make = folder, lock, name, make
         self.loaded = None
         self._kept = functools.lru_cache(maxsize=KEPT)(self._masks)
 
@@ -79,23 +98,37 @@ class Segmenter:
             raise ValueError(f"aucune des classes {STRUCTURE} dans le modèle {MODEL}")
         return np.isin(classes, structure)
 
+    def kept(self, panorama: match.Panorama) -> bool:
+        """Whether the panorama's classes are kept, made by the model."""
+        return _by_model(self._path(panorama))
+
+    def made(self, panorama: match.Panorama) -> Path | None:
+        """Where the panorama's classes are kept, made if they were not (or by another model);
+        None if its picture cannot be read."""
+        path = self._path(panorama)
+        if not _by_model(path):
+            if not self.make:
+                raise NotSegmented(panorama.id)
+            picture = cv2.imread(str(panorama.path))
+            if picture is None:
+                return None
+            views = [match.perspective(picture, panorama.axes, h) for h in match.VIEW_HEADINGS]
+            with self.lock:
+                if not _by_model(path):  # made meanwhile, by the request that held the lock
+                    self._write(path, views)
+        return path
+
+    def _path(self, panorama: match.Panorama) -> Path:
+        return self.folder / f"{self.name(panorama)}.npz"
+
     def classes(self, panorama: match.Panorama) -> tuple[np.ndarray, list[str]]:
         """The class of each pixel of the panorama's views (views × side × side), and the
         classes' names; _NotRead if its picture cannot be read."""
-        path = self.folder / f"{self.name(panorama)}.npz"
-        if not path.exists():
-            picture = cv2.imread(str(panorama.path))
-            if picture is None:
-                raise _NotRead
-            views = [match.perspective(picture, panorama.axes, h) for h in match.VIEW_HEADINGS]
-            with self.lock:
-                if not path.exists():  # made meanwhile, by the request that held the lock
-                    self._write(path, views)
+        path = self.made(panorama)
+        if path is None:
+            raise _NotRead
         with np.load(path) as kept:
-            if str(kept["model"]) == MODEL:
-                return kept["classes"], list(kept["labels"])
-        path.unlink(missing_ok=True)  # made by another model: made again
-        return self.classes(panorama)
+            return kept["classes"], list(kept["labels"])
 
     def _write(self, path: Path, views: list[np.ndarray]) -> None:
         model, processor, device, half, labels = self._model()
