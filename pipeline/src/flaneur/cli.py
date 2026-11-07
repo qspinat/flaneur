@@ -5,6 +5,7 @@ import hashlib
 import io
 import json
 import shutil
+import socket
 import threading
 import time
 from collections import Counter, OrderedDict
@@ -23,6 +24,7 @@ import numpy as np
 import typer
 from dotenv import load_dotenv
 from PIL import Image
+from scipy.spatial import cKDTree
 from shapely.geometry import Point
 from shapely.ops import unary_union
 
@@ -504,22 +506,28 @@ class _Scenes:
         )
 
 
-def _on_buildings() -> Callable[[match.Panorama, np.ndarray], np.ndarray]:
-    """Which rays from a panorama fall on a building in its views (see segment), the masks made
-    the first time with the model (a lock of its own: photos are proposed meanwhile) and kept
-    in VIEW_STRUCTURE. The model failing (not fetched, short of memory), every ray: the walls
-    made as before, which is said once."""
-    segmenter = segment.Segmenter(VIEW_STRUCTURE, threading.Lock(), _levelled_name)
-    failed: list[str] = []
+def _on_buildings(make: bool) -> Callable[[match.Panorama, np.ndarray], np.ndarray]:
+    """Which rays from a panorama fall on a building in its views (see segment), the masks kept
+    in VIEW_STRUCTURE; made the first time with the model (a lock of its own: photos are
+    proposed meanwhile), or, without `make`, only read (`flaneur segmenter` makes them). The
+    model failing (not fetched, short of memory) or a panorama not segmented, every ray: the
+    walls made as before, which is said once for each."""
+    segmenter = segment.Segmenter(VIEW_STRUCTURE, threading.Lock(), _levelled_name, make)
+    said: set[str] = set()
 
     def on(panorama: match.Panorama, rays: np.ndarray) -> np.ndarray:
         try:
             return segment.on_structure(segmenter.masks(panorama), rays)
         except Exception as error:  # the walls rather than none
-            if not failed:
-                failed.append(str(error))
-                typer.echo(f"segmentation impossible, murs sans elle : {error}", err=True)
-            return np.ones(len(rays), bool)
+            if str(error) not in said:
+                said.add(str(error))
+                why = (
+                    f"panorama {error} pas segmenté (`flaneur segmenter`)"
+                    if isinstance(error, segment.NotSegmented)
+                    else f"segmentation impossible : {error}"
+                )
+                typer.echo(f"murs sans segmentation : {why}", err=True)
+            return segment.on_structure(None, rays)
 
     return on
 
@@ -1841,6 +1849,37 @@ def _to_neighbours(
     ]
 
 
+@app.command("segmenter")
+def segment_panoramas(answers: Path = PLACINGS, page: int = 8772) -> None:
+    """Segmente d'avance (bâti, végétation, ciel...) les panoramas que la page pour placer peut
+    atteindre : ceux à moins de 40 m d'une photo, et leurs voisins à moins de 15 m. La page ne
+    charge pas le modèle (plusieurs gigaoctets) : un panorama pas segmenté y a ses murs sans
+    la segmentation. Reprend où il s'était arrêté ; refuse de tourner la page ouverte (sur le
+    port `page`) : les deux ne tiennent pas en mémoire ensemble."""
+    with socket.socket() as probe:
+        if probe.connect_ex(("127.0.0.1", page)) == 0:
+            typer.echo(f"la page tourne sur le port {page} : l'arrêter d'abord (mémoire)", err=True)
+            raise typer.Exit(1)
+    with closing(db.connect(DB_PATH)) as conn:
+        spots = np.array([_place_of(me) for me in _walk(conn, _placing_answers(answers)[0])])
+    if not len(spots):
+        typer.echo("aucune photo : rien à segmenter")
+        return
+    spheres = _spheres()
+    reach = queueing.NEAR_M + depth.NEAR_M[1]
+    nearest, _ = cKDTree(spots).query([(p.x, p.y) for p in spheres])
+    segmenter = segment.Segmenter(VIEW_STRUCTURE, threading.Lock(), _levelled_name, make=True)
+    reached = [p for p, d in zip(spheres, nearest, strict=True) if d <= reach]
+    left = [p for p in reached if not segmenter.kept(p)]
+    typer.echo(f"{len(reached)} panoramas à moins de {reach:g} m d'une photo, {len(left)} à faire")
+    started = time.monotonic()
+    for n, panorama in enumerate(left, 1):
+        if segmenter.made(panorama) is None:
+            typer.echo(f"{panorama.id} : image illisible")
+        if n % 50 == 0 or n == len(left):
+            typer.echo(f"{n}/{len(left)} ({time.monotonic() - started:.0f} s)")
+
+
 @app.command("parallaxe")
 def compare_parallax(answers: Path = PLACINGS) -> None:
     """Compare, sur les photos posées par points (leurs paires gardées), les deux recalages
@@ -1858,7 +1897,13 @@ def compare_parallax(answers: Path = PLACINGS) -> None:
         fixed = _fixed_by_colmap(panoramas.load(conn), register.load(FIXES))
     views = _views(kept=8)  # a panorama and its neighbours
     made = _Scenes(
-        spheres, fixed, lambda: views, threading.Lock(), segments, WALLS, seen_on=_on_buildings()
+        spheres,
+        fixed,
+        lambda: views,
+        threading.Lock(),
+        segments,
+        WALLS,
+        seen_on=_on_buildings(make=True),
     )
     found, skipped = [], 0
     for row in sorted(rows, key=lambda r: r["registration"]["panorama"]):  # its views kept
@@ -2030,7 +2075,9 @@ def place_photos(
         return np.ascontiguousarray(rgb[:, :, ::-1])  # as OpenCV reads pictures
 
     matching = threading.Lock()  # the matcher: proposals, and walls when they must be made
-    walls_made = _Scenes(spheres, fixed, models, matching, segments, WALLS, seen_on=_on_buildings())
+    walls_made = _Scenes(
+        spheres, fixed, models, matching, segments, WALLS, seen_on=_on_buildings(make=False)
+    )
 
     def walls_at(panorama: str, chosen: tuple[str, ...] | None) -> facades.Scene | None:
         """Today's walls around a panorama (see _Scenes); live only."""
