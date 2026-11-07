@@ -419,14 +419,15 @@ function setParallax(on, why = '') {
   $('parallax').title = why || PARALLAX_TITLE;
   if (!on) dropScene();
   else { if (scene && !third) third = scene.best; drawWalls(); showThird(); }
-  if (!on) { inView = []; drawInView(); }
   renderTools();
 }
 /** Everything made from the walls shown let go: walls mode, the wall chosen and its ends, the
- *  tint, the neighbour beside (a panorama left, or parallax off). */
+ *  tint, the walls drawn over the view, the neighbour beside (a panorama left, or parallax
+ *  off). */
 function dropScene() {
-  walling++;  // the walls on their way no longer wanted
+  walling++; viewing++; viewAsked = '';  // the walls on their way, and as the view shows them
   if (at < 0 || near[at]?.id !== scene?.panorama) scene = null;
+  drawInView();
   setTool(null); third = null; picked = false; draft = null;
   if (tinted) { tinted = false; showTint(); }
   drawWalls(); showThird();
@@ -435,7 +436,7 @@ async function toggleParallax() {
   if ($('parallax').disabled || at < 0) return;
   setParallax(!parallaxOn);
   if (parallaxOn && !(await depthAhead())) return;
-  if (parallaxOn && !inView.length) wallsInView();  // the walls had: drawn over the view again
+  if (parallaxOn && viewAsked !== viewKey()) wallsInView();  // the walls had: drawn over the view again
   // a fit changes only from the pairs that may stand off the panorama: Entrée keeps the new one
   if (pairs.length >= rules.min_standing) { forgetFit(); fitPairs(); } else { drawDots(); help(); }
 }
@@ -462,23 +463,30 @@ async function depthAhead(again = false) {
     return false;
   }
 }
-let inView = [], viewing = 0;  // the walls as the view shows them (see /api/wallsview)
-/** The walls of the scene as the view shown sees them, asked again. */
+// the walls as a view shows them (see /api/wallsview) and which view (see viewKey); the view
+// they were last asked for
+let inView = { key: '', walls: [] }, viewing = 0, viewAsked = '';
+/** The view walls drawn over it must be of: the panorama shown, facing as it does. */
+const viewKey = () => (at < 0 ? '' : `${near[at].id}|${view.heading}|${view.pitch}|${view.fov}`);
+/** The walls of the scene as the view shown sees them, asked again (those of another view are
+ *  not drawn over it meanwhile: see drawInView). */
 async function wallsInView() {
-  const mine = ++viewing;
-  inView = [];
-  if (parallaxOn && scene && at >= 0) {
-    try {
-      const found = await post('/api/wallsview', about());
-      if (mine !== viewing) return;
-      inView = found.walls;
-    } catch { /* none drawn: the walls are still on the map */ }
-  }
+  drawInView();
+  if (!(parallaxOn && scene && at >= 0)) return;
+  const mine = ++viewing, key = viewKey();
+  viewAsked = key;
+  try {
+    const found = await post('/api/wallsview', about());
+    if (mine !== viewing) return;
+    inView = { key, walls: found.walls };
+  } catch { if (mine === viewing) viewAsked = ''; }  // none drawn: the walls are still on the map
   drawInView();
 }
-/** Each wall's foot, top and ends over today's view, coloured as on the map. */
+/** Each wall's foot, top and ends over today's view, coloured as on the map: those of the view
+ *  shown only, while parallax is on. */
 function drawInView() {
-  const lines = inView.flatMap((w) => {
+  const walls = parallaxOn && scene && inView.key === viewKey() ? inView.walls : [];
+  const lines = walls.flatMap((w) => {
     const runs = [];
     for (const name of ['foot', 'top']) {
       let run = [];
