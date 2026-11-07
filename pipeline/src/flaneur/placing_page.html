@@ -38,6 +38,7 @@
   #neighbours { list-style: none; margin: 4px 0; padding: 0; }
   #neighbours li { display: grid; grid-template-columns: auto 1fr auto auto; gap: 8px; align-items: center;
                    padding: 3px 0; border-bottom: 1px solid #3a352e; }
+  #neighbours li.hover { background: #4a3a22; }  /* the one haloed on the map */
   #neighbours .placed { font-size: 11px; color: #b3a893; }
   #neighbours .placed.yes { color: #9fd3b0; }
   .quiet { font: inherit; font-size: 12px; background: none; border: 1px solid #6b6255; color: #d8cfbf;
@@ -257,6 +258,7 @@ let snap = false;        // walls: an end drawn goes to BD TOPO's nearest corner
 let drawingFrom = null, selected = null;  // a wall's first end drawn; the wall chosen
 let target = null;       // the pair a click in the neighbour's view gives its depth (none: the last)
 let draft = null;        // the neighbours being ticked, not yet applied (none: as the walls stand)
+let hovered = null;      // a neighbour pointed at, in the list or on the map: haloed on the other
 let deepening = false;   // the neighbour's view shown in the photo's place, for that pair's depth
 let tinted = false;      // the view tinted by depth (D)
 let third = null;        // the neighbour whose view shows beside, for second clicks
@@ -268,6 +270,7 @@ const map = new maplibregl.Map({
     { near: { type: 'geojson', data: { type: 'FeatureCollection', features: [] } },
       placed: { type: 'geojson', data: { type: 'FeatureCollection', features: [] } },
       walls: { type: 'geojson', data: { type: 'FeatureCollection', features: [] } },
+      candidates: { type: 'geojson', data: { type: 'FeatureCollection', features: [] } },
       segments: { type: 'geojson', data: { type: 'FeatureCollection', features: [] } } },
     [{ id: 'segments', type: 'line', source: 'segments', paint: { 'line-color': '#8c867c', 'line-width': 2 } },
      { id: 'walls', type: 'line', source: 'walls', paint: {
@@ -281,15 +284,24 @@ const map = new maplibregl.Map({
      { id: 'near', type: 'circle', source: 'near', paint: {  // placed by COLMAP: full; borrowed: hollow
         'circle-radius': ['case', ['get', 'shown'], 8, 5],
         'circle-color': ['case', ['get', 'shown'], '#1b3a6b', ['get', 'fixed'], '#ffffff', 'rgba(0,0,0,0)'],
-        'circle-stroke-color': '#1b3a6b', 'circle-stroke-width': 2 } }]),
+        'circle-stroke-color': '#1b3a6b', 'circle-stroke-width': 2 } },
+     // the neighbours the walls may come from (the Voisins tab): ticked, ringed; hovered, haloed
+     { id: 'candidate-hover', type: 'circle', source: 'candidates', filter: ['get', 'hovered'], paint: {
+        'circle-radius': 17, 'circle-color': '#e8892b', 'circle-opacity': 0.75,
+        'circle-stroke-color': '#ffffff', 'circle-stroke-width': 2 } },
+     { id: 'candidate-ticked', type: 'circle', source: 'candidates', filter: ['get', 'ticked'], paint: {
+        'circle-radius': 11, 'circle-opacity': 0, 'circle-stroke-color': '#4caf7a', 'circle-stroke-width': 3 } },
+     { id: 'candidates', type: 'circle', source: 'candidates', paint: {  // placed by COLMAP: full
+        'circle-radius': 6, 'circle-color': ['case', ['get', 'fixed'], '#e8892b', '#2a241c'],
+        'circle-stroke-color': '#e8892b', 'circle-stroke-width': 2 } }]),
   center: [2.3459, 48.8518], zoom: 18, keyboard: false,
   boxZoom: false,  // Shift-click: an end drawn put on a BD TOPO corner (see snapped)
 });
 const marker = new maplibregl.Marker({ color: '#8a3b12', draggable: true });
 marker.on('dragend', () => { const p = marker.getLngLat(); spot.lon = p.lng; spot.lat = p.lat; drawCone(); findNear(); });
 /** A click on the map: with the walls tool, on a wall to choose it, on a BD TOPO facade to take
- *  it, or (Tracer) an end of a wall drawn; else on a panorama to go there, on a photo placed to
- *  open it again. */
+ *  it, or (Tracer) an end of a wall drawn; with the neighbours tool, on a neighbour to tick or
+ *  untick it; else on a panorama to go there, on a photo placed to open it again. */
 map.on('click', (e) => {
   const box = [[e.point.x - 6, e.point.y - 6], [e.point.x + 6, e.point.y + 6]];  // a line is thin
   const hit = (layer) => map.queryRenderedFeatures(box, { layers: [layer] })[0]?.properties;
@@ -299,7 +311,8 @@ map.on('click', (e) => {
     else if (wall) { if (editable()) choose(wall.i); }
     else if (facade) adopt(facade.k);
     else choose(null);
-  } else if (hit('near')) goTo(near.findIndex((p) => p.id === hit('near').id));
+  } else if (tool === 'neighbours') { if (hit('candidates')) tick(hit('candidates').id); }  // else: nothing
+  else if (hit('near')) goTo(near.findIndex((p) => p.id === hit('near').id));
   else if (hit('placed') && !answering) reopen(hit('placed').id);
 });
 /** A photo placed, shown again with its answer. */
@@ -527,7 +540,28 @@ function drawWalls() {
     ? scene.segments.map(([a, b], k) => line(a, b, { k })) : [] });
   drawNear();
 }
-/** A neighbour ticked or unticked in the list: the choice drafted, applied by its button. */
+map.on('mousemove', 'candidates', (e) => { map.getCanvas().style.cursor = 'pointer'; hover(e.features[0].properties.id); });
+map.on('mouseleave', 'candidates', () => { map.getCanvas().style.cursor = idleCursor(); hover(null); });
+function hover(id) {
+  if (id === hovered) return;
+  hovered = id;
+  document.querySelectorAll('#neighbours li').forEach((row) => row.classList.toggle('hover', row.dataset.id === id));
+  drawCandidates();
+}
+/** The neighbours the walls may come from, on the map with the Voisins tab: ticked (the draft,
+ *  else as the walls stand), hovered. */
+function drawCandidates() {
+  const ticked = draft ?? usedHere(), offered = scene?.candidates ?? [];
+  const chosenFar = ticked.filter((id) => !offered.some((p) => p.id === id))  // not 2–15 m off
+    .map((id) => near.find((p) => p.id === id)).filter(Boolean)
+    .map((p) => ({ id: p.id, fixed: !!p.fixed, at: [p.lon, p.lat] }));
+  const shown = tool === 'neighbours' ? [...offered, ...chosenFar] : [];
+  map.getSource('candidates').setData({ type: 'FeatureCollection', features: shown.map((p) => ({
+    type: 'Feature', properties: { id: p.id, fixed: !!p.fixed, ticked: ticked.includes(p.id), hovered: p.id === hovered },
+    geometry: { type: 'Point', coordinates: p.at } })) });
+}
+/** A neighbour ticked or unticked in the list or on the map: the choice drafted, applied by its
+ *  button. */
 const usedHere = () => [...(chosenHere() ?? scene?.neighbours ?? [])].sort();
 function tick(id) {
   const chosen = new Set(draft ?? usedHere());
@@ -558,10 +592,12 @@ function refit() {
 /** The map's tool (none: placing), shown in the panel and on the map. */
 function setTool(name) {
   tool = name && parallaxOn && scene ? name : null;
-  drawingFrom = null;
-  map.getCanvas().style.cursor = tool === 'walls' ? 'crosshair' : '';
+  drawingFrom = null; hovered = null;
+  map.getCanvas().style.cursor = idleCursor();
   choose(null);
 }
+/** The map's cursor off the neighbours: as the tool is. */
+const idleCursor = () => (tool === 'walls' ? 'crosshair' : '');
 function toggleTool(name) {
   if (!parallaxOn || !scene) { say('La parallaxe d\'abord (P) : les murs viennent avec elle.'); return; }
   setTool(tool === name ? null : name);
@@ -569,7 +605,9 @@ function toggleTool(name) {
 /** The panel and the map's label, as the walls, the neighbours and the tool now stand. */
 function renderTools() {
   $('depth').hidden = !parallaxOn;
-  $('mapmode').textContent = tool !== 'walls' ? ''
+  drawCandidates();
+  $('mapmode').textContent = tool === 'neighbours' ? 'Clic sur un voisin pour le prendre ou le laisser (pris : cerclé de vert)'
+    : tool !== 'walls' ? ''
     : drawing ? (drawingFrom ? 'Clic : le second bout du mur' : 'Clic : le premier bout d\'un mur')
     : selected != null ? 'Glissez ses bouts, ou retirez-le'
     : 'Clic sur un mur pour le choisir, sur une façade grise pour en faire un mur';
@@ -586,7 +624,10 @@ function renderTools() {
   const list = [...offered, ...used.filter((id) => !offered.some((p) => p.id === id))
     .map((id) => ({ id, metres: null, fixed: false }))];  // chosen, though not 2–15 m off
   $('neighbours').replaceChildren(...list.map((p) => {
-    const row = document.createElement('li');
+    const row = Object.assign(document.createElement('li'), { className: p.id === hovered ? 'hover' : '' });
+    row.dataset.id = p.id;
+    row.addEventListener('mouseenter', () => hover(p.id));
+    row.addEventListener('mouseleave', () => hover(null));
     const box = Object.assign(document.createElement('input'), { type: 'checkbox', checked: (draft ?? used).includes(p.id), id: `nb-${p.id}` });
     box.addEventListener('change', () => tick(p.id));
     const name = Object.assign(document.createElement('label'), { htmlFor: box.id, textContent: p.metres == null ? 'choisi' : `à ${p.metres} m` });

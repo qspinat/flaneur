@@ -760,8 +760,13 @@ def serve(sources: Sources, port: int) -> HTTPServer:
         own = {(w.a, w.b): k for k, w in enumerate(drawn)}
         shown = _walls_shown(scene, sources.segments(sphere.x, sphere.y), own)
         low, high = depth.NEAR_M
-        candidates = [  # the panoramas the walls may come from: 2–15 m from this one
-            {"id": p.id, "metres": round(float(d), 1), "fixed": p.id in sources.fixed}
+        candidates = [  # the panoramas the walls may come from: 2–15 m from this one, and where
+            {
+                "id": p.id,
+                "metres": round(float(d), 1),
+                "fixed": p.id in sources.fixed,
+                "at": _degrees(p.x, p.y),
+            }
             for p, d in around.near(sphere.x, sphere.y, high)
             if d >= low and p.id != sphere.id
         ]

@@ -103,10 +103,10 @@ const SIX = [[0.2, 0.2], [0.8, 0.2], [0.5, 0.7], [0.3, 0.5], [0.7, 0.6], [0.4, 0
 const JPEG = { contentType: 'image/jpeg', body: Buffer.from([0xff, 0xd8, 0xff, 0xd9]) };  // a picture
 const CENTRE = [2.3459, 48.8518];  // the map's, when a test needs a spot
 /** Walls around a spot, as /api/depth sends them: one fitted, one drawn here, BD TOPO's facade. */
-const wallsAround = (lon, lat, panorama, neighbour) => {
+const wallsAround = (lon, lat, panorama, neighbour, place) => {
   const at = (east, north) => [lon + east / (111320 * Math.cos(lat * Math.PI / 180)), lat + north / 111320];
   return { details: 900, neighbours: [neighbour], best: neighbour, why: '',
-    candidates: [{ id: neighbour, metres: 4.2, fixed: true }],
+    candidates: [{ id: neighbour, metres: 4.2, fixed: true, at: place ?? at(4, 0) }],
     walls: [{ a: at(-6, 0), b: at(-6, 30), top: 12, made: 'fitted', at: '', mine: null },
             { a: at(6, 0), b: at(6, 30), top: 20, made: 'drawn', at: panorama, mine: 0 }],
     segments: [[at(-12, -5), at(-12, 35)]],
@@ -122,7 +122,7 @@ let stood = null, here = null;
 const walls = (record) => (route) => {
   const body = route.request().postDataJSON();
   record.push(body);
-  return route.fulfill({ json: wallsAround(here.lon, here.lat, body.panorama, here.neighbour) });
+  return route.fulfill({ json: wallsAround(here.lon, here.lat, body.panorama, here.neighbour, here.at) });
 };
 const [deep, pairsAt] = await onPoints({
   '**/api/depth': walls(asked.depth),
@@ -194,6 +194,22 @@ check(await deep.locator('#photo-box').isVisible(), 'and the photo comes back');
 check(asked.parallax.at(-1).second_clicks?.[5]?.neighbour === here.neighbour, 'the parallax fit is made again with the second click');
 await deep.locator('#tab-neighbours').click();
 check(await deep.locator(`#nb-${here.neighbour}`).isChecked(), 'the neighbour used is ticked in the list');
+check((await deep.textContent('#mapmode')).includes('voisin'), 'the neighbours tool says a click on the map takes or leaves one');
+await deep.locator('#neighbours li').first().hover();
+check(await deep.evaluate(() => hovered) === here.neighbour && (await deep.locator('#neighbours li.hover').count()) === 1
+  && (await deep.evaluate(() => map.queryRenderedFeatures({ layers: ['candidate-hover'] }).length)) === 1,
+  'a neighbour pointed at in the list is haloed on the map');
+const candidateAt = await deep.evaluate(() => scene.candidates[0].at);
+await clickMap(candidateAt);
+check(!(await deep.locator(`#nb-${here.neighbour}`).isChecked()) && !(await deep.locator('#apply-neighbours').isDisabled()),
+  'a neighbour clicked on the map is left out of the draft, to apply');
+await clickMap(candidateAt);  // taken again: as the walls stand
+check(await deep.locator(`#nb-${here.neighbour}`).isChecked() && await deep.locator('#apply-neighbours').isDisabled(),
+  'clicked again, it is taken back');
+const pairsBefore = await deep.evaluate(() => pairs.length);
+await clickMap([here.lon, here.lat]);  // the panorama shown itself: not a neighbour to take
+check(await deep.evaluate(() => pairs.length) === pairsBefore && await deep.evaluate(() => near[at].id) === here.id,
+  'with the neighbours tool, a click off the neighbours leaves the pairs and the panorama as they are');
 const asking = asked.depth.length;
 await deep.locator(`#nb-${here.neighbour}`).uncheck();
 await deep.waitForTimeout(500);
