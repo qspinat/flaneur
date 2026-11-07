@@ -1280,7 +1280,10 @@ def test_the_neighbours_offered_are_measured_from_the_panorama(page, one):
 
     _, answer = one(sources, "POST", "/api/depth", body)
 
-    assert json.loads(answer)["candidates"] == [{"id": "p2", "metres": 3.0, "fixed": True}]
+    found = json.loads(answer)["candidates"]
+    beside = placing._degrees(sphere.x + 3.0, sphere.y)
+    assert [(c["id"], c["metres"], c["fixed"]) for c in found] == [("p2", 3.0, True)]
+    assert found[0]["at"] == pytest.approx(beside)  # where it stands, to show it on the map
 
 
 def test_a_second_click_whose_rays_cross_behind_a_panorama_says_so(page, one):
