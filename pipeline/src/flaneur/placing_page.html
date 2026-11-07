@@ -46,6 +46,8 @@
   .quiet:disabled { opacity: 0.4; cursor: default; }
   #neighbours .beside[aria-pressed=true] { background: #2f6b4f; border-color: #4caf7a; color: var(--paper); }
   #chosen-wall { margin: 8px 0; padding: 8px; background: #3a352e; border-radius: 4px; }
+  #chosen-wall .height { display: flex; align-items: center; gap: 6px; margin: 6px 0; flex-wrap: wrap; }
+  #wall-height { width: 4.5em; font: inherit; }
   #chosen-wall p { margin: 0 0 6px; }
   #apply-neighbours { font: inherit; background: var(--enamel); color: var(--paper);
                       border: 1px solid #8fa6c9; border-radius: 3px; padding: 3px 10px; cursor: pointer; }
@@ -152,6 +154,10 @@
         <label class="toggle"><input type="checkbox" id="snap"> accrocher aux coins BD TOPO (3 m) <kbd>⇧</kbd></label>
         <div id="chosen-wall" hidden>
           <p id="chosen-what"></p>
+          <div class="height">Hauteur au-dessus de la rue
+            <button id="lower-wall" class="quiet" title="1 m plus bas">−1 m</button>
+            <input id="wall-height" type="number" min="1" max="80" step="any" aria-label="hauteur en mètres"> m
+            <button id="raise-wall" class="quiet" title="1 m plus haut">+1 m</button></div>
           <button id="remove-wall">Retirer ce mur <kbd>⌫</kbd></button>
           <p class="lead">Glissez ses bouts sur le plan pour le déplacer.</p>
         </div>
@@ -652,6 +658,9 @@ function renderTools() {
   if (wall) {
     $('chosen-what').textContent = wall.made === 'fitted' ? 'Mur trouvé dans les panoramas'
       : wall.mine != null ? 'Mur dessiné ici' : 'Mur dessiné depuis un autre panorama';
+    if (document.activeElement !== $('wall-height')) {  // not while it is being typed
+      $('wall-height').value = (wall.top - scene.ground).toFixed(1);
+    }
   }
 }
 /** A point clicked on the map; with Shift, BD TOPO's nearest corner within 3 m instead. */
@@ -693,12 +702,28 @@ function endMarkers() {
     m.on('dragend', () => {
       if (!editable()) { m.setLngLat(wall[end]); return; }
       const p = m.getLngLat();
-      const top = wall.mine != null ? scene.mine.drawn[wall.mine].top : null;  // drawn here: its own
-      const moved = { a: wall.a, b: wall.b, top, [end]: [p.lng, p.lat] };
-      takeOut(wall); scene.mine.drawn.push(moved); saveWalls(true);
+      redraw(wall, { [end]: [p.lng, p.lat] }, false);  // moved: a new wall
     });
     return m;
   });
+}
+/** A wall shown made one drawn here with `changes`, saved, and chosen again. One drawn here keeps
+ * its own height; and, unless moved (`same`: false, a new wall), when it first appeared. */
+function redraw(wall, changes, same = true) {
+  const { since, ...own } = wall.mine != null ? scene.mine.drawn[wall.mine] : {};
+  const drawn = { ...own, ...(same && since != null ? { since } : {}), a: wall.a, b: wall.b, ...changes };
+  takeOut(wall); scene.mine.drawn.push(drawn); saveWalls(true);
+}
+/** The chosen wall's height over the street set to `metres` (within the field's bounds). */
+function heighten(metres) {
+  if (selected == null || !editable()) return;
+  const wall = scene.walls[selected], field = $('wall-height');
+  if (!(metres >= +field.min && metres <= +field.max)) {
+    say(`Hauteur : entre ${field.min} et ${field.max} m.`);
+    field.value = (wall.top - scene.ground).toFixed(1);
+    return;
+  }
+  if (Math.abs(scene.ground + metres - wall.top) >= 0.05) redraw(wall, { top: scene.ground + metres });
 }
 function removeChosen() {
   if (selected == null || !editable()) return;
@@ -989,6 +1014,7 @@ async function answer(kind) {
 }
 
 document.addEventListener('keydown', (e) => {
+  if (e.target.matches('input:not([type=checkbox]):not([type=range]), textarea, select')) return;  // typing
   if (!photo || (e.repeat && !e.key.startsWith('Arrow'))) return;  // held keys turn the cone only
   const turn = e.shiftKey ? 1 : 5;
   if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
@@ -1046,6 +1072,10 @@ $('automatic').addEventListener('click', async () => {  // back to those picked 
 $('draw-walls').addEventListener('click', () => { drawing = !drawing; drawingFrom = null; choose(null); });
 $('snap').addEventListener('change', () => { snap = $('snap').checked; });
 $('remove-wall').addEventListener('click', removeChosen);
+const height = () => scene.walls[selected].top - scene.ground;  // the wall's own, not as rounded
+$('wall-height').addEventListener('change', () => heighten($('wall-height').valueAsNumber));
+$('lower-wall').addEventListener('click', () => selected != null && heighten(height() - 1));
+$('raise-wall').addEventListener('click', () => selected != null && heighten(height() + 1));
 $('fade').addEventListener('input', () => {
   $('laid').style.opacity = $('view-laid').style.opacity = $('fade').value / 100;
 });
