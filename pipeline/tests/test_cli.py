@@ -116,7 +116,7 @@ def _units(v: np.ndarray) -> np.ndarray:
     return v / np.linalg.norm(v, axis=1, keepdims=True)
 
 
-def _scenes(monkeypatch, tmp_path, garbled: frozenset = frozenset()):
+def _scenes(monkeypatch, tmp_path, garbled: frozenset = frozenset(), seen_on=None):
     """Scenes around a panorama with a neighbour beside it (and one too far), their matches
     the street's two facades seen from each (those with a neighbour `garbled`, at random); and
     the pairs matched."""
@@ -142,6 +142,7 @@ def _scenes(monkeypatch, tmp_path, garbled: frozenset = frozenset()):
         lambda x, y: [],
         tmp_path / "w.jsonl",
         tmp_path / "pairs",
+        seen_on=seen_on,
     )
     return asked, scenes, home
 
@@ -247,3 +248,14 @@ def test_a_neighbour_whose_pictures_cannot_be_read_is_tried_again(monkeypatch, t
     again = scenes.scene("home", None)
 
     assert first.neighbours == () and again.neighbours == ("beside",)
+
+
+def test_only_details_seen_on_buildings_make_walls(monkeypatch, tmp_path):
+    def west_only(panorama, rays):  # the left facade (x = -4) a building, the right one trees
+        return rays[:, 0] < 0
+
+    _, scenes, _ = _scenes(monkeypatch, tmp_path, seen_on=west_only)
+
+    found = scenes.scene("home", None)
+
+    assert len(found.walls) == 1 and found.walls[0].a[0] < 0
