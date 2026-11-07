@@ -6,10 +6,36 @@
 <link rel="stylesheet" href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css">
 <script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
 <style>
-  :root { --ink: #26231f; --paper: #ede4d3; --rust: #8a3b12; --enamel: #1b3a6b; }
+  :root { --ink: #26231f; --paper: #ede4d3; --rust: #8a3b12; --enamel: #1b3a6b; --sign: #2f6b4f;
+          /* the street plaques' narrow lettering, from the fonts the system has (nothing fetched) */
+          --plate: 'Avenir Next Condensed', 'Roboto Condensed', 'Arial Narrow', sans-serif-condensed, system-ui, sans-serif; }
   * { box-sizing: border-box; }
   body { margin: 0; font: 14px/1.4 system-ui, sans-serif; background: var(--ink); color: var(--paper);
          display: grid; grid-template-columns: 34% 1fr; height: 100vh; }
+  body.room { grid-template-columns: 50% 1fr; }  /* depth: the map large, to edit on */
+  /* the mode, as a Paris street plaque: what the page is doing now, said first */
+  #plaque { --field: var(--enamel); display: grid; gap: 1px; padding: 5px 14px 6px; border-radius: 7px; background: var(--field);
+            color: #fff; box-shadow: inset 0 0 0 2px var(--field), inset 0 0 0 3.5px #f4f1ea, 0 1px 3px #0008;
+            font-family: var(--plate); min-width: 210px; max-width: 360px; transition: background 0.25s; }
+  body.room #plaque { --field: var(--sign); }  /* the depth room: the sign's green */
+  #plaque-title { font-size: 19px; font-weight: 700; line-height: 1.1; letter-spacing: 0.01em; }
+  #plaque-detail { font-size: 14px; font-weight: 500; opacity: 0.9; line-height: 1.15; }
+  #plaque-detail:empty { display: none; }
+  @media (prefers-reduced-motion: reduce) { #plaque { transition: none; } }
+  #nav { display: flex; gap: 4px; align-items: center; }
+  #nav button { font: 600 14px/1 var(--plate); color: var(--paper); background: #3a352e; border: 1px solid #6b6255;
+                border-radius: 4px; padding: 4px 8px; cursor: pointer; }
+  #nav button:disabled { opacity: 0.35; cursor: default; }
+  /* what can be done now: each action a button with its key */
+  #actions { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+  #actions button { font: 600 16px/1 var(--plate); letter-spacing: 0.01em; color: var(--paper); background: #3a352e;
+                    border: 1px solid #6b6255; border-radius: 5px; padding: 6px 10px; cursor: pointer;
+                    display: inline-flex; gap: 7px; align-items: center; }
+  #actions button.main { background: var(--enamel); border-color: #8fa6c9; }
+  #actions button.away { background: none; }
+  #actions button:disabled { opacity: 0.4; cursor: default; }
+  #actions kbd, #nav kbd { font-size: 11px; }
+  #actions button:focus-visible, #nav button:focus-visible, #bar button:focus-visible { outline: 2px solid #f2c14e; outline-offset: 1px; }
   #side { display: grid; grid-template-rows: auto 1fr auto; min-height: 0; border-right: 1px solid #444; }
   #head { padding: 10px 12px; }
   #head h1 { font-size: 15px; margin: 0 0 4px; }
@@ -59,9 +85,7 @@
   .legend i { display: inline-block; width: 16px; height: 4px; margin-right: 6px; vertical-align: middle; }
   .legend .fitted { background: #3b7dd8; } .legend .drawn { background: #e8892b; }
   .legend .bdtopo { background: #8c867c; }
-  #keys summary { cursor: pointer; color: #b3a893; }
-  #keys dl { display: grid; grid-template-columns: auto 1fr; gap: 3px 10px; margin: 6px 0 0; font-size: 12px; }
-  #keys dd { margin: 0; }
+  .tabs button { font: 600 15px/1.2 var(--plate); }
   /* the pairs, as little enamel street plates: the rim says where each depth comes from */
   #strip { display: flex; gap: 5px; list-style: none; margin: 0; padding: 0; }
   #strip button { width: 26px; height: 20px; border-radius: 3px; background: var(--enamel); color: var(--paper);
@@ -84,6 +108,8 @@
   #pair { display: none; grid-template-columns: 1fr 1fr; gap: 8px; height: 100%; padding: 8px; }
   #pair.on { display: grid; }
   #pair:not(.depth) #third-box, #pair.depth #photo-box { display: none; }
+  body.room #pair:not(.depth) { grid-template-columns: 1fr; }
+  body.room #pair:not(.depth) #photo-box { display: none; }
   #view-box { order: 1; }  /* the view stays on the right; the photo, or the neighbour's, left */
   #third-box .label { position: absolute; top: 4px; left: 6px; z-index: 3; font-size: 12px;
                       background: #000b; padding: 1px 6px; border-radius: 3px; }
@@ -92,6 +118,14 @@
   .in-view polyline { fill: none; stroke-width: 3; vector-effect: non-scaling-stroke; opacity: 0.85; }
   .in-view .fitted { stroke: #3b7dd8; } .in-view .drawn { stroke: #e8892b; }
   .in-view .chosen { stroke-width: 6; opacity: 1; }
+  /* the walls tool: a wall clicked in the view is chosen; the chosen one's top dragged up or down */
+  .in-view .hit { stroke: transparent; stroke-width: 16; }
+  body.walls-tool .in-view .hit { pointer-events: stroke; cursor: pointer; }
+  body.walls-tool .in-view .roof { pointer-events: stroke; cursor: ns-resize; }
+  .in-view .roof { stroke: transparent; stroke-width: 18; touch-action: none; }
+  .in-view .roof-hint { stroke: #f4f1ea; stroke-width: 2; stroke-dasharray: 6 5; opacity: 0.9; }
+  #roof-label { position: absolute; z-index: 4; pointer-events: none; padding: 1px 7px; border-radius: 4px;
+                font: 700 15px/1.3 var(--plate); background: #e8892b; color: #1d1a16; transform: translate(-50%, -130%); }
   #epipolar polyline { fill: none; stroke: #4caf7a; stroke-width: 3; vector-effect: non-scaling-stroke; }
   #pair .box { position: relative; overflow: hidden; display: flex; align-items: center; justify-content: center; }
   #pair .zoomed-stage { position: relative; max-width: 100%; max-height: 100%; }
@@ -116,7 +150,14 @@
               border-radius: 4px; padding: 2px 10px; cursor: pointer; }
   .stood { width: 18px; height: 18px; border-radius: 50%; background: var(--enamel);
            border: 3px solid #ede4d3; box-shadow: 0 1px 4px #000a; cursor: pointer; }
-  #foot { padding: 8px 12px; display: flex; gap: 10px; align-items: center; }
+  #foot { padding: 8px 12px 10px; display: grid; gap: 8px; border-top: 1px solid #3a352e; }
+  #foot .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+  @media (max-width: 820px) {  /* the phone: the map above, the pictures below */
+    body, body.room { grid-template-columns: 1fr; grid-template-rows: 46vh auto; height: auto; }
+    #side { border-right: none; border-bottom: 1px solid #444; }
+    #main { min-height: 90vh; }
+    #stage { align-items: flex-start; }
+  }
   #fade:disabled { opacity: 0.35; }
   input[type=range] { width: 220px; }
 </style>
@@ -148,8 +189,8 @@
         </div>
       </div>
       <div id="pane-walls" class="pane" hidden>
-        <p class="lead">Sur le plan, cliquez un mur pour le choisir (le retirer, glisser ses bouts),
-          ou une façade grise de la BD TOPO pour en faire un mur.</p>
+        <p class="lead">Cliquez un mur, sur le plan ou dans la vue, pour le choisir ; une façade grise
+          de la BD TOPO, sur le plan, pour en faire un mur.</p>
         <div class="segmented"><button id="draw-walls">Tracer un mur : deux clics sur le plan</button></div>
         <label class="toggle"><input type="checkbox" id="snap"> accrocher aux coins BD TOPO (3 m) <kbd>⇧</kbd></label>
         <div id="chosen-wall" hidden>
@@ -159,7 +200,7 @@
             <input id="wall-height" type="number" min="1" max="80" step="any" aria-label="hauteur en mètres"> m
             <button id="raise-wall" class="quiet" title="1 m plus haut">+1 m</button></div>
           <button id="remove-wall">Retirer ce mur <kbd>⌫</kbd></button>
-          <p class="lead">Glissez ses bouts sur le plan pour le déplacer.</p>
+          <p class="lead">Glissez ses bouts sur le plan pour le déplacer, ou son haut dans la vue pour sa hauteur.</p>
         </div>
         <ul class="legend">
           <li><i class="fitted"></i>trouvé dans les panoramas</li>
@@ -168,26 +209,21 @@
         </ul>
       </div>
     </section>
-    <details id="keys">
-      <summary>Raccourcis clavier</summary>
-      <dl>
-        <dt><kbd>←</kbd><kbd>→</kbd></dt><dd>tourner le cône (<kbd>⇧</kbd> : 1°)</dd>
-        <dt><kbd>Entrée</kbd></dt><dd>garder : la photo tombe juste</dd>
-        <dt><kbd>F</kbd></dt><dd>poser par points (paires photo / vue)</dd>
-        <dt><kbd>X</kbd> <kbd>S</kbd></dt><dd>aucun panorama ne la voit · passer</dd>
-        <dt><kbd>R</kbd></dt><dd>retourner l'image</dd>
-        <dt><kbd>[</kbd><kbd>]</kbd> <kbd>,</kbd><kbd>.</kbd></dt><dd>tourner la vue · panorama voisin</dd>
-        <dt><kbd>P</kbd></dt><dd>parallaxe : le photographe ailleurs que le panorama</dd>
-        <dt><kbd>N</kbd></dt><dd>le panorama recalé par COLMAP le plus proche</dd>
-        <dt><kbd>A</kbd></dt><dd>vue aérienne de 1949</dd>
-        <dt><kbd>⌫</kbd></dt><dd>reprendre la dernière paire (ou retirer le mur choisi)</dd>
-      </dl>
-    </details>
   </div>
 </section>
 <section id="main">
-  <div id="bar"><span id="where"></span>
-    <button id="parallax" title="P : la photo posée d'où se tenait le photographe, pas du panorama">parallaxe</button>
+  <div id="bar">
+    <div id="plaque" role="status" aria-live="polite"><span id="plaque-title">…</span><span id="plaque-detail"></span></div>
+    <div id="nav" aria-label="Panorama et vue">
+      <button id="prev-pano" title="Panorama précédent (,)">‹ pano <kbd>,</kbd></button>
+      <button id="next-pano" title="Panorama suivant (.)">pano › <kbd>.</kbd></button>
+      <button id="turn-left" title="Tourner la vue à gauche ([)">↶ <kbd>[</kbd></button>
+      <button id="turn-right" title="Tourner la vue à droite (])">↷ <kbd>]</kbd></button>
+      <button id="nearest-fixed" title="Le panorama recalé par COLMAP le plus proche (N)">recalé <kbd>N</kbd></button>
+      <button id="aerial" title="La vue aérienne de 1949 sur le plan (A)">1949 <kbd>A</kbd></button>
+    </div>
+    <span id="where"></span>
+    <button id="parallax" title="P : la photo posée d'où se tenait le photographe, pas du panorama">parallaxe <kbd>P</kbd></button>
     <span id="message"></span>
     <button id="stood-ok" hidden>Placer l'appareil au point bleu</button></div>
   <div id="stage">
@@ -204,9 +240,12 @@
     </div>
   </div>
   <div id="foot">
-    aujourd'hui <input id="fade" type="range" min="0" max="100" value="60"> autrefois
-    <ol id="strip" aria-label="Paires"></ol>
-    <span id="points-help"></span>
+    <div id="actions" aria-label="Que faire de cette photo"></div>
+    <div class="row">
+      aujourd'hui <input id="fade" type="range" min="0" max="100" value="60"> autrefois
+      <ol id="strip" aria-label="Paires"></ol>
+      <span id="points-help"></span>
+    </div>
   </div>
 </section>
 <script src="zoom.js"></script>
@@ -215,7 +254,15 @@
 const CONE_HALF_ANGLE = 25, CONE_LENGTH_M = 25;
 let rules = { min_points: 2, min_standing: 6, view_step: 30, near_m: 40 };  // as the server sends them
 const $ = (id) => document.getElementById(id);
-const say = (text) => { $('message').textContent = text || ''; };
+const say = (text) => { $('message').textContent = text || ''; refreshChrome(); };
+let chromeQueued = false;
+/** The plaque, the actions and the navigation drawn again, once, after what is running now. */
+function refreshChrome() {
+  if (chromeQueued) return;
+  chromeQueued = true;
+  setTimeout(() => { chromeQueued = false; drawChrome(); });  // after every listener of the event
+}
+for (const kind of ['click', 'keydown', 'pointerup']) document.addEventListener(kind, refreshChrome);
 /** Show a picture made by the server in `img`, freeing the one it showed before. */
 function shown(img, url) {
   if (img.src.startsWith('blob:')) URL.revokeObjectURL(img.src);
@@ -401,7 +448,7 @@ async function goTo(i) {
     // reopened after a parallax fit: its camera is not shown again, the flat one is
     say(found.fit === 'parallax' ? 'Rouverte : posée en parallaxe. P et ses paires pour la refaire, sinon la passer (S).' : '');
   }
-  else { say('Pas de proposition : la poser par points (F revient au panorama).'); enterPairing(); }
+  else { say('Pas de proposition : la poser par points.'); enterPairing(); }
 }
 
 function viewUrl(id = near[at].id) {
@@ -414,7 +461,8 @@ const about = (more) => ({ photo_id: photo.id, panorama: near[at].id, view, head
                           neighbours: chosenHere(), ...more });
 function where() {
   $('where').textContent = at < 0 ? '' :
-    `Panorama ${at + 1}/${near.length}, à ${near[at].metres} m · vue vers ${Math.round(view.heading)}°`;
+    `Panorama ${at + 1}/${near.length}, à ${near[at].metres} m, vue vers ${Math.round(view.heading)}°`;
+  refreshChrome();
 }
 async function showView() {
   where(); depthAhead();
@@ -505,23 +553,31 @@ async function wallsInView() {
  *  shown only, while parallax is on. */
 function drawInView() {
   const walls = parallaxOn && scene && inView.key === viewKey() ? inView.walls : [];
+  const pickable = tool === 'walls';  // the walls tool: walls clicked, the chosen one's top dragged
   const lines = walls.flatMap((w) => {
-    const runs = [];
-    for (const name of ['foot', 'top']) {
-      let run = [];
-      for (const p of [...w[name], null]) {
-        if (p) run.push(p); else { if (run.length > 1) runs.push(run); run = []; }
-      }
-    }
-    for (const k of [0, w.foot.length - 1]) if (w.foot[k] && w.top[k]) runs.push([w.foot[k], w.top[k]]);
-    return runs.map((run) => {
-      const line = document.createElementNS('http://www.w3.org/2000/svg', 'polyline');
-      line.setAttribute('points', run.map(([x, y]) => `${x},${y}`).join(' '));
-      line.setAttribute('class', `${w.made}${w.i === selected ? ' chosen' : ''}`);
-      return line;
-    });
+    const tops = runsOf(w.top), runs = [...runsOf(w.foot), ...tops];
+    for (const k of [0, w.foot.length - 1]) if (w.foot[k] && w.top[k]) runs.push(pointsOf([w.foot[k], w.top[k]]));
+    const drawn = runs.flatMap((points) => [polyline(points, `${w.made}${w.i === selected ? ' chosen' : ''}`),
+      ...(pickable ? [polyline(points, 'hit', { i: w.i })] : [])]);  // wider, unseen: what a click finds
+    if (pickable && w.i === selected) drawn.push(...tops.map((points) => polyline(points, 'roof')));
+    return drawn;
   });
   document.querySelectorAll('.in-view').forEach((svg) => svg.replaceChildren(...lines.map((l) => l.cloneNode())));
+}
+function polyline(points, className, data = {}) {
+  const line = document.createElementNS('http://www.w3.org/2000/svg', 'polyline');
+  line.setAttribute('points', points); line.setAttribute('class', className);
+  for (const [k, v] of Object.entries(data)) line.dataset[k] = v;
+  return line;
+}
+const pointsOf = (run) => run.map(([x, y]) => `${x},${y}`).join(' ');
+/** A line over the view (points, null where unseen) in runs of two points or more, as `points`. */
+function runsOf(line) {
+  const runs = []; let run = [];
+  for (const p of [...line, null]) {
+    if (p) run.push(p); else { if (run.length > 1) runs.push(pointsOf(run)); run = []; }
+  }
+  return runs;
 }
 /** What the walls shown came from, or why there are none. */
 const sceneSaid = () => scene.why
@@ -529,7 +585,8 @@ const sceneSaid = () => scene.why
 /** The walls just made: drawn on the map, the neighbour beside (the best for the view unless
  *  one was picked), and what they came from said. */
 function applyScene(found) {
-  scene = { ...found, panorama: near[at].id }; choose(null); wallsInView();
+  scene = { ...found, panorama: near[at].id }; saved = JSON.stringify(scene.mine);
+  choose(null); wallsInView();
   if (!picked || !scene.neighbours.includes(third)) { third = scene.best; picked = false; }
   showThird(); renderTools();
   const nearest = near.findIndex((p) => p.fixed);
@@ -600,6 +657,12 @@ function setTool(name) {
   tool = name && parallaxOn && scene ? name : null;
   drawingFrom = null; hovered = null;
   map.getCanvas().style.cursor = idleCursor();
+  const room = !!tool;
+  if (document.body.classList.contains('room') !== room) {
+    document.body.classList.toggle('room', room);
+    requestAnimationFrame(() => { map.resize(); if (pairing) drawDots(); });  // boxes resized: drawn again
+  }
+  document.body.classList.toggle('walls-tool', tool === 'walls');
   choose(null);
 }
 /** The map's cursor off the neighbours: as the tool is. */
@@ -662,6 +725,7 @@ function renderTools() {
       $('wall-height').value = (wall.top - scene.ground).toFixed(1);
     }
   }
+  refreshChrome();
 }
 /** A point clicked on the map; with Shift, BD TOPO's nearest corner within 3 m instead. */
 function snapped(point, shift) {
@@ -730,9 +794,15 @@ function removeChosen() {
   takeOut(scene.walls[selected]); saveWalls();
 }
 let saving = false;  // walls on their way to be saved: no other edit until they come back
-/** This panorama's own walls drawn and removed, saved: the walls made again with them. */
-async function saveWalls(keepLast = false) {
-  const mine = ++walling, here = near[at].id;
+let saved = '';      // the panorama's own walls as last saved (JSON), to undo back to
+const undone = {};   // by panorama: its own walls before each save, the latest last
+const undoable = () => at >= 0 && !!undone[near[at].id]?.length;
+/** This panorama's own walls drawn and removed, saved: the walls made again with them; the walls
+ *  as they stood before kept to undo back to (not when undoing). */
+async function saveWalls(keepLast = false, undoing = null) {
+  const mine = ++walling, here = near[at].id, steps = (undone[here] ??= []);
+  const kept = !undoing && saved && steps.at(-1) !== saved;
+  if (kept) steps.push(saved);
   saving = true; choose(null);
   try {
     const found = await post('/api/walls', about({ drawn: scene.mine.drawn, removed: scene.mine.removed }));
@@ -741,8 +811,18 @@ async function saveWalls(keepLast = false) {
     // the wall just moved (the last drawn) stays chosen, its ends to drag again
     const again = keepLast ? scene.walls.findIndex((w) => w.mine === scene.mine.drawn.length - 1) : -1;
     if (again >= 0) choose(again);
-  } catch (error) { if (mine === walling) { say(error.message); depthAhead(true); } }  // as they are
+  } catch (error) {
+    if (kept) steps.pop(); else if (undoing) steps.push(undoing);  // nothing saved: nothing to undo, or still to
+    if (mine === walling) { say(error.message); depthAhead(true); }  // as they are
+  }
   finally { saving = false; }
+}
+/** The last change to this panorama's own walls undone (⌘Z). */
+function undoWalls() {
+  if (!parallaxOn || !scene || !undoable() || !editable()) return;
+  const step = undone[near[at].id].pop();
+  scene.mine = JSON.parse(step);
+  saveWalls(false, step);
 }
 /** Whether the walls may be edited now (none on its way to be saved). */
 function editable() {
@@ -862,20 +942,20 @@ function enterPairing() {
 function leavePairing() {
   pairing = false; deepening = false; $('pair').classList.remove('on', 'depth');
   $('square').style.display = ''; $('pinned').style.display = '';
-  document.querySelectorAll('.dot').forEach((d) => d.remove()); $('points-help').textContent = '';
+  document.querySelectorAll('.dot').forEach((d) => d.remove());
+  $('strip').replaceChildren(); help();
   fadeable();
 }
+/** Under the pictures, what the plaque does not say: how to move a point, and in parallax how many
+ *  pairs have a depth. */
 function help() {
-  const deeper = ' ; aux autres, un clic sur leur plaque, ou un mur dessiné (Murs)';
   const counted = fitted?.used?.filter(Boolean).length;
   const deep = fitted?.used
-    ? ` · parallaxe : ${counted}/${pairs.length} paire(s) avec profondeur (il en faut ${rules.min_standing})`
-      + (counted < pairs.length ? deeper : '')
-    : parallaxOn ? ` · parallaxe : il en faut ${rules.min_standing} avec profondeur` : '';
-  $('points-help').textContent = pairing
-    ? `${pairs.length} paire(s) — cliquer un détail dans la photo puis le même dans la vue ; cliquer un point pour le déplacer ; ⌫ annuler la dernière`
-      + (pairs.length >= rules.min_points ? ' ; Entrée pour garder' : ` ; il en faut ${rules.min_points}`) + deep
+    ? ` En parallaxe : ${counted} paire(s) sur ${pairs.length} avec une profondeur (il en faut ${rules.min_standing})`
+      + (counted < pairs.length ? ' ; aux autres, un clic sur leur plaque, ou un mur dessiné.' : '.')
     : '';
+  $('points-help').textContent = pairing && pairs.length ? `Un point se déplace d'un clic dessus.${deep}` : '';
+  refreshChrome();
 }
 function pixelOf(img, event) {
   const box = img.getBoundingClientRect();  // as shown, zoomed or not
@@ -896,6 +976,7 @@ function drawDots() {
     place($('photo'), a, i + 1); place($('view'), b, i + 1);
     if (second && second.neighbour === third) place($('third'), second.px, i + 1);
   });
+  if (waiting) place($('photo'), waiting, pairs.length + 1, true);
   drawLine(); drawStrip();
 }
 /** The pairs as little enamel plates: their rim says where each depth comes from; a click on one
@@ -915,7 +996,6 @@ function drawStrip() {
     const item = document.createElement('li'); item.append(plate);
     return item;
   }));
-  if (waiting) place($('photo'), waiting, pairs.length + 1, true);
 }
 /** How far pair `i` lies from the fit shown (shares of the photo's diagonal): its dot's class. */
 function dotClass(i) {
@@ -968,7 +1048,7 @@ async function fitPairs(deep = true) {
   const start = { lon: spot.lon, lat: spot.lat };
   const [route, sent, done] = deep && parallaxOn && pairs.length >= rules.min_standing
     ? ['/api/parallax', { ...asked, ...start }, 'Recalée en parallaxe : le point bleu, sur le plan, est où se tenait le photographe.']
-    : ['/api/fit', asked, 'Recalée : Entrée pour garder, ou continuer à ajouter des points.'];
+    : ['/api/fit', asked, ''];  // the plaque says it: recalée, Entrée to keep
   const mine = ++fitting;
   try {
     const found = await post(route, sent);
@@ -1010,50 +1090,72 @@ async function answer(kind) {
   }
   try { await post('/api/answer', body); await next(); }
   catch (error) { say(error.message); }
-  finally { answering = false; }
+  finally { answering = false; refreshChrome(); }
 }
 
+/** Why the photo cannot be kept now ('' : it can). */
+function notKeepable() {
+  // placing by points keeps only a warp from the pairs clicked, never the one set out to correct
+  if (pairing && pairs.length < rules.min_points) return `Il faut ${rules.min_points} paires de points.`;
+  if (!proposal) return pairing ? refused || 'Recalage en cours…' : 'Pas de proposition : F pour poser par points.';
+  if (spot.heading == null) return 'Tourner le cône sur le plan (← →) : la direction manque.';
+  return '';
+}
+function keep() { const why = notKeepable(); if (why) say(why); else answer(made === 'points' ? 'points' : 'fits'); }
+function togglePoints() {
+  if (pairing) { leavePairing(); showView(); } else enterPairing();  // left: the photo laid as fitted
+}
+function flip() {
+  flipped = !flipped; proposal = null; carried = null; $('pinned').src = photoUrl();
+  say(flipped ? 'Image retournée : la poser par points.' : ''); enterPairing();
+}
+function turnView(side) {
+  if (at < 0) return;
+  const step = rules.view_step;
+  view = { ...view, heading: (view.heading + side * step + 360) % 360 };
+  if (pairing) enterPairing(); else { pairs = []; parallaxAfresh(); showView(); }  // pairs of that view gone
+}
+function nearestFixed() {
+  const placed = near.findIndex((p) => p.fixed);
+  if (placed < 0) say('Aucun panorama recalé par COLMAP ici.');
+  else if (placed === at) say('C\'est déjà le panorama recalé le plus proche.');
+  else goTo(placed);
+}
+function takeBackPair() {
+  if (!pairing) return;
+  if (waiting) waiting = null; else { pairs.pop(); target = null; }
+  pairsChanged();
+}
+function toggleDrawing() { drawing = !drawing; drawingFrom = null; choose(null); }
 document.addEventListener('keydown', (e) => {
   if (e.target.matches('input:not([type=checkbox]):not([type=range]), textarea, select')) return;  // typing
   if (!photo || (e.repeat && !e.key.startsWith('Arrow'))) return;  // held keys turn the cone only
+  const undo = (e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey && e.key === 'z';
+  if (undo) { e.preventDefault(); if (tool === 'walls') undoWalls(); return; }
+  if (e.metaKey || e.ctrlKey || e.altKey) return;  // the browser's own (⌘S, ⌘R…), not a shortcut
   const turn = e.shiftKey ? 1 : 5;
   if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
     spot.heading = ((spot.heading ?? 0) + (e.key === 'ArrowLeft' ? -turn : turn) + 360) % 360;
     drawCone(); e.preventDefault();
   } else if (e.key === 'Enter') {
     e.preventDefault();  // not also a click on the button last pressed
-    // placing by points keeps only a warp from the pairs clicked, never the one set out to correct
-    if (pairing && pairs.length < rules.min_points) say(`Il faut ${rules.min_points} paires de points.`);
-    else if (!proposal) say(pairing ? refused || 'Recalage en cours…' : 'Pas de proposition : F pour poser par points.');
-    else if (spot.heading == null) say('Tourner le cône sur le plan (← →) : la direction manque.');
-    else answer(made === 'points' ? 'points' : 'fits');
-  } else if (e.key === 'f' || e.key === 'F') { pairing ? leavePairing() : enterPairing(); }
+    keep();
+  } else if (e.key === 'f' || e.key === 'F') togglePoints();
   else if (e.key === 'x' || e.key === 'X') answer('far');
   else if (e.key === 's' || e.key === 'S') answer('skip');
-  else if (e.key === 'r' || e.key === 'R') {
-    flipped = !flipped; proposal = null; carried = null; $('pinned').src = photoUrl();
-    say(flipped ? 'Image retournée : la poser par points.' : ''); enterPairing();
-  }
-  else if (e.key === '[' || e.key === ']') {
-    const step = rules.view_step;
-    view = { ...view, heading: (view.heading + (e.key === '[' ? -step : step) + 360) % 360 };
-    if (pairing) enterPairing(); else { pairs = []; parallaxAfresh(); showView(); }  // pairs of that view gone
-  } else if (e.key === ',' || e.key === '.') goTo(at + (e.key === ',' ? -1 : 1));
+  else if (e.key === 'r' || e.key === 'R') flip();
+  else if (e.key === '[' || e.key === ']') turnView(e.key === '[' ? -1 : 1);
+  else if (e.key === ',' || e.key === '.') goTo(at + (e.key === ',' ? -1 : 1));
   else if (e.key === 'p' || e.key === 'P') toggleParallax();
   else if (e.key === 'Escape' && deepening) { deepening = false; showThird(); }
+  else if (e.key === 'Escape' && tool) setTool(null);  // out of the depth room, back to the photo
   else if (e.key === 'w' || e.key === 'W') toggleTool('walls');
   else if (e.key === 'v' || e.key === 'V') toggleTool('neighbours');
   else if (e.key === 'd' || e.key === 'D') toggleTint();
-  else if (e.key === 'n' || e.key === 'N') {
-    const placed = near.findIndex((p) => p.fixed);
-    if (placed < 0) say('Aucun panorama recalé par COLMAP ici.');
-    else if (placed === at) say('C\'est déjà le panorama recalé le plus proche.');
-    else goTo(placed);
-  } else if (e.key === 'Backspace' && tool === 'walls' && selected != null) removeChosen();
-  else if (e.key === 'a' || e.key === 'A') toggleAerial(map); else if (e.key === 'Backspace' && pairing) {
-    if (waiting) waiting = null; else { pairs.pop(); target = null; }
-    pairsChanged();
-  }
+  else if (e.key === 'n' || e.key === 'N') nearestFixed();
+  else if (e.key === 'Backspace' && tool === 'walls' && selected != null) removeChosen();
+  else if (e.key === 'a' || e.key === 'A') toggleAerial(map);
+  else if (e.key === 'Backspace' && pairing) takeBackPair();
 });
 $('parallax').addEventListener('click', toggleParallax);
 $('stood-ok').addEventListener('click', acceptStood);
@@ -1069,16 +1171,151 @@ $('automatic').addEventListener('click', async () => {  // back to those picked 
   renderTools();
   if (chosen && await depthAhead(true)) depthChanged();  // a draft only: nothing to make again
 });
-$('draw-walls').addEventListener('click', () => { drawing = !drawing; drawingFrom = null; choose(null); });
+$('draw-walls').addEventListener('click', toggleDrawing);
+const withView = (act) => () => { if (photo && at >= 0 && view) act(); };
+$('prev-pano').addEventListener('click', withView(() => goTo(at - 1)));
+$('next-pano').addEventListener('click', withView(() => goTo(at + 1)));
+$('turn-left').addEventListener('click', withView(() => turnView(-1)));
+$('turn-right').addEventListener('click', withView(() => turnView(1)));
+$('nearest-fixed').addEventListener('click', withView(nearestFixed));
+$('aerial').addEventListener('click', () => toggleAerial(map));
+// a wall clicked in the view (walls tool) is chosen; the chosen one's top dragged sets its height
+for (const svg of document.querySelectorAll('.in-view')) {
+  svg.addEventListener('click', (e) => {
+    const hit = e.target.closest('.hit');
+    if (hit && tool === 'walls' && editable()) choose(+hit.dataset.i);
+  });
+  svg.addEventListener('pointerdown', (e) => {
+    const roof = e.target.closest('.roof');
+    if (!roof || tool !== 'walls' || selected == null || !editable()) return;
+    e.preventDefault(); e.stopPropagation();  // not a pan of the zoomed picture
+    dragRoof(roof, e);
+  });
+}
 $('snap').addEventListener('change', () => { snap = $('snap').checked; });
 $('remove-wall').addEventListener('click', removeChosen);
 const height = () => scene.walls[selected].top - scene.ground;  // the wall's own, not as rounded
+const frenchMetres = (m) => m.toFixed(1).replace('.', ',');
 $('wall-height').addEventListener('change', () => heighten($('wall-height').valueAsNumber));
 $('lower-wall').addEventListener('click', () => selected != null && heighten(height() - 1));
 $('raise-wall').addEventListener('click', () => selected != null && heighten(height() + 1));
 $('fade').addEventListener('input', () => {
   $('laid').style.opacity = $('view-laid').style.opacity = $('fade').value / 100;
 });
+
+// --- what the page is doing, and what can be done: the plaque, the actions, the navigation
+/** The plaque's two lines: the mode, and what it needs or says. */
+function plaque() {
+  if (!photo) return ['Plus rien à placer', ''];
+  if (answering) return ['Réponse en cours…', ''];
+  const wall = selected != null ? scene?.walls[selected] : null;
+  if (tool === 'walls') {
+    if (drawing) return ['Tracer un mur', drawingFrom ? 'Clic sur le plan : le second bout' : 'Clic sur le plan : le premier bout'];
+    if (wall) return ['Un mur choisi', `${frenchMetres(height())} m au-dessus de la rue`];
+    return ['Murs', 'Clic sur un mur, sur le plan ou dans la vue'];
+  }
+  if (tool === 'neighbours') {
+    return ['Voisins', draft ? `${draft.length} choisi(s) : les appliquer pour refaire les murs`
+      : `${usedHere().length} panorama(s) donnent les murs`];
+  }
+  if (at < 0) return ['Aucun panorama proche', 'X si aucun ne voit la photo'];
+  if (pairing && deepening) return [`Profondeur de la paire ${aimed() + 1}`, 'Le même détail sur la ligne verte'];
+  if (pairing) {
+    const n = pairs.length, title = n ? `Points : ${n} paire${n > 1 ? 's' : ''}` : 'Poser par points';
+    const detail = waiting ? 'Le même détail dans la vue'
+      : n < rules.min_points ? `Un détail dans la photo, puis dans la vue (${rules.min_points} paires)`
+      : fitted?.standing ? 'Recalée en parallaxe : Entrée pour garder'
+      : proposal ? (parallaxOn && n < rules.min_standing
+        ? `Recalée à plat : Entrée pour garder (${rules.min_standing} paires pour la parallaxe)` : 'Recalée : Entrée pour garder')
+      : refused || 'Recalage en cours…';
+    return [title, detail];
+  }
+  if (proposal) {
+    const title = made === 'points' ? 'Posée par points' : carried ? 'Portée depuis une photo placée' : 'Proposition à vérifier';
+    return [title, notKeepable() || 'Entrée si elle tombe juste'];
+  }
+  return ['Proposition en cours…', ''];
+}
+/** What can be done now, each a button with its key (run by the same function as the key). */
+function actionList() {
+  if (!photo) return [];
+  if (tool) {
+    return [{ label: 'Revenir à la photo', key: 'Échap', run: () => setTool(null), main: true },
+            ...(tool === 'walls' ? [
+              { label: 'Annuler la dernière modification', key: '⌘Z', run: undoWalls, why: undoable() ? '' : 'Rien à annuler ici' }] : [])];
+  }
+  return [
+    { label: pairing ? 'Garder ce calage' : 'Garder : elle tombe juste', key: '↵', run: keep, main: true, why: notKeepable() },
+    { label: pairing ? 'Sortir des points' : 'Poser par points', key: 'F', run: togglePoints, why: at < 0 ? 'Aucun panorama' : '' },
+    ...(pairing && (pairs.length || waiting) ? [{ label: 'Reprendre la dernière paire', key: '⌫', run: takeBackPair }] : []),
+    { label: 'Retourner l\'image', key: 'R', run: flip, why: at < 0 ? 'Aucun panorama' : '' },
+    ...[['Murs', 'W', 'walls'], ['Voisins', 'V', 'neighbours']].map(([label, key, name]) => ({
+      label, key, run: () => toggleTool(name), why: !parallaxOn ? 'La parallaxe d\'abord (P)' : !scene ? 'Murs en cours…' : '' })),
+    { label: 'Aucun panorama ne la voit', key: 'X', run: () => answer('far'), away: true },
+    { label: 'Passer', key: 'S', run: () => answer('skip'), away: true },
+  ];
+}
+let chromeShown = '';  // the actions as last drawn: drawn again only when they change
+function drawChrome() {
+  const [title, detail] = plaque();
+  if ($('plaque-title').textContent !== title) $('plaque-title').textContent = title;  // said once (aria-live)
+  if ($('plaque-detail').textContent !== detail) $('plaque-detail').textContent = detail;
+  const actions = actionList();
+  const key = JSON.stringify(actions.map((a) => [a.label, a.key, a.why, a.main]));
+  if (key !== chromeShown) {
+    chromeShown = key;
+    $('actions').replaceChildren(...actions.map((a) => {
+      const b = Object.assign(document.createElement('button'), { className: a.main ? 'main' : a.away ? 'away' : '' });
+      b.append(a.label);
+      if (a.key) { const k = document.createElement('kbd'); k.textContent = a.key; b.append(k); }
+      b.disabled = !!a.why; b.title = a.why || '';
+      b.addEventListener('click', () => a.run());
+      return b;
+    }));
+  }
+  const here = !!photo && at >= 0 && !!view;
+  $('prev-pano').disabled = !(here && at > 0); $('next-pano').disabled = !(here && at < near.length - 1);
+  $('turn-left').disabled = $('turn-right').disabled = !here;
+  $('nearest-fixed').disabled = !(here && near.some((p) => p.fixed));
+}
+/** The chosen wall's top dragged in the view (`roof`, from pointer `e`): its height follows the
+ *  pointer along the wall's own foot-to-top column nearest it (linear in a level view), shown as
+ *  it goes, and set when let go. */
+function dragRoof(roof, e) {
+  const svg = roof.ownerSVGElement, w = inView.walls.find((x) => x.i === selected);
+  if (!w) return;
+  const from = height(), box = svg.getBoundingClientRect(), field = $('wall-height');
+  const host = svg.closest('.box') ?? svg.parentElement, frame = host.getBoundingClientRect();  // not zoomed
+  const toSvg = (ev) => [(ev.clientX - box.left) / box.width * 1280, (ev.clientY - box.top) / box.height * 1280];
+  const [x0, y0] = toSvg(e);
+  const columns = w.foot.map((f, k) => (f && w.top[k] ? [f, w.top[k]] : null)).filter(Boolean);
+  if (!columns.length) return;
+  const [foot, top] = columns.reduce((a, b) => (Math.abs(b[0][0] - x0) < Math.abs(a[0][0] - x0) ? b : a));
+  const span = foot[1] - top[1];
+  if (!(span > 2)) return;
+  const label = Object.assign(document.createElement('span'), { id: 'roof-label' });
+  host.append(label);
+  const hint = polyline('', 'roof-hint');
+  svg.append(hint);
+  let metres = from, moved = false;
+  const move = (ev) => {
+    const [, y] = toSvg(ev);
+    moved ||= Math.abs(y - y0) > 3;  // a click is not a drag
+    if (!moved) return;
+    metres = Math.round(Math.min(+field.max, Math.max(+field.min, from * (1 + (y0 - y) / span))) * 2) / 2;
+    hint.setAttribute('points', columns.map(([f, t]) => `${t[0]},${f[1] - (f[1] - t[1]) * metres / from}`).join(' '));
+    label.textContent = `${frenchMetres(metres)} m`;
+    label.style.left = `${ev.clientX - frame.left}px`; label.style.top = `${ev.clientY - frame.top}px`;
+  };
+  // on the window: the roof may be drawn again meanwhile, and its events then go elsewhere
+  const done = (ev) => {
+    for (const [kind, f] of [['pointermove', move], ['pointerup', done], ['pointercancel', done]]) window.removeEventListener(kind, f);
+    label.remove(); hint.remove();
+    if (ev.type === 'pointerup' && moved) heighten(metres);  // let go after a drag; cancelled: nothing
+  };
+  roof.setPointerCapture(e.pointerId);
+  for (const [kind, f] of [['pointermove', move], ['pointerup', done], ['pointercancel', done]]) window.addEventListener(kind, f);
+}
 
 /** The next photo to place, as the server orders them now (after each answer, see queue). */
 async function next() {
@@ -1088,7 +1325,7 @@ async function next() {
 }
 function show(next) {
   leavePairing();
-  if (!next) { photo = null; $('title').textContent = 'Plus rien à placer.'; return; }
+  if (!next) { photo = null; $('title').textContent = 'Plus rien à placer.'; refreshChrome(); return; }
   photo = next; flipped = !!next.flipped; proposal = null; carried = null; at = -1;
   pairs = []; forgetFit(); setParallax(parallaxOn);
   spot = { lon: photo.lon, lat: photo.lat, heading: photo.heading };
@@ -1110,7 +1347,7 @@ for (const name of ['photo', 'view', 'third']) {
   const stage = $(`${name}-stage`);
   zoomable($(`${name}-box`), stage, { onZoom: (scale) => stage.style.setProperty('--zoom', scale) });
 }
-map.on('load', next);
+whenDrawable(map, next);
 </script>
 </body>
 </html>

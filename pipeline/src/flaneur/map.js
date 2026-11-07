@@ -31,6 +31,18 @@ function plainStyle(sources = {}, layers = []) {
   };
 }
 
+/** `then` called once, as soon as the map's style is parsed (its sources and layers there to draw
+ *  on): not on 'load', which waits for every IGN tile, and one that never came back kept a page
+ *  from starting (1 opening in 15-20, measured 2026-11-07). */
+function whenDrawable(map, then) {
+  let done = false;
+  const check = () => {
+    if (done || !map.getSource('cone') || !map.getLayer('cone')) return;
+    done = true; map.off('styledata', check); then();
+  };
+  map.on('styledata', check); check();
+}
+
 /** The plan or the 1949 aerial photographs, one for the other. */
 function toggleAerial(map) {
   const visible = map.getLayoutProperty('aerial', 'visibility') === 'visible';
