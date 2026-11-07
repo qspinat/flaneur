@@ -372,8 +372,9 @@ class _Scenes:
     (`segments`); the walls drawn and removed by hand (`walls_path`) laid over them when asked.
     A pair's matches are made with the matcher (`lock` held while it runs) and kept on disk
     (`matches`), their details KEPT_PAIRS of them; walls fitted are kept, KEPT_SCENES. A pair
-    is set right from all its matches, its details are those both panoramas see on a building
-    (`seen_on`: a panorama and rays from it, which fall on one; see segment)."""
+    is set right from all its matches, its details are those both panoramas see on a building,
+    and walls' tops where the panorama sees building give way to sky (`seen`: what rays from a
+    panorama see, see segment.seen)."""
 
     def __init__(
         self,
@@ -384,12 +385,12 @@ class _Scenes:
         segments: Callable[[float, float], list[facades.Segment]],
         walls_path: Path,
         matches: Path = PAIR_MATCHES,
-        seen_on: Callable[[match.Panorama, np.ndarray], np.ndarray] | None = None,
+        seen: Callable[[match.Panorama, np.ndarray], np.ndarray] | None = None,
     ):
         self.by_id = {p.id: p for p in spheres}
         self.spheres, self.fixed, self.views, self.lock = spheres, fixed, views, lock
         self.segments, self.walls_path, self.matches = segments, walls_path, matches
-        self.seen_on = seen_on
+        self.seen = seen
         self.paired: OrderedDict[tuple[str, str], _Paired | None] = OrderedDict()
         self.fitted: OrderedDict[tuple, facades.Scene | None] = OrderedDict()
         self.guard = threading.Lock()  # the kept ones, read and changed one thread at a time
@@ -424,8 +425,10 @@ class _Scenes:
             pair = depth.set_right(a, b, rays_a, rays_b)
             if pair is None:
                 return None
-            if self.seen_on is not None:  # trees, cars, people: no walls
-                on = self.seen_on(home, rays_a) & self.seen_on(other, rays_b)
+            if self.seen is not None:  # trees, cars, people: no walls
+                on = (self.seen(home, rays_a) == segment.BUILT) & (
+                    self.seen(other, rays_b) == segment.BUILT
+                )
                 rays_a, rays_b = rays_a[on], rays_b[on]
             directions, metres = depth.placed(a, pair, rays_a, rays_b)
             return _Paired(pair, directions.astype(np.float32), metres.astype(np.float32))
@@ -501,24 +504,31 @@ class _Scenes:
         details = np.vstack(points) if points else np.empty((0, 3))  # none: drawn walls only
         ground = home.z - PANORAMA_HEIGHT_M
         fitted = facades.fit(details, ground, self.segments(home.x, home.y), origin=origin)
+        if self.seen is not None:
+            fitted = facades.topped(fitted, origin, ground, functools.partial(self.seen, home))
         return facades.Scene(
             home.id, tuple(origin), ground, tuple(fitted), neighbours, len(details), chosen
         )
 
 
-def _on_buildings(make: bool) -> Callable[[match.Panorama, np.ndarray], np.ndarray]:
-    """Which rays from a panorama fall on a building in its views (see segment), the masks kept
-    in VIEW_STRUCTURE; made the first time with the model (a lock of its own: photos are
-    proposed meanwhile), or, without `make`, only read (`flaneur segmenter` makes them). The
-    model failing (not fetched, short of memory) or a panorama not segmented, every ray: the
-    walls made as before, which is said once for each."""
+def _seeing(make: bool) -> Callable[[match.Panorama, np.ndarray], np.ndarray]:
+    """What rays from a panorama see in its views (see segment.seen), read in VIEW_STRUCTURE;
+    made the first time with the model (a lock of its own: photos are proposed meanwhile), or,
+    without `make`, only read (`flaneur segmenter` makes them). The model failing (not
+    fetched, short of memory) or a panorama not segmented: a building everywhere (the walls
+    made as before), which is said once for each; the model failing is not asked again."""
     segmenter = segment.Segmenter(VIEW_STRUCTURE, threading.Lock(), _levelled_name, make)
     said: set[str] = set()
+    broken: list[Exception] = []
 
-    def on(panorama: match.Panorama, rays: np.ndarray) -> np.ndarray:
+    def seen(panorama: match.Panorama, rays: np.ndarray) -> np.ndarray:
+        kinds = None
         try:
-            return segment.on_structure(segmenter.masks(panorama), rays)
+            if not broken:
+                kinds = segmenter.kinds(panorama)
         except Exception as error:  # the walls rather than none
+            if not isinstance(error, segment.NotSegmented):
+                broken.append(error)
             if str(error) not in said:
                 said.add(str(error))
                 why = (
@@ -527,9 +537,9 @@ def _on_buildings(make: bool) -> Callable[[match.Panorama, np.ndarray], np.ndarr
                     else f"segmentation impossible : {error}"
                 )
                 typer.echo(f"murs sans segmentation : {why}", err=True)
-            return segment.on_structure(None, rays)
+        return segment.seen(kinds, rays)
 
-    return on
+    return seen
 
 
 def _levelled_name(p: match.Panorama) -> str:
@@ -1897,13 +1907,7 @@ def compare_parallax(answers: Path = PLACINGS) -> None:
         fixed = _fixed_by_colmap(panoramas.load(conn), register.load(FIXES))
     views = _views(kept=8)  # a panorama and its neighbours
     made = _Scenes(
-        spheres,
-        fixed,
-        lambda: views,
-        threading.Lock(),
-        segments,
-        WALLS,
-        seen_on=_on_buildings(make=True),
+        spheres, fixed, lambda: views, threading.Lock(), segments, WALLS, seen=_seeing(make=True)
     )
     found, skipped = [], 0
     for row in sorted(rows, key=lambda r: r["registration"]["panorama"]):  # its views kept
@@ -2076,7 +2080,7 @@ def place_photos(
 
     matching = threading.Lock()  # the matcher: proposals, and walls when they must be made
     walls_made = _Scenes(
-        spheres, fixed, models, matching, segments, WALLS, seen_on=_on_buildings(make=False)
+        spheres, fixed, models, matching, segments, WALLS, seen=_seeing(make=False)
     )
 
     def walls_at(panorama: str, chosen: tuple[str, ...] | None) -> facades.Scene | None:

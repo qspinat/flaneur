@@ -3,7 +3,7 @@
 import numpy as np
 import pytest
 
-from flaneur import facades
+from flaneur import facades, segment
 from flaneur.registration import ViewOf
 
 GROUND = -2.5  # the street, under the panorama's camera (at 0)
@@ -401,3 +401,60 @@ def test_a_sparse_facade_beside_a_dense_one_crossing_its_line_keeps_its_band():
     walls = facades.fit(points, GROUND, outline, origin=np.zeros(3))
 
     assert _found(walls, 90, 15.0) and _found(walls, 0, 6.0)
+
+
+def _skyline(top: float, above: int = segment.SKY):
+    """What the camera at the origin sees of a building face at x = 4: building up to `top`
+    (heights as the panorama's), then `above` (the sky); elsewhere, nothing it can tell."""
+
+    def kind_at(rays: np.ndarray) -> np.ndarray:
+        found = np.full(len(rays), segment.OTHER)
+        ahead = rays[:, 0] > 0
+        z = 4.0 / rays[ahead, 0] * rays[ahead, 2]
+        found[ahead] = np.where(z <= top, segment.BUILT, above)
+        return found
+
+    return kind_at
+
+
+def _right_wall(top: float) -> facades.Wall:
+    return facades.Wall((4.0, 2.0), (4.0, 20.0), top, "fitted")
+
+
+def test_a_walls_top_is_where_the_camera_sees_the_sky_begin():
+    (wall,) = facades.topped([_right_wall(5.0)], np.zeros(3), GROUND, _skyline(12.0))
+
+    assert wall.top == pytest.approx(12.0, abs=0.3)
+
+
+def test_a_wall_too_tall_comes_down_to_its_skyline():
+    (wall,) = facades.topped([_right_wall(20.0)], np.zeros(3), GROUND, _skyline(9.0))
+
+    assert wall.top == pytest.approx(9.0, abs=0.3)
+
+
+@pytest.mark.parametrize("above", [segment.BUILT, segment.OTHER])  # no sky; a crown over it
+def test_a_skyline_not_seen_leaves_the_top(above):
+    (wall,) = facades.topped([_right_wall(5.0)], np.zeros(3), GROUND, _skyline(12.0, above))
+
+    assert wall.top == 5.0
+
+
+def test_a_wall_hidden_behind_a_nearer_one_keeps_its_top():
+    near = facades.Wall((2.0, 1.0), (2.0, 30.0), 40.0, "fitted")  # all of it in front
+
+    _, far = facades.topped([near, _right_wall(5.0)], np.zeros(3), GROUND, _skyline(12.0))
+
+    assert far.top == 5.0
+
+
+def test_a_skyline_behind_a_hidden_band_leaves_the_top():
+    def hidden_band(rays):  # building to 8 m, nothing seen from 8 to 14 m, then the sky
+        found = _skyline(14.0)(rays)
+        z = 4.0 / rays[:, 0] * rays[:, 2]
+        found[(rays[:, 0] > 0) & (z > 8.0) & (z <= 14.0)] = segment.UNSEEN
+        return found
+
+    (wall,) = facades.topped([_right_wall(5.0)], np.zeros(3), GROUND, hidden_band)
+
+    assert wall.top == 5.0
