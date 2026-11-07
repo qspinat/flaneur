@@ -34,18 +34,21 @@ PAIR_M = (1.0, 20.0)  # how far apart a pair's details stand
 NEAREST = 48  # a pair's second detail is among the nearest of those far enough (on the plan)
 CANDIDATE_BAND_M = 1.0  # how far off BD TOPO's facades may be: where their details are looked for
 MIN_WALL_POINTS = 15
-INLIER_M = 0.3  # details spread this far across a facade (measured 2026-11-07, pairs set
-# right: 80 % within 0.2 m under 10 m away, 0.35 at 10-20, 0.5 at 20-30; a band widening with
-# distance agreed worse with the panoramas: 0.19 against 0.21)
+INLIER_M = 0.3  # details spread at least this far across a facade: the narrowest band, each
+# line's own measured on its details (see _bands; 2026-11-07, pairs set right: 80 % within 0.2 m
+# under 10 m away, 0.35 at 10-20, 0.5 at 20-30; a band widening with distance agreed worse)
+WIDEST_M = 1.0  # and at most this far (see _bands)
 SAME_DEG = 3.0  # lines closer than this (and INLIER_M) are one
-LINES_MERGED_M = 2 * INLIER_M  # and fitted lines this close: one facade's spread split in two
-OUTLIER_COST = 4.0  # a detail on no wall costs as one 2 × INLIER_M off a wall
+LINES_MERGED_M = 2 * INLIER_M  # and fitted lines this close (whatever their bands): one facade
+# split in two
+OUTLIER_COST = 4.0  # a detail on no wall costs as one two narrowest bands off a wall
 SMOOTH = 0.5  # per near neighbour given another line
 NEIGHBOURS = 8
 NEIGHBOUR_M = 1.5
 SWEEPS = 5
 WALL_COST = 20.0  # the price of a wall kept, at least (more than OUTLIER_COST: it holds details)
 WALL_SHARE = 0.03  # and this much a detail fitted: many details, no slivers along one facade
+# (a fixed price keeps sparse facades seen at a grazing angle, but trees with them: 2026-11-07)
 ROUNDS = 10
 GAP_M = 6.0  # a wall's details further apart than this along it: two walls (a side street)
 RUN_SPACINGS = 5  # a detail counts toward a wall with RUN_COUNT others this many of its
@@ -293,30 +296,31 @@ def _shared(
 ) -> tuple[np.ndarray, list[Line]]:
     """Each detail given to one line or to none (label len(lines)), lines worth less than the
     price of a wall dropped (see _worth_keeping), the others fitted again to their details,
-    those then nearly one made one (see _merged), round after round."""
+    those then nearly one made one (see _merged), each line's band measured on its details
+    (see _bands), round after round."""
     distances, around = tree.query(xy, k=NEIGHBOURS + 1)
     close = (distances <= NEIGHBOUR_M) & (around != np.arange(len(xy))[:, None])  # not itself
     who = np.nonzero(close)[0]
     graph = csr_matrix((np.ones(len(who)), (who, around[close])), shape=(len(xy),) * 2)
     graph = ((graph + graph.T) > 0).astype(float)  # neighbours both ways
-    labels = None
+    labels, banded = None, [(line, INLIER_M) for line in lines]
     for _ in range(ROUNDS):
-        costs = _costs(xy, lines)
+        costs = _costs(xy, banded)
         before, labels = labels, _labelled(costs, graph)
         kept, given = _worth_keeping(costs, labels)  # each kept line fitted to the details it holds
         fitted = _merged(xy, [given == i for i in kept])
-        stable = len(fitted) == len(lines) and np.array_equal(before, labels)
-        lines = fitted
+        stable = len(fitted) == len(banded) and np.array_equal(before, labels)
+        banded = fitted
         if stable:
             break
-    return _labelled(_costs(xy, lines), graph), lines
+    return _labelled(_costs(xy, banded), graph), [line for line, _ in banded]
 
 
-def _merged(xy: np.ndarray, held: list[np.ndarray]) -> list[Line]:
+def _merged(xy: np.ndarray, held: list[np.ndarray]) -> list[tuple[Line, float]]:
     """Lines fitted to the details each holds (`held`: masks), those within SAME_DEG and
-    LINES_MERGED_M of a better held one fitted with it as one: squared costs always favour two lines
-    over one facade's band of details, which is one wall (measured 2026-11-07: 10 to 30 % fewer
-    walls, agreeing with the panoramas as well)."""
+    LINES_MERGED_M of a better held one fitted with it as one: squared costs always favour two
+    lines over one facade's band of details, which is one wall (measured 2026-11-07: 10 to 30 %
+    fewer walls, agreeing with the panoramas as well). Each with its band (see _bands)."""
     groups: list[tuple[Line, np.ndarray]] = []
     for mine in sorted(held, key=lambda m: -int(m.sum())):
         line = _total_least_squares(xy[mine])
@@ -327,14 +331,42 @@ def _merged(xy: np.ndarray, held: list[np.ndarray]) -> list[Line]:
                 break
         else:
             groups.append((line, mine))
-    return [line for line, _ in groups]
+    if not groups:
+        return []
+    return list(zip([line for line, _ in groups], _bands(xy, groups), strict=True))
 
 
-def _costs(xy: np.ndarray, lines: list[Line]) -> np.ndarray:
-    """Each detail's cost on each line, and on none (the last column)."""
-    normals = np.array([n for n, _ in lines]).reshape(-1, 2)
-    offsets = np.array([o for _, o in lines])
-    off = ((xy @ normals.T - offsets) / INLIER_M) ** 2
+def _bands(xy: np.ndarray, groups: list[tuple[Line, np.ndarray]]) -> list[float]:
+    """How far each line's details lie off it: those on any line (the masks of `groups`)
+    within WIDEST_M of it and along its own details' stretch (a facade crossing its line counts
+    only where it crosses), twice their robust spread (1.4826 × the median distance, a normal
+    law's deviation; twice: a tuned allowance), from INLIER_M to WIDEST_M. Facades are not all
+    as thin: trees before one, balconies, one seen at a grazing angle (measured 2026-11-07 on
+    18 panoramas: as good against a neighbour held out, 0.209 against 0.201, and a third fewer
+    walls)."""
+    masks = np.array([mine for _, mine in groups]).T  # details × lines: whose each is
+    placed = masks.any(axis=1)
+    normals = np.array([n for (n, _), _ in groups])
+    offsets = np.array([o for (_, o), _ in groups])
+    along = xy @ np.vstack([-normals[:, 1], normals[:, 0]])  # each detail along each line
+    lo = np.where(masks, along, np.inf).min(axis=0)  # each line's own stretch
+    hi = np.where(masks, along, -np.inf).max(axis=0)
+    off = np.abs(xy @ normals.T - offsets)
+    near = placed[:, None] & (off < WIDEST_M) & (along >= lo) & (along <= hi)
+    with np.errstate(all="ignore"):  # a line with none near: the narrowest band
+        spread = np.nanmedian(np.where(near, off, np.nan), axis=0)
+    return np.clip(np.nan_to_num(2 * 1.4826 * spread, nan=INLIER_M), INLIER_M, WIDEST_M).tolist()
+
+
+def _costs(xy: np.ndarray, banded: list[tuple[Line, float]]) -> np.ndarray:
+    """Each detail's cost on each line (with its band), as a normal law whose deviation is the
+    band would give it (squared bands off, and the band's own width paid for: a wide line does
+    not take all), and on none (the last column). The band being twice the spread measured
+    (see _bands), a detail stays on a wide line out to about three of its deviations."""
+    normals = np.array([n for (n, _), _ in banded]).reshape(-1, 2)
+    offsets = np.array([o for (_, o), _ in banded])
+    widths = np.array([band for _, band in banded], float)
+    off = ((xy @ normals.T - offsets) / widths) ** 2 + 2 * np.log(widths / INLIER_M)
     return np.column_stack([off, np.full(len(xy), OUTLIER_COST)])
 
 

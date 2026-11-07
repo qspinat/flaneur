@@ -374,3 +374,30 @@ def test_a_short_wall_crossing_a_facade_away_from_its_ends_is_not_linked_to_it()
     across = facades.Wall((-6.5, 20.0), (-1.5, 20.0), 8.0, "fitted")  # foliage, across its middle
 
     assert facades._linked([across, street]) == [street]
+
+
+def test_a_facade_whose_details_spread_wide_is_one_wall():
+    rng = np.random.default_rng(8)
+    wide = np.column_stack(  # trees before it, balconies: its details spread 0.4 m (σ) across
+        [6.0 + rng.normal(0, 0.4, 3000), rng.uniform(2, 40, 3000), rng.uniform(-2, 11, 3000)]
+    )
+
+    walls = facades.fit(wide, GROUND, origin=np.zeros(3))
+
+    assert len(_found(walls, 0, 6.0)) == 1 and len(walls) == 1
+
+
+def test_a_sparse_facade_beside_a_dense_one_crossing_its_line_keeps_its_band():
+    rng = np.random.default_rng(9)
+    dense = np.column_stack(  # a facade seen face on, by every neighbour, across its line
+        [rng.uniform(-20, 20, 20000), np.full(20000, 15.0), rng.uniform(-2, 11, 20000)]
+    )
+    sparse = np.column_stack(  # one seen at a grazing angle: few details along it
+        [-6.0 + rng.normal(0, 0.1, 250), rng.uniform(-30, -10, 250), rng.uniform(-2, 11, 250)]
+    )
+    points = np.vstack([dense, sparse])
+    outline = [((-6.0, -32.0), (-6.0, -8.0))]  # BD TOPO's facade: the line is proposed
+
+    walls = facades.fit(points, GROUND, outline, origin=np.zeros(3))
+
+    assert _found(walls, 90, 15.0) and _found(walls, 0, 6.0)
