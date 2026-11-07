@@ -10,6 +10,7 @@ them."""
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
@@ -21,6 +22,7 @@ from shapely.geometry import LineString, Point
 from flaneur import match
 from flaneur.blocks import Blocks
 from flaneur.registration import ViewOf
+from flaneur.segment import BUILT, SKY, UNSEEN
 from flaneur.sources import append_row, rows
 
 GROUND = -1  # what a ray met: the street
@@ -71,6 +73,10 @@ DRAWN_ABOVE_M = 20.0  # a wall drawn where none was fitted reaches this high ove
 REMOVED_MARGIN_M = 3.0  # a wall removed takes this much more of a wall fitted along it (fitted
 # again from other details, its ends move)
 NEAR_M = 30.0  # walls drawn serve panoramas this close
+TOP_STEP_M = 0.5  # a wall's top read in columns this far apart along it
+TOP_DZ_M = 0.25  # each column's rays this far apart in height
+TOP_HIGHEST_M = 40.0  # over the street
+TOP_COLUMNS = 3  # columns that saw where building meets sky, at least
 
 
 @dataclass(frozen=True)
@@ -146,6 +152,56 @@ def fit(
     if origin is not None:  # each wall's pieces keep its rank
         walls = [piece for w in walls for piece in _seen_through(w, origin, seen, ground)]
     return _uncrossed(_linked(walls))
+
+
+def topped(
+    walls: list[Wall],
+    origin: np.ndarray,
+    ground: float,
+    kind_at: Callable[[np.ndarray], np.ndarray],
+) -> list[Wall]:
+    """The walls, each top where the camera at `origin` sees building give way to sky above it
+    (`kind_at`: what each ray sees, segment.BUILT, SKY...). Read in columns along the
+    wall, TOP_STEP_M apart, from those where this wall is the first met: the last height seen
+    as building with sky seen right above (a crown over the roof, the view's edge: the column
+    says nothing); the median of TOP_COLUMNS or more, else the top as fitted (the details'
+    highest). Measured 2026-11-07: 161 walls of 349 raised, 24 lowered, the bench's
+    correlation 0.212 to 0.223 (20 cases better, 2 by under 0.005 worse). A taller building
+    right behind a wall, seen over it, is taken for the wall (the classes cannot tell them)."""
+    origin = np.asarray(origin, float)
+    heights = np.arange(ground + 2.0, ground + TOP_HIGHEST_M, TOP_DZ_M)
+    # who hides whom: walls as tall as can be (their fitted tops are often too low: measured with
+    # them, rays passing over a nearer wall read what stands behind it, 0.223 to 0.203)
+    prisms = _prisms(walls, ground, [ground + TOP_HIGHEST_M] * len(walls))
+    found = []
+    for i, wall in enumerate(walls):
+        a, b = np.asarray(wall.a, float), np.asarray(wall.b, float)
+        n = max(1, int(np.linalg.norm(b - a) / TOP_STEP_M))
+        on = a + np.outer((np.arange(n) + 0.5) / n, b - a)  # each column's foot
+        points = np.column_stack([np.repeat(on, len(heights), axis=0), np.tile(heights, n)])
+        rays = points - origin
+        rays /= np.linalg.norm(rays, axis=1, keepdims=True)
+        kinds = kind_at(rays)
+        if not np.any(kinds == SKY):  # no sky to top it at (not segmented: all building)
+            found.append(wall)
+            continue
+        _, met = prisms.hit(origin, rays)  # this wall first: not hidden by a nearer one
+        kinds = np.where(met == i, kinds, UNSEEN).reshape(n, len(heights))
+        tops = [t for column in kinds if (t := _skyline(column, heights)) is not None]
+        found.append(
+            replace(wall, top=float(np.median(tops))) if len(tops) >= TOP_COLUMNS else wall
+        )
+    return found
+
+
+def _skyline(column: np.ndarray, heights: np.ndarray) -> float | None:
+    """Where one column (what is seen, bottom up) goes from building to sky: the last building
+    with the next two heights sky (unseen between: where it changes is not known); None if it
+    does not."""
+    built = np.flatnonzero(column == BUILT)
+    if not len(built) or column[built[-1] + 1 : built[-1] + 3].tolist() != [SKY, SKY]:
+        return None
+    return float(heights[built[-1]] + TOP_DZ_M / 2)
 
 
 def _linked(walls: list[Wall]) -> list[Wall]:
@@ -440,9 +496,7 @@ def cast(scene: Scene, directions: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     or NOTHING. (A wall is met above the street, so before it.)"""
     origin = np.asarray(scene.origin, float)
     d = np.asarray(directions, float)
-    edges = [(*w.a, *w.b, scene.ground, w.top) for w in scene.walls]
-    blocks = Blocks(np.array(edges, float).reshape(-1, 6), np.ones(len(edges), bool))
-    points, met = blocks.hit(origin, d)
+    points, met = _prisms(scene.walls, scene.ground, [w.top for w in scene.walls]).hit(origin, d)
     metres = np.linalg.norm(points - origin, axis=1)
     with np.errstate(divide="ignore", invalid="ignore"):
         street = (scene.ground - origin[2]) / d[:, 2]
@@ -451,6 +505,12 @@ def cast(scene: Scene, directions: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     down = none & (d[:, 2] < 0) & (street > 0) & (street <= STREET_REACH_M)
     metres[down], met[down] = street[down], GROUND
     return metres, met
+
+
+def _prisms(walls, ground: float, tops: list[float]) -> Blocks:
+    """The walls as Blocks' prisms, from the street to their `tops`."""
+    edges = [(*w.a, *w.b, ground, top) for w, top in zip(walls, tops, strict=True)]
+    return Blocks(np.array(edges, float).reshape(-1, 6), np.ones(len(edges), bool))
 
 
 def in_view(scene: Scene, view: ViewOf, side: int) -> np.ndarray:
@@ -470,12 +530,12 @@ def with_drawn(
     drawn without its top takes that of the fitted walls it replaces (fitted again, it follows
     them), else DRAWN_ABOVE_M over the street (`ground`)."""
 
-    def topped(w: Wall) -> Wall:
+    def with_top(w: Wall) -> Wall:
         tops = [f.top for f in fitted if _left_of(f, (w.a, w.b), 0.0) != [f]]
         return w if w.top is not None else replace(w, top=max(tops, default=ground + DRAWN_ABOVE_M))
 
     left = _uncovered(fitted, [(w.a, w.b) for w in drawn])
-    return [topped(w) for w in drawn] + _uncovered(left, removed, REMOVED_MARGIN_M)
+    return [with_top(w) for w in drawn] + _uncovered(left, removed, REMOVED_MARGIN_M)
 
 
 def _uncovered(walls: list[Wall], covering: list[Segment], margin: float = 0.0) -> list[Wall]:

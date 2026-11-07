@@ -22,7 +22,8 @@ from flaneur.sources import write_atomic
 
 MODEL = "facebook/mask2former-swin-large-mapillary-vistas-semantic"
 STRUCTURE = ("Building", "Wall", "Bridge", "Tunnel")  # what a wall may stand on
-KEPT = 16  # panoramas' masks kept in memory (a scene reads its own once per neighbour)
+UNSEEN, BUILT, SKY, OTHER = 0, 1, 2, 3  # what a ray sees in a panorama's views (see seen)
+KEPT = 16  # panoramas' kinds kept in memory (a scene reads its own once per neighbour)
 _AXES = np.array([match._view_axes(h, match.VIEW_PITCH) for h in match.VIEW_HEADINGS])
 
 
@@ -44,10 +45,13 @@ def at_rays(maps: np.ndarray, rays: np.ndarray, outside=0) -> np.ndarray:
     return found
 
 
-def on_structure(masks: np.ndarray | None, rays: np.ndarray) -> np.ndarray:
-    """Whether each ray falls on a building (`masks`: per view, True on structure; see
-    at_rays); every ray, without masks."""
-    return np.ones(len(rays), bool) if masks is None else at_rays(masks, rays, False)
+def seen(kinds: np.ndarray | None, rays: np.ndarray) -> np.ndarray:
+    """What each ray sees (`kinds`: per view, BUILT, SKY or OTHER; see Segmenter.kinds), UNSEEN
+    outside every view. Without kinds, BUILT for every ray: as before segmentation (every
+    detail kept, no sky to top a wall at)."""
+    if kinds is None:
+        return np.full(len(rays), BUILT, np.int8)
+    return at_rays(kinds, rays, UNSEEN)
 
 
 class _NotRead(Exception):
@@ -81,22 +85,26 @@ class Segmenter:
     ):
         self.folder, self.lock, self.name, self.make = folder, lock, name, make
         self.loaded = None
-        self._kept = functools.lru_cache(maxsize=KEPT)(self._masks)
+        self._kept = functools.lru_cache(maxsize=KEPT)(self._kinds)
 
-    def masks(self, panorama: match.Panorama) -> np.ndarray | None:
-        """Where the panorama's views show a building, a wall, a bridge or a tunnel; None if
-        its picture cannot be read (asked again next time)."""
+    def kinds(self, panorama: match.Panorama) -> np.ndarray | None:
+        """What each pixel of the panorama's views shows: BUILT (a building, a wall, a bridge, a
+        tunnel), SKY or OTHER; None if its picture cannot be read (asked again next time)."""
         try:
             return self._kept(panorama)
         except _NotRead:
             return None
 
-    def _masks(self, panorama: match.Panorama) -> np.ndarray:
+    def _kinds(self, panorama: match.Panorama) -> np.ndarray:
         classes, labels = self.classes(panorama)
-        structure = np.flatnonzero(np.isin(labels, STRUCTURE))
-        if not len(structure):  # a model naming them otherwise: every detail would go
+        names = np.array(labels)
+        structure = np.isin(names, STRUCTURE)
+        if not structure.any():  # a model naming them otherwise: every detail would go
             raise ValueError(f"aucune des classes {STRUCTURE} dans le modèle {MODEL}")
-        return np.isin(classes, structure)
+        kinds = np.full(len(names), OTHER, np.int8)
+        kinds[structure] = BUILT
+        kinds[names == "Sky"] = SKY
+        return kinds[classes]
 
     def kept(self, panorama: match.Panorama) -> bool:
         """Whether the panorama's classes are kept, made by the model."""

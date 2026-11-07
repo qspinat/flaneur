@@ -6,7 +6,7 @@ import pytest
 import typer
 from typer.testing import CliRunner
 
-from flaneur import cli, confirming, depth, facades, match
+from flaneur import cli, confirming, depth, facades, match, segment
 from flaneur.cli import app
 
 
@@ -116,7 +116,7 @@ def _units(v: np.ndarray) -> np.ndarray:
     return v / np.linalg.norm(v, axis=1, keepdims=True)
 
 
-def _scenes(monkeypatch, tmp_path, garbled: frozenset = frozenset(), seen_on=None):
+def _scenes(monkeypatch, tmp_path, garbled: frozenset = frozenset(), seen=None):
     """Scenes around a panorama with a neighbour beside it (and one too far), their matches
     the street's two facades seen from each (those with a neighbour `garbled`, at random); and
     the pairs matched."""
@@ -142,7 +142,7 @@ def _scenes(monkeypatch, tmp_path, garbled: frozenset = frozenset(), seen_on=Non
         lambda x, y: [],
         tmp_path / "w.jsonl",
         tmp_path / "pairs",
-        seen_on=seen_on,
+        seen=seen,
     )
     return asked, scenes, home
 
@@ -252,10 +252,39 @@ def test_a_neighbour_whose_pictures_cannot_be_read_is_tried_again(monkeypatch, t
 
 def test_only_details_seen_on_buildings_make_walls(monkeypatch, tmp_path):
     def west_only(panorama, rays):  # the left facade (x = -4) a building, the right one trees
-        return rays[:, 0] < 0
+        return np.where(rays[:, 0] < 0, segment.BUILT, segment.OTHER)
 
-    _, scenes, _ = _scenes(monkeypatch, tmp_path, seen_on=west_only)
+    _, scenes, _ = _scenes(monkeypatch, tmp_path, seen=west_only)
 
     found = scenes.scene("home", None)
 
     assert len(found.walls) == 1 and found.walls[0].a[0] < 0
+
+
+def test_walls_are_topped_where_the_home_sees_the_sky(monkeypatch, tmp_path):
+    def skyline(panorama, rays):  # both faces (x = ±4) building up to 12 m, the sky above
+        z = 4.0 / np.abs(rays[:, 0]) * rays[:, 2]
+        return np.where(z <= 12.0, segment.BUILT, segment.SKY)
+
+    _, scenes, _ = _scenes(monkeypatch, tmp_path, seen=skyline)
+
+    found = scenes.scene("home", None)
+
+    assert len(found.walls) == 2 and all(w.top == pytest.approx(12.0, abs=0.3) for w in found.walls)
+
+
+def test_a_failing_model_is_asked_once_and_the_walls_made_as_before(monkeypatch, tmp_path):
+    asked = []
+
+    def failing(self, panorama):
+        asked.append(panorama.id)
+        raise RuntimeError("not fetched")
+
+    monkeypatch.setattr(segment.Segmenter, "kinds", failing)
+    seen = cli._seeing(make=True)
+    panorama = match.Panorama("p", 0.0, 0.0, 0.0, 0.0, tmp_path / "p.jpg")
+    rays = np.array([[1.0, 0.0, 0.0]])
+
+    found = [seen(panorama, rays).tolist() for _ in range(3)]
+
+    assert asked == ["p"] and found == [[segment.BUILT]] * 3
