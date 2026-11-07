@@ -110,42 +110,73 @@ def test_panoramas_fixed_by_colmap_are_told_apart():
 
 LEFT = [[-4.0, y, z] for y in np.arange(2.0, 40.0, 0.5) for z in (-1.0, 3.0, 8.0)]
 STREET = np.array(LEFT + [[4.0, y, z] for _, y, z in LEFT])  # two facades along y
-METRES = np.linalg.norm(STREET, axis=1)
 
 
-def _scenes(monkeypatch, tmp_path):
-    """Scenes around a panorama with a neighbour beside it (and one too far), every view's
-    matches with it being the street's two facades; and the matches asked."""
+def _units(v: np.ndarray) -> np.ndarray:
+    return v / np.linalg.norm(v, axis=1, keepdims=True)
+
+
+def _scenes(monkeypatch, tmp_path, garbled: frozenset = frozenset()):
+    """Scenes around a panorama with a neighbour beside it (and one too far), their matches
+    the street's two facades seen from each (those with a neighbour `garbled`, at random); and
+    the pairs matched."""
     home = match.Panorama("home", 0.0, 0.0, 0.0, 0.0, tmp_path / "h.jpg")
     beside = match.Panorama("beside", 2.0, 1.0, 0.0, 0.0, tmp_path / "b.jpg")  # in the street
     far = match.Panorama("far", 40.0, 0.0, 0.0, 0.0, tmp_path / "f.jpg")
     asked = []
 
-    def triangulated(a, b, views, only):
-        asked.append((a.id, b.id, tuple(only)))
-        return STREET / METRES[:, None], METRES
+    def matched(a, b, views):
+        asked.append((a.id, b.id))
+        seen_b = _units(STREET - [b.x, b.y, b.z])
+        if b.id in garbled:
+            seen_b = _units(np.random.default_rng(0).normal(size=STREET.shape))
+        return _units(STREET - [a.x, a.y, a.z]), seen_b
 
-    monkeypatch.setattr(depth, "triangulated", triangulated)
+    monkeypatch.setattr(depth, "matched", matched)
     spheres = [home, beside, far]
     scenes = cli._Scenes(
-        spheres, set(), lambda: None, threading.Lock(), lambda x, y: [], tmp_path / "w.jsonl"
+        spheres,
+        set(),
+        lambda: None,
+        threading.Lock(),
+        lambda x, y: [],
+        tmp_path / "w.jsonl",
+        tmp_path / "pairs",
     )
     return asked, scenes, home
 
 
-def test_scenes_match_each_view_with_a_neighbour_once_and_keep_the_walls(monkeypatch, tmp_path):
+def test_scenes_match_each_neighbour_once_and_keep_the_walls(monkeypatch, tmp_path):
     asked, scenes, _ = _scenes(monkeypatch, tmp_path)
 
     first = scenes.scene("home", None)
     again = scenes.scene("home", None)
     chosen = scenes.scene("home", ("beside",))
 
-    assert len(asked) == len(match.VIEW_HEADINGS)  # all around, once each
+    assert asked == [("home", "beside")]  # the one 2-15 m off, once
     assert again == first
     assert len(first.walls) == 2
     assert first.neighbours == ("beside",) and first.chosen is None
     assert chosen.walls == first.walls and chosen.chosen == ("beside",)  # the same matches
     assert scenes.scene("nowhere", None) is None
+
+
+def test_a_pair_s_matches_are_kept_on_disk(monkeypatch, tmp_path):
+    asked, scenes, _ = _scenes(monkeypatch, tmp_path)
+    scenes.scene("home", None)
+
+    _, again, _ = _scenes(monkeypatch, tmp_path)  # the page started again
+    found = again.scene("home", None)
+
+    assert asked == [("home", "beside")] and len(found.walls) == 2
+
+
+def test_a_neighbour_that_cannot_be_set_right_gives_no_walls(monkeypatch, tmp_path):
+    _, scenes, _ = _scenes(monkeypatch, tmp_path, garbled=frozenset({"beside"}))
+
+    found = scenes.scene("home", None)
+
+    assert found.walls == () and found.neighbours == ()
 
 
 def _square(x0: float, x1: float) -> dict:
@@ -170,16 +201,16 @@ def test_walls_drawn_change_the_scene_without_matching_again(monkeypatch, tmp_pa
     facades.record(tmp_path / "w.jsonl", "home", [], [(left.a, left.b)])
 
     assert len(scenes.scene("home", None).walls) == len(fitted.walls) - 1
-    assert len(asked) == len(match.VIEW_HEADINGS)
+    assert asked == [("home", "beside")]
 
 
 def test_neighbours_chosen_by_hand_are_matched_however_far(monkeypatch, tmp_path):
     asked, scenes, _ = _scenes(monkeypatch, tmp_path)
 
-    found = scenes.scene("home", ("far",))  # 40 m off: never picked by geometry
+    found = scenes.scene("home", ("far",))  # 40 m off: never a candidate
 
     assert found.neighbours == ("far",)
-    assert len(asked) == len(match.VIEW_HEADINGS)
+    assert asked == [("home", "far")]
 
 
 def test_walls_drawn_give_a_scene_where_no_neighbour_is_matched(monkeypatch, tmp_path):
@@ -198,3 +229,21 @@ def test_no_neighbour_chosen_matches_none(monkeypatch, tmp_path):
     found = scenes.scene("home", ())  # all left out by hand: only walls drawn
 
     assert found.neighbours == () and found.chosen == () and not asked
+
+
+def test_a_neighbour_whose_pictures_cannot_be_read_is_tried_again(monkeypatch, tmp_path):
+    asked, scenes, _ = _scenes(monkeypatch, tmp_path)
+    real = depth.matched
+    unread = [True]
+
+    def flaky(a, b, views):  # its pictures not read the first time
+        if unread.pop() if unread else False:
+            asked.append((a.id, b.id))
+            return np.empty((0, 3)), np.empty((0, 3))
+        return real(a, b, views)
+
+    monkeypatch.setattr(depth, "matched", flaky)
+    first = scenes.scene("home", None)
+    again = scenes.scene("home", None)
+
+    assert first.neighbours == () and again.neighbours == ("beside",)

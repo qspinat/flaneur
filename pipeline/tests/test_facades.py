@@ -250,12 +250,34 @@ def test_a_line_kept_for_the_details_of_one_dropped_is_fitted_to_them():
 def test_a_facade_seen_as_a_thick_band_is_one_wall():
     rng = np.random.default_rng(5)
     band = np.column_stack(
-        [4.0 + rng.uniform(-0.4, 0.4, 2000), rng.uniform(2, 58, 2000), rng.uniform(-2, 11, 2000)]
+        [4.0 + rng.uniform(-0.25, 0.25, 2000), rng.uniform(2, 58, 2000), rng.uniform(-2, 11, 2000)]
     )
 
     walls = facades.fit(band, GROUND)
 
-    assert len(walls) == 1  # details spread ±0.4 m across it: one facade, not slivers
+    assert len(walls) == 1  # details spread ±0.25 m across it: one facade, not slivers
+
+
+def test_a_far_facade_seen_as_a_wider_band_is_one_wall():
+    rng = np.random.default_rng(5)
+    far = np.column_stack(  # 30 m off: its details spread 2 cm a metre of distance either side
+        [30.0 + rng.uniform(-0.6, 0.6, 3000), rng.uniform(-20, 20, 3000), rng.uniform(-2, 11, 3000)]
+    )
+
+    walls = facades.fit(far, GROUND, origin=np.zeros(3))
+
+    assert len(walls) == 1
+
+
+def test_a_column_of_details_makes_no_wall():
+    rng = np.random.default_rng(7)
+    trunk = np.column_stack(  # a tree's trunk or a lamp post, 5 m off: details all up it
+        [5.0 + rng.normal(0, 0.1, 400), 5.0 + rng.normal(0, 0.1, 400), rng.uniform(-2, 8, 400)]
+    )
+
+    walls = facades.fit(np.vstack([trunk, _street()]), GROUND, origin=np.zeros(3))
+
+    assert not [w for w in walls if np.hypot(*(np.add(w.a, w.b) / 2 - 5.0)) < 2]
 
 
 def test_walls_crossing_each_other_keep_the_one_with_more_details():
@@ -280,3 +302,75 @@ def test_walls_meeting_at_a_corner_are_both_kept():
     walls = facades.fit(np.vstack([side, end]), GROUND)
 
     assert len(_found(walls, 0, 4.0)) == 1 and len(_found(walls, 90, 30.0)) == 1
+
+
+def _side_street() -> np.ndarray:
+    """A side street 5 m wide going west from x = -2 (facades at y = ±2.5, its far end at
+    x = -40), and a column of details a metre inside each of its corners, on the line x = -2
+    (pillars, drainpipes)."""
+    xs, zs = np.arange(-40.0, -3.0, 0.5), np.arange(-2.0, 8.0, 0.5)
+    sides = [[x, y, z] for y in (-2.5, 2.5) for x in xs for z in zs]
+    end = [[-40.0, y, z] for y in np.arange(-2.0, 2.5, 0.5) for z in zs]
+    corners = [[-2.0, y, z] for y in (-1.5, 1.5) for z in np.arange(-2.0, 10.0, 0.25)]
+    return np.array(sides + end + corners)
+
+
+def _across_mouth(walls) -> list[facades.Wall]:
+    """The walls standing across the side street's mouth (on x = -2, spanning y = 0)."""
+    return [
+        w
+        for w in walls
+        if abs(w.a[0] + 2) < 0.5
+        and abs(w.b[0] + 2) < 0.5
+        and min(w.a[1], w.b[1]) < 0 < max(w.a[1], w.b[1])
+    ]
+
+
+MOUTH = [((-2.0, -4.0), (-2.0, 4.0))]  # BD TOPO's outline, closed across the side street
+
+
+def test_a_wall_the_camera_sees_through_is_carved_away():
+    points = _side_street()
+
+    blind = facades.fit(points, GROUND, MOUTH)
+    seeing = facades.fit(points, GROUND, MOUTH, origin=np.array([4.0, 0.0, 0.0]))
+
+    assert _across_mouth(blind)  # the corners alone make a wall across the street
+    assert not _across_mouth(seeing)  # but the street's far end is seen through it
+
+
+def test_walls_the_camera_does_not_see_through_are_kept_whole():
+    points = _side_street()
+
+    seeing = facades.fit(points, GROUND, MOUTH, origin=np.array([4.0, 0.0, 0.0]))
+
+    for side in (-2.5, 2.5):
+        along = [w for w in seeing if abs(w.a[1] - side) < 0.3 and abs(w.b[1] - side) < 0.3]
+        assert along and max(abs(w.a[0] - w.b[0]) for w in along) > 30
+
+
+def test_a_short_wall_standing_alone_is_dropped():
+    lone = facades.Wall((10.0, 10.0), (10.0, 13.0), 8.0, "fitted")  # a tree's crown, alone
+    street = facades.Wall((-4.0, 0.0), (-4.0, 40.0), 12.0, "fitted")
+
+    assert facades._linked([street, lone]) == [street]
+
+
+def test_a_short_wall_meeting_another_is_kept():
+    street = facades.Wall((-4.0, 0.0), (-4.0, 40.0), 12.0, "fitted")
+    corner = facades.Wall((-4.5, 40.5), (-8.0, 40.5), 12.0, "fitted")  # round the corner
+
+    assert facades._linked([street, corner]) == [street, corner]
+
+
+def test_a_long_wall_standing_alone_is_kept():
+    alone = facades.Wall((10.0, 0.0), (10.0, 20.0), 12.0, "fitted")
+
+    assert facades._linked([alone]) == [alone]
+
+
+def test_a_short_wall_crossing_a_facade_away_from_its_ends_is_not_linked_to_it():
+    street = facades.Wall((-4.0, 0.0), (-4.0, 40.0), 12.0, "fitted")
+    across = facades.Wall((-6.5, 20.0), (-1.5, 20.0), 8.0, "fitted")  # foliage, across its middle
+
+    assert facades._linked([across, street]) == [street]
