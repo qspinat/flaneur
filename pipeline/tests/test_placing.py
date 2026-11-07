@@ -8,7 +8,7 @@ import numpy as np
 import pytest
 from shapely.geometry import Point
 
-from flaneur import facades, match, placing, placings, registration
+from flaneur import depth, facades, match, placing, placings, registration
 from flaneur.gazetteer import to_degrees, to_metres
 from flaneur.registration import ViewOf
 
@@ -49,6 +49,8 @@ def page(tmp_path):
         tmp_path / "placings.jsonl",
         lambda *_: {"registration": proposal, "carried_from": None},
     )
+    by_id = lambda i: next(p for p in sources.spheres if p.id == i)  # noqa: E731
+    sources.pair = lambda home, other: depth.Pair(np.eye(3), placing._at(by_id(other)))  # as placed
     return sources, proposal
 
 
@@ -973,6 +975,7 @@ def test_walls_drawn_and_removed_are_saved_for_the_panorama(page, one, tmp_path)
     body = {
         "photo_id": "pm:1",
         "panorama": "p1",
+        "heading": 0.0,
         "drawn": [_wall(sphere, 0, -3.8, 40, -3.8) | {"top": 15.0}, _wall(sphere, 50, -5, 50, 5)],
         "removed": [_wall(sphere, 0, 4, 40, 4)],
     }
@@ -1174,21 +1177,22 @@ def test_walls_shown_say_which_are_the_panorama_s_own(page, one, tmp_path):
     assert [w["mine"] for w in json.loads(answer)["walls"]] == [None, 0]  # fitted; drawn here
 
 
-def test_the_neighbour_shown_beside_is_the_best_by_geometry_the_way_the_view_looks(page, one):
+def test_the_neighbour_shown_beside_is_the_one_giving_most_where_the_view_looks(page, one):
     sources, _ = page
     sphere = sources.spheres[0]
-    east = _beside(sources, sphere)  # 3 m east
+    _beside(sources, sphere)
     north = match.Panorama("p3", sphere.x, sphere.y + 6.0, sphere.z, 198.0, sphere.path)
     sources.spheres.append(north)
     scene = dataclasses.replace(_street(sphere)[4], neighbours=("p2", "p3"))
+    asked = []
     sources.scene = lambda panorama, chosen: scene
-    body = {"photo_id": "pm:1", "panorama": "p1"}
+    sources.aimed = lambda panorama, neighbours, heading, fov: asked.append(heading) or ["p3", "p2"]
 
-    _, facing_north = one(sources, "POST", "/api/depth", body | {"heading": 0.0})
-    _, facing_east = one(sources, "POST", "/api/depth", body | {"heading": 90.0})
+    _, found = one(
+        sources, "POST", "/api/depth", {"photo_id": "pm:1", "panorama": "p1", "heading": 90.0}
+    )
 
-    assert json.loads(facing_north)["best"] == east.id  # across the line of sight
-    assert json.loads(facing_east)["best"] == north.id
+    assert json.loads(found)["best"] == "p3" and asked == [90.0]
 
 
 def test_an_answer_in_parallax_with_no_neighbour_chosen_is_saved(page, one):
@@ -1289,3 +1293,26 @@ def test_a_second_click_whose_rays_cross_behind_a_panorama_says_so(page, one):
     status, reason = one(sources, "POST", "/api/second", body)
 
     assert status == 400 and "derrière" in reason.decode()
+
+
+def test_a_second_click_in_a_neighbour_that_cannot_be_set_right_is_refused(page, one):
+    sources, _ = page
+    sphere = sources.spheres[0]
+    other = _beside(sources, sphere)
+    sources.pair = lambda home, neighbour: None
+
+    status, reason = one(sources, "POST", "/api/second", _second(sphere, other, 6))
+
+    assert status == 400 and "ne s'accorde pas" in reason.decode()
+
+
+def test_walls_asked_without_a_heading_show_their_first_neighbour(page, one):
+    sources, _ = page
+    sphere = sources.spheres[0]
+    _beside(sources, sphere)
+    scene = dataclasses.replace(_street(sphere)[4], neighbours=("p2",))
+    sources.scene = lambda panorama, chosen: scene
+
+    status, found = one(sources, "POST", "/api/depth", {"photo_id": "pm:1", "panorama": "p1"})
+
+    assert status == 200 and json.loads(found)["best"] == "p2"

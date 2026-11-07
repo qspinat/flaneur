@@ -250,7 +250,7 @@ let fitting = 0;         // the latest fit asked for (an older one coming back i
 let deepened = null;     // the walls last asked for (panorama|neighbours chosen|heading)
 let scene = null;        // the walls around the panorama shown (see /api/depth): fitted, drawn
                          // (`mine`: those drawn and removed here, as saved), BD TOPO's facades
-const choices = {};      // the neighbours chosen by hand, by panorama (none: by their geometry)
+const choices = {};      // the neighbours chosen by hand, by panorama (none: those 2–15 m off)
 let tool = null;         // what a click on the map does with parallax on: 'neighbours', 'walls'
 let drawing = false;     // walls: two clicks draw one (else a click chooses one, or takes a facade)
 let snap = false;        // walls: an end drawn goes to BD TOPO's nearest corner within 3 m
@@ -987,7 +987,7 @@ $('tab-neighbours').addEventListener('click', () => toggleTool('neighbours'));
 $('tab-walls').addEventListener('click', () => toggleTool('walls'));
 $('tint').addEventListener('change', () => { if ($('tint').checked !== tinted) toggleTint(); });
 $('apply-neighbours').addEventListener('click', applyNeighbours);
-$('automatic').addEventListener('click', async () => {  // back to those picked by their geometry
+$('automatic').addEventListener('click', async () => {  // back to those picked by the server
   if (at < 0) return;
   const chosen = near[at].id in choices;
   delete choices[near[at].id]; draft = null;

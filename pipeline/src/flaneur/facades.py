@@ -28,29 +28,38 @@ NOTHING = -2  # nothing known: the sky, or beyond the walls
 
 GROUND_BAND_M = 0.3  # details this close above the street are the street
 STREET_REACH_M = 50.0  # a ray meets the street this far at most (beyond: nearly level, unsure)
-MOST_POINTS = 4000
+MOST_POINTS = 12000  # the details a fit is made from, at most (fewer: its draws vary)
 SAMPLES = 300  # pairs of details proposing a line
 PAIR_M = (1.0, 20.0)  # how far apart a pair's details stand
 NEAREST = 48  # a pair's second detail is among the nearest of those far enough (on the plan)
 CANDIDATE_BAND_M = 1.0  # how far off BD TOPO's facades may be: where their details are looked for
 MIN_WALL_POINTS = 15
-INLIER_M = 0.5  # details triangulated spread this far across a facade (measured: ±0.5 m)
+INLIER_M = 0.3  # details spread this far across a facade (measured 2026-11-07, pairs set
+# right: 80 % within 0.2 m under 10 m away, 0.35 at 10-20, 0.5 at 20-30; a band widening with
+# distance agreed worse with the panoramas: 0.19 against 0.21)
 SAME_DEG = 3.0  # lines closer than this (and INLIER_M) are one
+LINES_MERGED_M = 2 * INLIER_M  # and fitted lines this close: one facade's spread split in two
 OUTLIER_COST = 4.0  # a detail on no wall costs as one 2 × INLIER_M off a wall
 SMOOTH = 0.5  # per near neighbour given another line
 NEIGHBOURS = 8
 NEIGHBOUR_M = 1.5
 SWEEPS = 5
 WALL_COST = 20.0  # the price of a wall kept, at least (more than OUTLIER_COST: it holds details)
-WALL_SHARE = 0.06  # and this much a detail fitted: many details, no slivers along one facade
+WALL_SHARE = 0.03  # and this much a detail fitted: many details, no slivers along one facade
 ROUNDS = 10
 GAP_M = 6.0  # a wall's details further apart than this along it: two walls (a side street)
 RUN_SPACINGS = 5  # a detail counts toward a wall with RUN_COUNT others this many of its
 RUN_COUNT = 2  # line's usual spacings away (at least RUN_LEAST_M)
 RUN_LEAST_M = 0.5
+MIN_SPAN_M = 2.0  # a wall's details spread this far along it at least (not a trunk, a post)
 EXTENT_M = 1.0  # a wall reaches this far past its outer details
 ABOVE_M = 1.0  # and this far above its high ones
+SEEN_STEP_M = 0.5  # a wall is weighed against the details seen through it, step by step
+SEEN_RATIO = 2.0  # a stretch is seen through when more details lie beyond it, seen across it,
+SEEN_LEAST = 5  # than SEEN_RATIO its own plus SEEN_LEAST (over a step and its two neighbours)
+BEYOND_M = 1.0  # beyond: this far behind the wall, not in a window's recess
 CORNER_M = 2.0  # walls meeting this near an end meet at a corner; farther in, they cross
+LONE_M = 6.0  # a wall shorter than this, its ends CORNER_M from any other: a tree, a kiosk
 CROSS_DEG = 20.0
 OVERLAP_DEG = 20.0  # a drawn or removed wall replaces the stretch of a wall this close in angle
 OVERLAP_M = 1.5  # and to its line, alongside it
@@ -93,12 +102,16 @@ def fit(
     ground: float,
     candidates: list[Segment] = (),
     seed: int = 0,
+    origin: np.ndarray | None = None,
 ) -> list[Wall]:
     """The walls along today's details (n × 3, Lambert-93 and height), those on the street left
     out; BD TOPO's facade segments (`candidates`) proposed beside the lines details suggest,
-    kept only where details agree."""
+    kept only where details agree. Seen from a camera at `origin` (the details are what it
+    sees): the stretches of walls it sees through are taken off before walls crossing better
+    held ones are dropped (see _seen_through)."""
     points = points[np.isfinite(points).all(axis=1)]
     points = points[points[:, 2] > ground + GROUND_BAND_M]
+    seen = points  # all of them, before a sample is drawn
     rng = np.random.default_rng(seed)
     if len(points) > MOST_POINTS:
         points = points[rng.choice(len(points), MOST_POINTS, replace=False)]
@@ -117,6 +130,8 @@ def fit(
         along = np.array([-normal[1], normal[0]])
         t, heights = xy[mine] @ along, points[mine, 2]
         for part in _stretches(t):
+            if np.ptp(t[part]) < MIN_SPAN_M:
+                continue
             a, b = (
                 tuple((centre + normal * offset + along * x).tolist())
                 for x in (t[part].min() - EXTENT_M, t[part].max() + EXTENT_M)
@@ -124,7 +139,73 @@ def fit(
             top = float(np.percentile(heights[part], 95)) + ABOVE_M
             found.append((len(part), Wall(a, b, top, "fitted")))
     found.sort(key=lambda f: f[0], reverse=True)  # the best held first (stable for ties)
-    return _uncrossed([w for _, w in found])
+    walls = [w for _, w in found]
+    if origin is not None:  # each wall's pieces keep its rank
+        walls = [piece for w in walls for piece in _seen_through(w, origin, seen, ground)]
+    return _uncrossed(_linked(walls))
+
+
+def _linked(walls: list[Wall]) -> list[Wall]:
+    """The walls less the short ones standing alone (shorter than LONE_M, neither end within
+    CORNER_M of another wall they do not cross: see _cross): facades meet facades, round corners
+    and along streets; trees' crowns and posts stand apart, or across a facade."""
+    lines = [LineString([w.a, w.b]) for w in walls]
+
+    def alone(i: int) -> bool:
+        if lines[i].length >= LONE_M:
+            return False
+        ends = [Point(walls[i].a), Point(walls[i].b)]
+        return not any(
+            min(line.distance(e) for e in ends) <= CORNER_M
+            for j, line in enumerate(lines)
+            if j != i and not _cross(walls[i], walls[j])
+        )
+
+    return [w for i, w in enumerate(walls) if not alone(i)]
+
+
+def _seen_through(wall: Wall, origin: np.ndarray, seen: np.ndarray, ground: float) -> list[Wall]:
+    """The wall less its stretches the camera at `origin` sees through: where more of the
+    details it sees (`seen`) lie beyond them, across them on the plan, between the street and
+    the wall's top, than they hold (measured 2026-11-07: a wall across a street's mouth had 7
+    to 11 times its own details seen through it, facades at most 0.9). What is left, in
+    pieces no shorter than MIN_PIECE_M."""
+    a, b = np.asarray(wall.a, float), np.asarray(wall.b, float)
+    span = b - a
+    length = float(np.linalg.norm(span))
+    along = span / length
+    normal, _ = _through(a, b)
+    o = origin
+    sight = seen[:, :2] - o[:2]
+    with np.errstate(divide="ignore", invalid="ignore"):  # parallel to the wall: no crossing
+        cross = sight[:, 0] * span[1] - sight[:, 1] * span[0]
+        reach = ((a[0] - o[0]) * span[1] - (a[1] - o[1]) * span[0]) / cross  # along the sight
+        at = ((a[0] - o[0]) * sight[:, 1] - (a[1] - o[1]) * sight[:, 0]) / cross  # along it
+        height = o[2] + reach * (seen[:, 2] - o[2])
+    off = np.abs((seen[:, :2] - a) @ normal)
+    through = (reach > 0) & (reach < 1) & (at >= 0) & (at <= 1) & (off > BEYOND_M)
+    through &= (height >= ground) & (height <= wall.top)
+    steps = max(1, int(np.ceil(length / SEEN_STEP_M)))
+    place = (seen[:, :2] - a) @ along / length
+    mine = (off < INLIER_M) & (place >= 0) & (place <= 1)
+
+    def counted(fraction: np.ndarray) -> np.ndarray:
+        found = np.bincount(np.minimum((fraction * steps).astype(int), steps - 1), minlength=steps)
+        return np.convolve(found, np.ones(3), "same")  # a step and its two neighbours
+
+    kept = counted(at[through]) <= SEEN_RATIO * counted(place[mine]) + SEEN_LEAST
+    if kept.all():
+        return [wall]
+    runs = np.split(np.arange(steps), np.flatnonzero(np.diff(kept.astype(int))) + 1)
+    return [
+        replace(
+            wall,
+            a=tuple((a + span * r[0] / steps).tolist()),
+            b=tuple((a + span * (r[-1] + 1) / steps).tolist()),
+        )
+        for r in runs
+        if kept[r[0]] and len(r) * length / steps >= MIN_PIECE_M
+    ]
 
 
 def _uncrossed(walls: list[Wall]) -> list[Wall]:
@@ -197,17 +278,22 @@ def _proposed(xy: np.ndarray, tree: cKDTree, candidates, rng) -> list[Line]:
     return kept
 
 
-def _same(one: Line, other: Line) -> bool:
+def _same(one: Line, other: Line, apart: float = INLIER_M) -> bool:
+    """Whether two lines are one: within SAME_DEG, their offsets within `apart`."""
     turned = float(one[0] @ other[0])
     if abs(turned) < np.cos(np.radians(SAME_DEG)):
         return False
-    return abs(one[1] - np.sign(turned) * other[1]) < INLIER_M
+    return abs(one[1] - np.sign(turned) * other[1]) < apart
 
 
-def _shared(xy: np.ndarray, tree: cKDTree, lines: list[Line]) -> tuple[np.ndarray, list[Line]]:
+def _shared(
+    xy: np.ndarray,
+    tree: cKDTree,
+    lines: list[Line],
+) -> tuple[np.ndarray, list[Line]]:
     """Each detail given to one line or to none (label len(lines)), lines worth less than the
     price of a wall dropped (see _worth_keeping), the others fitted again to their details,
-    round after round."""
+    those then nearly one made one (see _merged), round after round."""
     distances, around = tree.query(xy, k=NEIGHBOURS + 1)
     close = (distances <= NEIGHBOUR_M) & (around != np.arange(len(xy))[:, None])  # not itself
     who = np.nonzero(close)[0]
@@ -218,11 +304,30 @@ def _shared(xy: np.ndarray, tree: cKDTree, lines: list[Line]) -> tuple[np.ndarra
         costs = _costs(xy, lines)
         before, labels = labels, _labelled(costs, graph)
         kept, given = _worth_keeping(costs, labels)  # each kept line fitted to the details it holds
-        stable = len(kept) == len(lines) and np.array_equal(before, labels)
-        lines = [_total_least_squares(xy[given == i]) for i in kept]
+        fitted = _merged(xy, [given == i for i in kept])
+        stable = len(fitted) == len(lines) and np.array_equal(before, labels)
+        lines = fitted
         if stable:
             break
     return _labelled(_costs(xy, lines), graph), lines
+
+
+def _merged(xy: np.ndarray, held: list[np.ndarray]) -> list[Line]:
+    """Lines fitted to the details each holds (`held`: masks), those within SAME_DEG and
+    LINES_MERGED_M of a better held one fitted with it as one: squared costs always favour two lines
+    over one facade's band of details, which is one wall (measured 2026-11-07: 10 to 30 % fewer
+    walls, agreeing with the panoramas as well)."""
+    groups: list[tuple[Line, np.ndarray]] = []
+    for mine in sorted(held, key=lambda m: -int(m.sum())):
+        line = _total_least_squares(xy[mine])
+        for k, (other, theirs) in enumerate(groups):
+            if _same(line, other, LINES_MERGED_M):
+                both = theirs | mine
+                groups[k] = (_total_least_squares(xy[both]), both)
+                break
+        else:
+            groups.append((line, mine))
+    return [line for line, _ in groups]
 
 
 def _costs(xy: np.ndarray, lines: list[Line]) -> np.ndarray:
