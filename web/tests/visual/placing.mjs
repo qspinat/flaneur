@@ -113,6 +113,11 @@ const wallsAround = (lon, lat, panorama, neighbour) => {
     mine: { drawn: [{ a: at(6, 0), b: at(6, 30), top: null }], removed: [] } };
 };
 const asked = { depth: [], parallax: [], standingLaid: 0, answer: null, epipolar: 0, second: null, walls: [], tint: 0 };
+/** A wall as /api/wallsview draws it over the view. */
+const wallsView = (route) => route.fulfill({ json: { walls: [
+  { i: 0, made: 'fitted', foot: [[100, 900], [500, 800]], top: [[100, 300], [500, 400]] }] } });
+/** How many lines are drawn over a page's view (the walls in it). */
+const overView = (opened) => opened.locator('#view-stage .in-view polyline').count();
 let stood = null, here = null;
 const walls = (record) => (route) => {
   const body = route.request().postDataJSON();
@@ -137,8 +142,7 @@ const [deep, pairsAt] = await onPoints({
   '**/api/epipolar': (route) => { asked.epipolar++; return route.fulfill({ json: { line: [[100, 600], [700, 640], [1200, 700]] } }); },
   '**/api/second': (route) => { asked.second = route.request().postDataJSON(); return route.fulfill({ json: { metres: 14.2 } }); },
   '**/api/depthview': (route) => { asked.tint++; return route.fulfill(JPEG); },
-  '**/api/wallsview': (route) => route.fulfill({ json: { walls: [
-    { i: 0, made: 'fitted', foot: [[100, 900], [500, 800]], top: [[100, 300], [500, 400]] }] } }),
+  '**/api/wallsview': wallsView,
   '**/api/composite': (route) => {
     if (route.request().postDataJSON().standing) asked.standingLaid++;
     return route.fulfill(JPEG);
@@ -166,7 +170,7 @@ const drawn = await deep.evaluate(() => [map.getSource('walls').serialize().data
                                          map.getSource('segments').serialize().data.features.length]);
 check(drawn[0] === 2 && drawn[1] === 1, `the walls and BD TOPO's facades are drawn on the map (${drawn})`);
 await deep.waitForTimeout(300);
-const overlaid = await deep.locator('#view-stage .in-view polyline').count();
+const overlaid = await overView(deep);
 check(overlaid >= 3, `the walls are drawn over the view too: foot, top, ends (${overlaid})`);
 check(!(await deep.locator('#third-box').isVisible()), 'pairing keeps two large pictures: the photo and the view');
 await pairsAt(SIX);
@@ -312,6 +316,52 @@ await late.keyboard.press('.');
 await late.waitForTimeout(3500);
 const kept = await late.evaluate(() => scene?.details);
 check(kept !== 111, `walls coming late from the panorama left are not taken for the one shown (${kept})`);
+
+// a panorama left: its walls drawn over the view go with it, even those answered late
+/** A page whose panoramas' walls are drawn over the view at a place of their own (x 100 for the
+ *  first panorama, 300 for the others), the first's answered after `slowFirst` ms, the others'
+ *  depth after `slowNext` ms. */
+async function twoPanoramas(slowFirst, slowNext) {
+  let first = null;
+  const wait = (ms) => new Promise((done) => setTimeout(done, ms));
+  return (await onPoints({
+    '**/api/depth': async (route) => {
+      first ??= route.request().postDataJSON().panorama;
+      if (route.request().postDataJSON().panorama !== first) await wait(slowNext);
+      return route.fulfill({ json: wallsAround(...CENTRE, 'x', 'y') });
+    },
+    '**/api/wallsview': async (route) => {
+      const mine = route.request().postDataJSON().panorama === first, x = mine ? 100 : 300;
+      if (mine) await wait(slowFirst);
+      return route.fulfill({ json: { walls: [
+        { i: 0, made: 'fitted', foot: [[x, 900], [x + 400, 800]], top: [[x, 300], [x + 400, 400]] }] } });
+    },
+  }))[0];
+}
+/** Where the lines over a page's view start (a wall's foot at its place, see twoPanoramas, and
+ *  its ends 400 further). */
+const placesOver = (opened) => opened.evaluate(() => [...document.querySelectorAll('#view-stage .in-view polyline')]
+  .map((l) => l.getAttribute('points').split(',')[0]));
+/** Whether lines come over a page's view within 5 s. */
+const wallsDrawn = (opened) => opened.waitForFunction(
+  () => document.querySelectorAll('#view-stage .in-view polyline').length > 0, null, { timeout: 5000 })
+  .then(() => true, () => false);
+const moving = await twoPanoramas(0, 1000);
+await moving.keyboard.press('p');
+const firstDrawn = await wallsDrawn(moving), atFirst = await placesOver(moving);
+await moving.keyboard.press('.');  // the next panorama, parallax still on, its walls slow to come
+const meanwhile = await placesOver(moving);
+const nextDrawn = await wallsDrawn(moving), atNext = await placesOver(moving);
+const ofFirst = (x) => x === '100' || x === '500';  // its walls' feet and far ends
+check(firstDrawn && atFirst.every(ofFirst) && meanwhile.length === 0 && nextDrawn && !atNext.some(ofFirst),
+  `the walls of the panorama left are not drawn over the next one, whose own come (${atFirst}; ${meanwhile}; ${atNext})`);
+const racing = await twoPanoramas(1500, 0);
+await racing.keyboard.press('p');
+await racing.waitForTimeout(300);  // its walls known, as the view shows them still on their way
+await racing.keyboard.press('.');
+await racing.waitForTimeout(2000);
+const raced = await placesOver(racing);
+check(raced.length > 0 && !raced.some(ofFirst), `the walls of the panorama left, answered late, are not drawn over the next one (${raced})`);
 
 // no depth to be had: the toggle says why
 const [none] = await onPoints({
