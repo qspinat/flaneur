@@ -316,7 +316,7 @@ document.addEventListener('keydown', (event) => {
   }
 });
 
-map.on('load', async () => {
+whenDrawable(map, async () => {
   items = await (await fetch('/api/queue')).json();
   show();
 });

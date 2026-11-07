@@ -30,6 +30,10 @@ check(await page.locator('#pair.on').waitFor({ timeout: 15000 }).then(() => true
 const told = await page.textContent('#message');
 check(!told.includes('F pour'), `and does not send the user away from them (« ${told} »)`);
 check(await page.locator('#fade').isDisabled(), 'and its slider says there is nothing to fade yet');
+check((await page.textContent('#plaque-title')).includes('points'), 'the plaque says the photo is being placed by points');
+const keepButton = page.locator('#actions button.main');
+check(await keepButton.isDisabled() && (await keepButton.getAttribute('title')).includes('paires'),
+  'the keep button waits for the pairs, and says so');
 await page.unroute('**/api/proposal/**');
 
 // every panorama offers a proposal (as matching would), on the photo shown
@@ -38,7 +42,7 @@ await page.route('**/api/proposal/**', (route) => {
   return route.fulfill({ json: { registration: { ...registration, panorama }, carried_from: null } });
 });
 await page.goto(url);
-await page.waitForTimeout(5000);
+await page.waitForFunction(() => typeof photo !== 'undefined' && photo && proposal, null, { timeout: 30000 });
 await page.keyboard.press('f'); // the proposal looks wrong: place it by points
 await page.waitForTimeout(800);
 const photo = await page.locator('#photo').boundingBox();
@@ -105,7 +109,7 @@ const CENTRE = [2.3459, 48.8518];  // the map's, when a test needs a spot
 /** Walls around a spot, as /api/depth sends them: one fitted, one drawn here, BD TOPO's facade. */
 const wallsAround = (lon, lat, panorama, neighbour, place) => {
   const at = (east, north) => [lon + east / (111320 * Math.cos(lat * Math.PI / 180)), lat + north / 111320];
-  return { details: 900, neighbours: [neighbour], best: neighbour, why: '',
+  return { details: 900, ground: 0, neighbours: [neighbour], best: neighbour, why: '',
     candidates: [{ id: neighbour, metres: 4.2, fixed: true, at: place ?? at(4, 0) }],
     walls: [{ a: at(-6, 0), b: at(-6, 30), top: 12, made: 'fitted', at: '', mine: null },
             { a: at(6, 0), b: at(6, 30), top: 20, made: 'drawn', at: panorama, mine: 0 }],
@@ -119,10 +123,13 @@ const wallsView = (route) => route.fulfill({ json: { walls: [
 /** How many lines are drawn over a page's view (the walls in it). */
 const overView = (opened) => opened.locator('#view-stage .in-view polyline').count();
 let stood = null, here = null;
+let echo = false;  // the walls saved sent back as the panorama's own (for undo: each state its own)
 const walls = (record) => (route) => {
   const body = route.request().postDataJSON();
   record.push(body);
-  return route.fulfill({ json: wallsAround(here.lon, here.lat, body.panorama, here.neighbour, here.at) });
+  const json = wallsAround(here.lon, here.lat, body.panorama, here.neighbour, here.at);
+  if (echo && body.drawn) json.mine = { drawn: body.drawn, removed: body.removed };  // as saved
+  return route.fulfill({ json });
 };
 const [deep, pairsAt] = await onPoints({
   '**/api/depth': walls(asked.depth),
@@ -264,6 +271,39 @@ const moved = asked.walls.at(-1);
 check(moved?.drawn?.length === 1 && moved.drawn[0].a[0] !== wallsAround(here.lon, here.lat, '', '').mine.drawn[0].a[0],
   'dragging an end of a wall drawn here moves it');
 check(await deep.locator('.wall-end').count() === 2, 'and it stays chosen, its ends to drag again');
+check(await deep.evaluate(() => document.body.classList.contains('room')) && (await deep.textContent('#plaque-title')).includes('mur'),
+  'the walls tool opens the depth room, the plaque saying a wall is chosen');
+/** Where a point of the view (its 1280-wide drawing) is on the screen. */
+const inViewAt = async ([x, y]) => {
+  const box = await deep.locator('#view-stage svg.in-view').boundingBox();
+  return [box.x + x / 1280 * box.width, box.y + y / 1280 * box.height];
+};
+const [rx, ry] = await inViewAt([300, 350]);  // on the fitted wall's top, as the view draws it
+await deep.mouse.click(rx, ry);
+check(await deep.evaluate(() => selected) === 0, 'a wall clicked in the view is chosen');
+const pairsBeforeRoof = await deep.evaluate(() => pairs.length), beforeRoof = asked.walls.at(-1);
+const mineBefore = await deep.evaluate(() => JSON.stringify([scene.mine.drawn, scene.mine.removed]));
+echo = true;
+await deep.mouse.click(rx, ry);  // a click on its top, no drag: no height saved
+await deep.waitForTimeout(400);
+check(asked.walls.at(-1) === beforeRoof, 'a click on a wall\'s top, without dragging, saves nothing');
+const [, upTo] = await inViewAt([300, 200]);
+await deep.mouse.move(rx, ry); await deep.mouse.down(); await deep.mouse.move(rx, upTo, { steps: 6 }); await deep.mouse.up();
+await deep.waitForTimeout(700);
+const roofed = asked.walls.at(-1);
+check(roofed?.drawn?.some((w) => Math.abs(w.top - 15) < 1e-6) && roofed.removed.length === 1
+  && await deep.evaluate(() => pairs.length) === pairsBeforeRoof,
+  `dragging its top in the view saves its height, as a wall drawn here (${JSON.stringify(roofed?.drawn?.map((w) => w.top))})`);
+await deep.locator('#actions button', { hasText: 'Annuler' }).click();
+await deep.waitForTimeout(700);
+const undone = asked.walls.at(-1);
+check(JSON.stringify([undone?.drawn, undone?.removed]) === mineBefore && undone.drawn.length !== roofed.drawn.length,
+  'undo saves the walls exactly as they stood before the last change');
+echo = false;
+await deep.keyboard.press('Escape');
+check(!(await deep.evaluate(() => document.body.classList.contains('room'))) && await deep.evaluate(() => tool) === null,
+  'Échap leaves the depth room');
+await deep.keyboard.press('w');  // the walls tool again, put away below
 await deep.locator('#tab-walls').click();  // the tool put away
 await deep.locator('#tint').check();
 await deep.waitForTimeout(600);
