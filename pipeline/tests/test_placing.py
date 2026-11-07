@@ -1319,3 +1319,31 @@ def test_walls_asked_without_a_heading_show_their_first_neighbour(page, one):
     status, found = one(sources, "POST", "/api/depth", {"photo_id": "pm:1", "panorama": "p1"})
 
     assert status == 200 and json.loads(found)["best"] == "p2"
+
+
+def test_walls_shown_give_the_street_s_level(page, one):
+    sources, _ = page
+    sphere = sources.spheres[0]
+    scene = _street(sphere)[4]
+    sources.scene = lambda panorama, chosen: scene
+
+    _, answer = one(
+        sources, "POST", "/api/depth", {"photo_id": "pm:1", "panorama": "p1", "heading": 0}
+    )
+
+    assert json.loads(answer)["ground"] == scene.ground  # a wall's height shown over it
+
+
+def test_a_wall_drawn_higher_than_any_is_refused(page, one, tmp_path):
+    sources, _ = page
+    sphere = sources.spheres[0]
+    sources.scene = lambda panorama, chosen: _street(sphere)[4]
+    sources.walls = tmp_path / "walls.jsonl"
+    ground = sphere.z - placing.PANORAMA_HEIGHT_M
+    too_high = ground + placing.HIGHEST_WALL_M + 1
+    body = {"photo_id": "pm:1", "panorama": "p1", "heading": 0.0, "removed": []}
+    body["drawn"] = [_wall(sphere, 0, -3.8, 40, -3.8) | {"top": too_high}]
+
+    status, _ = one(sources, "POST", "/api/walls", body)
+
+    assert status == 400 and not sources.walls.exists()

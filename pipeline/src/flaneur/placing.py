@@ -26,6 +26,7 @@ from flaneur.registration import ViewOf
 from flaneur.sources import number
 
 PAGE = Path(__file__).with_name("placing_page.html")
+HIGHEST_WALL_M = 80.0  # a wall's top, over the street, at most (the page's field says so too)
 NEAR_M = queueing.NEAR_M  # the panoramas offered around a photo's spot (where proposals are made)
 SHOWN = 2 * match.VIEW_SIDE  # a view's side as the page shows it: 1280 px, what 75° of a
 # panorama 6144 px around holds (see Sources.full)
@@ -454,8 +455,8 @@ def _since(sent: dict) -> int:
 def _drawn(sent: dict, ground: float) -> facades.Wall:
     """A wall drawn on the map, with its top if the page gives one (else see with_drawn)."""
     top = sent.get("top") if isinstance(sent, dict) else None
-    if top is not None and not (number(top) and top > ground):
-        raise ValueError("un mur : son haut, au-dessus de la rue")
+    if top is not None and not (number(top) and ground < top <= ground + HIGHEST_WALL_M):
+        raise ValueError(f"un mur : son haut, au-dessus de la rue (au plus {HIGHEST_WALL_M:g} m)")
     top = None if top is None else float(top)
     return facades.Wall(*_ends(sent), top, "drawn", since=_since(sent))
 
@@ -502,8 +503,9 @@ def _walls_shown(
 ) -> dict:
     """A panorama's walls as the page draws them on the map (degrees; a wall drawn, with the
     panorama where it was: the page sends back its own), with BD TOPO's facades near it, the
-    neighbours they were fitted from and how many details; why there are none. A wall drawn at
-    this panorama says where it stands among its own (`own`: by its ends; `mine`, else none)."""
+    neighbours they were fitted from and how many details, the street's level (walls' heights
+    are shown over it); why there are none. A wall drawn at this panorama says where it stands
+    among its own (`own`: by its ends; `mine`, else none)."""
 
     def mine(w: facades.Wall) -> int | None:
         here = w.made == "drawn" and w.at == scene.panorama
@@ -511,6 +513,7 @@ def _walls_shown(
 
     return {
         "details": scene.details,
+        "ground": scene.ground,
         "walls": [
             {
                 "a": _degrees(*w.a),
