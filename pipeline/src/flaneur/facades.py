@@ -34,14 +34,15 @@ PAIR_M = (1.0, 20.0)  # how far apart a pair's details stand
 NEAREST = 48  # a pair's second detail is among the nearest of those far enough (on the plan)
 CANDIDATE_BAND_M = 1.0  # how far off BD TOPO's facades may be: where their details are looked for
 MIN_WALL_POINTS = 15
-INLIER_M = 0.25
+INLIER_M = 0.5  # details triangulated spread this far across a facade (measured: ±0.5 m)
 SAME_DEG = 3.0  # lines closer than this (and INLIER_M) are one
 OUTLIER_COST = 4.0  # a detail on no wall costs as one 2 × INLIER_M off a wall
 SMOOTH = 0.5  # per near neighbour given another line
 NEIGHBOURS = 8
 NEIGHBOUR_M = 1.5
 SWEEPS = 5
-WALL_COST = 20.0  # the price of a wall kept (more than OUTLIER_COST: a wall holds details)
+WALL_COST = 20.0  # the price of a wall kept, at least (more than OUTLIER_COST: it holds details)
+WALL_SHARE = 0.06  # and this much a detail fitted: many details, no slivers along one facade
 ROUNDS = 10
 GAP_M = 6.0  # a wall's details further apart than this along it: two walls (a side street)
 RUN_SPACINGS = 5  # a detail counts toward a wall with RUN_COUNT others this many of its
@@ -49,6 +50,8 @@ RUN_COUNT = 2  # line's usual spacings away (at least RUN_LEAST_M)
 RUN_LEAST_M = 0.5
 EXTENT_M = 1.0  # a wall reaches this far past its outer details
 ABOVE_M = 1.0  # and this far above its high ones
+CORNER_M = 2.0  # walls meeting this near an end meet at a corner; farther in, they cross
+CROSS_DEG = 20.0
 OVERLAP_DEG = 20.0  # a drawn or removed wall replaces the stretch of a wall this close in angle
 OVERLAP_M = 1.5  # and to its line, alongside it
 MIN_PIECE_M = 1.0  # what is left of a wall shorter than this goes too
@@ -108,7 +111,7 @@ def fit(
     if not lines:
         return []
     labels, lines = _shared(xy, tree, lines)
-    walls = []
+    found = []  # each wall and how many details hold it
     for i, (normal, offset) in enumerate(lines):
         mine = labels == i
         along = np.array([-normal[1], normal[0]])
@@ -118,8 +121,34 @@ def fit(
                 tuple((centre + normal * offset + along * x).tolist())
                 for x in (t[part].min() - EXTENT_M, t[part].max() + EXTENT_M)
             )
-            walls.append(Wall(a, b, float(np.percentile(heights[part], 95)) + ABOVE_M, "fitted"))
-    return walls
+            top = float(np.percentile(heights[part], 95)) + ABOVE_M
+            found.append((len(part), Wall(a, b, top, "fitted")))
+    found.sort(key=lambda f: f[0], reverse=True)  # the best held first (stable for ties)
+    return _uncrossed([w for _, w in found])
+
+
+def _uncrossed(walls: list[Wall]) -> list[Wall]:
+    """The walls (the best held first) less those crossing one kept: facades meet at corners,
+    near their ends, never across one another (a line laid across a dense band of details)."""
+    kept: list[Wall] = []
+    for wall in walls:
+        if not any(_cross(wall, other) for other in kept):
+            kept.append(wall)
+    return kept
+
+
+def _cross(one: Wall, other: Wall) -> bool:
+    """Whether two walls cross more than CORNER_M from all their ends, CROSS_DEG apart or more."""
+    p, q = LineString([one.a, one.b]), LineString([other.a, other.b])
+    meet = p.intersection(q)
+    if meet.geom_type != "Point":
+        return False
+    (n, _), (m, _) = (
+        _through(np.asarray(w.a, float), np.asarray(w.b, float)) for w in (one, other)
+    )
+    ends = [Point(x) for x in (one.a, one.b, other.a, other.b)]
+    apart = abs(n @ m) <= np.cos(np.radians(CROSS_DEG))
+    return apart and min(meet.distance(x) for x in ends) > CORNER_M
 
 
 def _through(p: np.ndarray, q: np.ndarray) -> Line:
@@ -176,8 +205,9 @@ def _same(one: Line, other: Line) -> bool:
 
 
 def _shared(xy: np.ndarray, tree: cKDTree, lines: list[Line]) -> tuple[np.ndarray, list[Line]]:
-    """Each detail given to one line or to none (label len(lines)), lines worth less than
-    WALL_COST dropped, the others fitted again to their details, round after round."""
+    """Each detail given to one line or to none (label len(lines)), lines worth less than the
+    price of a wall dropped (see _worth_keeping), the others fitted again to their details,
+    round after round."""
     distances, around = tree.query(xy, k=NEIGHBOURS + 1)
     close = (distances <= NEIGHBOUR_M) & (around != np.arange(len(xy))[:, None])  # not itself
     who = np.nonzero(close)[0]
@@ -218,12 +248,14 @@ def _labelled(costs: np.ndarray, graph: csr_matrix) -> np.ndarray:
 
 
 def _worth_keeping(costs: np.ndarray, labels: np.ndarray) -> tuple[list[int], np.ndarray]:
-    """The lines whose details would cost WALL_COST or more elsewhere, the least worth first;
+    """The lines whose details would cost the price of a wall or more elsewhere (WALL_COST, or
+    WALL_SHARE of a detail for each detail fitted), the least worth first;
     a line dropped gives its details to the best of those left before the next is weighed (two
     lines sharing one facade: the first goes, the second then holds it alone). And the details'
     labels so given."""
     labels = labels.copy()
     standing = np.ones(costs.shape[1], bool)  # the last: none, always there
+    price = max(WALL_COST, WALL_SHARE * len(costs))
 
     def saving(i: int) -> tuple[float, np.ndarray, np.ndarray]:
         mine = labels == i
@@ -234,7 +266,7 @@ def _worth_keeping(costs: np.ndarray, labels: np.ndarray) -> tuple[list[int], np
 
     for i in sorted(range(len(standing) - 1), key=lambda i: saving(i)[0]):
         worth, mine, others = saving(i)
-        if worth < WALL_COST:
+        if worth < price:
             standing[i] = False
             labels[mine] = others[costs[mine][:, others].argmin(axis=1)]
     return np.flatnonzero(standing[:-1]).tolist(), labels

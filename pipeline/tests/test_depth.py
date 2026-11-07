@@ -175,3 +175,20 @@ def test_a_second_click_s_rays_need_not_be_unit():
     metres = depth.meeting(a, 3 * (point - a), b, 0.5 * (point - b))
 
     assert metres == pytest.approx(np.linalg.norm(point))
+
+
+def test_matched_rays_passing_close_but_a_little_askew_give_no_detail():
+    a, b, point = np.zeros(3), np.array([3.0, 0.0, 0.0]), np.array([1.0, 10.0, 0.0])
+    rays_a, rays_b = _unit(point - a)[None], _unit(point + [0, 0, 0.25] - b)[None]  # 0.25 m off
+
+    points, _ = depth._met(a, b, rays_a, rays_b)
+
+    assert len(points) == 0  # within 0.3 m, but 0.7° off its ray: a wrong match
+
+
+def test_a_second_click_a_few_pixels_off_still_gives_its_depth():
+    a, b, point = np.zeros(3), np.array([3.0, 0.0, 0.0]), np.array([1.0, 10.0, 0.0])
+
+    clicked = depth.meeting(a, _unit(point - a), b, _unit(point + [0, 0, 0.1] - b))  # 0.3° off
+
+    assert clicked == pytest.approx(np.linalg.norm(point), abs=0.1)  # a hand is not that sure
