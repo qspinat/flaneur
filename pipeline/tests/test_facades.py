@@ -245,3 +245,38 @@ def test_a_line_kept_for_the_details_of_one_dropped_is_fitted_to_them():
     labels, lines = facades._shared(xy, tree, [same, same])  # the first dropped, the second holds
 
     assert len(lines) == 1 and (labels == 0).all()
+
+
+def test_a_facade_seen_as_a_thick_band_is_one_wall():
+    rng = np.random.default_rng(5)
+    band = np.column_stack(
+        [4.0 + rng.uniform(-0.4, 0.4, 2000), rng.uniform(2, 58, 2000), rng.uniform(-2, 11, 2000)]
+    )
+
+    walls = facades.fit(band, GROUND)
+
+    assert len(walls) == 1  # details spread ±0.4 m across it: one facade, not slivers
+
+
+def test_walls_crossing_each_other_keep_the_one_with_more_details():
+    rng = np.random.default_rng(6)
+    facade = np.column_stack([np.full(900, 4.0), rng.uniform(0, 40, 900), rng.uniform(-2, 11, 900)])
+    t = rng.uniform(0, 1, 120)  # a few details strung across it, 30° off: no facade does that
+    across = np.column_stack(
+        [t * 16 - 4, 10 + t * 16 * np.tan(np.radians(30)), rng.uniform(-2, 11, 120)]
+    )
+
+    walls = facades.fit(np.vstack([facade, across]), GROUND)
+
+    assert len(_found(walls, 0, 4.0)) == 1
+    assert len(walls) == 1
+
+
+def test_walls_meeting_at_a_corner_are_both_kept():
+    rng = np.random.default_rng(7)
+    side = np.column_stack([np.full(600, 4.0), rng.uniform(0, 30, 600), rng.uniform(-2, 11, 600)])
+    end = np.column_stack([rng.uniform(-10, 4, 300), np.full(300, 30.0), rng.uniform(-2, 11, 300)])
+
+    walls = facades.fit(np.vstack([side, end]), GROUND)
+
+    assert len(_found(walls, 0, 4.0)) == 1 and len(_found(walls, 90, 30.0)) == 1

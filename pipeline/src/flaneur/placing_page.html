@@ -46,6 +46,9 @@
   #neighbours .beside[aria-pressed=true] { background: #2f6b4f; border-color: #4caf7a; color: var(--paper); }
   #chosen-wall { margin: 8px 0; padding: 8px; background: #3a352e; border-radius: 4px; }
   #chosen-wall p { margin: 0 0 6px; }
+  #apply-neighbours { font: inherit; background: var(--enamel); color: var(--paper);
+                      border: 1px solid #8fa6c9; border-radius: 3px; padding: 3px 10px; cursor: pointer; }
+  #apply-neighbours:disabled { opacity: 0.4; cursor: default; }
   #remove-wall { font: inherit; background: #8a3b12; color: var(--paper); border: none; border-radius: 3px;
                  padding: 4px 10px; cursor: pointer; }
   .legend { list-style: none; padding: 0; margin: 8px 0 0; display: flex; flex-wrap: wrap; gap: 4px 14px;
@@ -136,7 +139,10 @@
         <p class="lead">Les panoramas dont les détails donnent les murs : cochez-les. « Voir » montre sa
           vue à la place de la photo, pour donner sa profondeur à une paire.</p>
         <ul id="neighbours"></ul>
-        <button id="automatic" class="quiet">Revenir au choix automatique</button>
+        <div class="row">
+          <button id="apply-neighbours" disabled>Refaire les murs avec ces voisins</button>
+          <button id="automatic" class="quiet">Revenir au choix automatique</button>
+        </div>
       </div>
       <div id="pane-walls" class="pane" hidden>
         <p class="lead">Sur le plan, cliquez un mur pour le choisir (le retirer, glisser ses bouts),
@@ -250,6 +256,7 @@ let drawing = false;     // walls: two clicks draw one (else a click chooses one
 let snap = false;        // walls: an end drawn goes to BD TOPO's nearest corner within 3 m
 let drawingFrom = null, selected = null;  // a wall's first end drawn; the wall chosen
 let target = null;       // the pair a click in the neighbour's view gives its depth (none: the last)
+let draft = null;        // the neighbours being ticked, not yet applied (none: as the walls stand)
 let deepening = false;   // the neighbour's view shown in the photo's place, for that pair's depth
 let tinted = false;      // the view tinted by depth (D)
 let third = null;        // the neighbour whose view shows beside, for second clicks
@@ -420,7 +427,7 @@ function setParallax(on, why = '') {
 function dropScene() {
   walling++;  // the walls on their way no longer wanted
   if (at < 0 || near[at]?.id !== scene?.panorama) scene = null;
-  setTool(null); third = null; picked = false;
+  setTool(null); third = null; picked = false; draft = null;
   if (tinted) { tinted = false; showTint(); }
   drawWalls(); showThird();
 }
@@ -443,7 +450,7 @@ async function depthAhead(again = false) {
   if (key === deepened && !again) return true;  // asked already for these
   deepened = key;
   const mine = ++walling, here = near[at].id;
-  say('Murs autour du panorama en cours…');
+  say('Murs autour du panorama en cours… (de nouveaux voisins : jusqu\'à une minute, le temps de les apparier)');
   try {
     const found = await post('/api/depth', about());
     const still = mine === walling && near[at]?.id === here;  // nothing asked or left since
@@ -501,7 +508,7 @@ function applyScene(found) {
   const nearest = near.findIndex((p) => p.fixed);
   const unsure = near[at].fixed ? '' : ' Profondeur peu sûre ici : ce panorama n\'a pas été recalé par COLMAP'
     + (nearest >= 0 ? ` (N : le plus proche recalé, à ${near[nearest].metres} m).` : '.');
-  say(sceneSaid() + unsure);
+  say(sceneSaid() + (unsure ? `.${unsure}` : ''));
 }
 function drawWalls() {
   const on = parallaxOn && scene;
@@ -512,12 +519,21 @@ function drawWalls() {
     ? scene.segments.map(([a, b], k) => line(a, b, { k })) : [] });
   drawNear();
 }
-/** A neighbour taken for the walls, or left (its box in the list): the walls made again. */
-async function toggleNeighbour(id) {
-  if (!parallaxOn || at < 0) return;
-  const chosen = new Set(chosenHere() ?? scene?.neighbours ?? []);
-  if (chosen.has(id)) chosen.delete(id); else { chosen.add(id); third = id; picked = true; }
-  choices[near[at].id] = [...chosen].sort();  // none left: only the walls drawn by hand
+/** A neighbour ticked or unticked in the list: the choice drafted, applied by its button. */
+const usedHere = () => [...(chosenHere() ?? scene?.neighbours ?? [])].sort();
+function tick(id) {
+  const chosen = new Set(draft ?? usedHere());
+  if (chosen.has(id)) chosen.delete(id); else chosen.add(id);
+  draft = [...chosen].sort();
+  if (draft.join() === usedHere().join()) draft = null;  // back as it stands: nothing to apply
+  renderTools();
+}
+/** The neighbours ticked, applied: the walls made again from them (none: the walls drawn only). */
+async function applyNeighbours() {
+  if (!parallaxOn || at < 0 || !draft) return;
+  const added = draft.filter((id) => !usedHere().includes(id)).at(-1);
+  if (added) { third = added; picked = true; }  // the one just taken, shown beside
+  choices[near[at].id] = draft; draft = null;
   renderTools();
   if (await depthAhead(true)) depthChanged();
 }
@@ -563,8 +579,8 @@ function renderTools() {
     .map((id) => ({ id, metres: null, fixed: false }))];  // chosen, though not 2–15 m off
   $('neighbours').replaceChildren(...list.map((p) => {
     const row = document.createElement('li');
-    const box = Object.assign(document.createElement('input'), { type: 'checkbox', checked: used.includes(p.id), id: `nb-${p.id}` });
-    box.addEventListener('change', () => toggleNeighbour(p.id));
+    const box = Object.assign(document.createElement('input'), { type: 'checkbox', checked: (draft ?? used).includes(p.id), id: `nb-${p.id}` });
+    box.addEventListener('change', () => tick(p.id));
     const name = Object.assign(document.createElement('label'), { htmlFor: box.id, textContent: p.metres == null ? 'choisi' : `à ${p.metres} m` });
     const placed = Object.assign(document.createElement('span'), {
       className: `placed${p.fixed ? ' yes' : ''}`, textContent: p.fixed ? 'recalé par COLMAP' : 'position empruntée' });
@@ -575,7 +591,10 @@ function renderTools() {
     row.append(box, name, placed, beside);
     return row;
   }));
-  $('automatic').disabled = chosen === undefined;
+  $('automatic').disabled = chosen === undefined && !draft;
+  $('apply-neighbours').disabled = !draft;
+  $('apply-neighbours').textContent = !draft ? 'Refaire les murs avec ces voisins'
+    : draft.length ? `Refaire les murs avec ces ${draft.length} voisin(s)` : 'Refaire les murs sans voisin (dessinés seuls)';
   // the walls
   $('draw-walls').setAttribute('aria-pressed', String(drawing));
   $('snap').checked = snap;
@@ -627,7 +646,7 @@ function endMarkers() {
       const p = m.getLngLat();
       const top = wall.mine != null ? scene.mine.drawn[wall.mine].top : null;  // drawn here: its own
       const moved = { a: wall.a, b: wall.b, top, [end]: [p.lng, p.lat] };
-      takeOut(wall); scene.mine.drawn.push(moved); saveWalls();
+      takeOut(wall); scene.mine.drawn.push(moved); saveWalls(true);
     });
     return m;
   });
@@ -638,13 +657,16 @@ function removeChosen() {
 }
 let saving = false;  // walls on their way to be saved: no other edit until they come back
 /** This panorama's own walls drawn and removed, saved: the walls made again with them. */
-async function saveWalls() {
+async function saveWalls(keepLast = false) {
   const mine = ++walling, here = near[at].id;
   saving = true; choose(null);
   try {
     const found = await post('/api/walls', about({ drawn: scene.mine.drawn, removed: scene.mine.removed }));
     if (mine !== walling || near[at]?.id !== here) return;  // asked again since, or elsewhere now
     applyScene(found); depthChanged();
+    // the wall just moved (the last drawn) stays chosen, its ends to drag again
+    const again = keepLast ? scene.walls.findIndex((w) => w.mine === scene.mine.drawn.length - 1) : -1;
+    if (again >= 0) choose(again);
   } catch (error) { if (mine === walling) { say(error.message); depthAhead(true); } }  // as they are
   finally { saving = false; }
 }
@@ -964,10 +986,13 @@ $('stood-ok').addEventListener('click', acceptStood);
 $('tab-neighbours').addEventListener('click', () => toggleTool('neighbours'));
 $('tab-walls').addEventListener('click', () => toggleTool('walls'));
 $('tint').addEventListener('change', () => { if ($('tint').checked !== tinted) toggleTint(); });
+$('apply-neighbours').addEventListener('click', applyNeighbours);
 $('automatic').addEventListener('click', async () => {  // back to those picked by their geometry
   if (at < 0) return;
-  delete choices[near[at].id];
-  if (await depthAhead(true)) depthChanged();
+  const chosen = near[at].id in choices;
+  delete choices[near[at].id]; draft = null;
+  renderTools();
+  if (chosen && await depthAhead(true)) depthChanged();  // a draft only: nothing to make again
 });
 $('draw-walls').addEventListener('click', () => { drawing = !drawing; drawingFrom = null; choose(null); });
 $('snap').addEventListener('change', () => { snap = $('snap').checked; });

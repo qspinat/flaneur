@@ -190,13 +190,34 @@ check(await deep.locator('#photo-box').isVisible(), 'and the photo comes back');
 check(asked.parallax.at(-1).second_clicks?.[5]?.neighbour === here.neighbour, 'the parallax fit is made again with the second click');
 await deep.locator('#tab-neighbours').click();
 check(await deep.locator(`#nb-${here.neighbour}`).isChecked(), 'the neighbour used is ticked in the list');
+const asking = asked.depth.length;
 await deep.locator(`#nb-${here.neighbour}`).uncheck();
+await deep.waitForTimeout(500);
+check(asked.depth.length === asking, 'a neighbour unticked waits for the choice to be applied');
+await deep.locator('#apply-neighbours').click();
 await deep.waitForTimeout(700);
 check(Array.isArray(asked.depth.at(-1).neighbours) && !asked.depth.at(-1).neighbours.includes(here.neighbour),
-  `a neighbour unticked is left out of the walls (${JSON.stringify(asked.depth.at(-1).neighbours)})`);
+  `the choice applied leaves it out of the walls (${JSON.stringify(asked.depth.at(-1).neighbours)})`);
+check(await deep.locator('#depth').isVisible(), 'and the panel stays, with no neighbour left');
+// (the fixture offers one panorama only: taken again, as one just ticked would be)
+await deep.locator(`#nb-${here.neighbour}`).check();
+await Promise.all([deep.waitForResponse((r) => r.url().endsWith('/api/depth'), { timeout: 120000 }),
+  deep.locator('#apply-neighbours').click()]);
+await deep.waitForTimeout(300);
+await deep.locator('#strip button').nth(0).click();
+await deep.waitForTimeout(500);
+check((await deep.locator('#third').getAttribute('src')).includes(`/view/${here.neighbour}?`),
+  'the neighbour just taken is the one a plate opens');
+await deep.keyboard.press('Escape');
 await deep.locator('#automatic').click();
 await deep.waitForTimeout(700);
 check(asked.depth.at(-1).neighbours === undefined, 'the automatic choice comes back with its button');
+const automatic = asked.depth.length;
+await deep.locator(`#nb-${here.neighbour}`).uncheck();
+await deep.locator('#automatic').click();
+await deep.waitForTimeout(500);
+check(asked.depth.length === automatic && await deep.locator(`#nb-${here.neighbour}`).isChecked()
+  && await deep.locator('#apply-neighbours').isDisabled(), 'a draft dropped by the automatic choice asks nothing again');
 await deep.locator('#tab-walls').click();
 check((await deep.textContent('#mapmode')).includes('choisir'), 'the walls tool says a click chooses a wall');
 await deep.locator('#draw-walls').click();
@@ -222,6 +243,7 @@ await deep.waitForTimeout(700);
 const moved = asked.walls.at(-1);
 check(moved?.drawn?.length === 1 && moved.drawn[0].a[0] !== wallsAround(here.lon, here.lat, '', '').mine.drawn[0].a[0],
   'dragging an end of a wall drawn here moves it');
+check(await deep.locator('.wall-end').count() === 2, 'and it stays chosen, its ends to drag again');
 await deep.locator('#tab-walls').click();  // the tool put away
 await deep.locator('#tint').check();
 await deep.waitForTimeout(600);

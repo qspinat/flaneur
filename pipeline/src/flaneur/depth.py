@@ -12,6 +12,7 @@ NEAR_M = (2.0, 15.0)  # a neighbour this far: nearer tells little of depth, fart
 # little of the same
 SPREAD_DEG = 30.0  # a neighbour is judged on rays at the view's heading and this either side
 MOST_NEIGHBOURS = 4
+OFF_RAY_DEG = 0.15  # a detail's point this near both its rays, in angle: a pixel or two
 
 
 def neighbours(
@@ -39,26 +40,41 @@ def neighbours(
 
 def meeting(a: np.ndarray, ray_a: np.ndarray, b: np.ndarray, ray_b: np.ndarray) -> float | None:
     """How far along `ray_a` (from `a`) it meets `ray_b` (from `b`), by match.placed's rules
-    (passing within MEET_M, MEET_DEG or more apart, in front of both); None when they do not."""
+    (passing within MEET_M, MEET_DEG or more apart, in front of both); None when they do not.
+    Clicked by hand, a pixel or two off: not held to OFF_RAY_DEG as matched details are."""
     rays = [np.asarray(r, float)[None] / np.linalg.norm(r) for r in (ray_a, ray_b)]
-    metres = _met(a, b, *rays)[1]
+    metres = _met(a, b, *rays, off_deg=180.0)[1]
     return float(metres[0]) if len(metres) else None
 
 
 def _met(
-    a: np.ndarray, b: np.ndarray, rays_a: np.ndarray, rays_b: np.ndarray
+    a: np.ndarray,
+    b: np.ndarray,
+    rays_a: np.ndarray,
+    rays_b: np.ndarray,
+    off_deg: float = OFF_RAY_DEG,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Where pairs of rays (one from `a`, one from `b`; a row each) meet by match.placed's
-    rules: the points, and how far from `a`; those that do not meet left out."""
+    """Where pairs of rays (one from `a`, one from `b`; a row each) meet: by match.placed's
+    rules, and within `off_deg` of both (the panoramas level at one height, near-horizontal
+    rays of a wrong match still pass within its MEET_M); the points, and how far from `a`;
+    those that do not meet left out."""
     n = len(rays_a)
-    points, _, _, _ = match.placed(
+    points, pairs, _, _ = match.placed(
         np.tile(np.arange(n), 2),
         np.repeat(["a", "b"], n),
         np.vstack([np.tile(a, (n, 1)), np.tile(b, (n, 1))]),
         np.vstack([rays_a, rays_b]),
         np.full((2 * n, 3), np.nan),  # never cast onto a wall
     )
+    off = np.maximum(_off(points - a, rays_a[pairs]), _off(points - b, rays_b[pairs]))
+    points = points[off <= off_deg]
     return points, np.linalg.norm(points - a, axis=1)
+
+
+def _off(seen: np.ndarray, rays: np.ndarray) -> np.ndarray:
+    """The angle (degrees) between each direction seen and its ray (unit)."""
+    cos = (seen * rays).sum(axis=1) / np.linalg.norm(seen, axis=1)
+    return np.degrees(np.arccos(np.clip(cos, -1, 1)))
 
 
 def triangulated(
