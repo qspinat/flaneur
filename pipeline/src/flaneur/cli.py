@@ -57,6 +57,7 @@ from flaneur import (
     registration,
     review,
     scene,
+    segment,
     stats,
 )
 from flaneur.blocks import Blocks
@@ -73,6 +74,9 @@ WEB_DATA = ROOT / "web" / "public" / "data"  # the walk, as the site reads it (n
 REVIEWS = DATA / "overrides" / "reviews.jsonl"
 SIGHTS = DATA / "overrides" / "sights.jsonl"  # the landmarks marked in photos, by hand
 CORRECTIONS = DATA / "pilot" / "panorama_corrections.json"  # on the buildings (register): unused
+VIEW_STRUCTURE = (  # each panorama's views' pixel classes (see segment), as views are cut now
+    DATA / "raw" / "view_structure" / f"{match.VIEW_SIDE}_{match.VIEW_FOV}_{match.VIEW_PITCH}"
+)
 PAIR_MATCHES = (  # each pair's raw matches, made once (matcher), as views are cut now
     DATA / "raw" / "pair_matches" / f"{match.VIEW_SIDE}_{match.VIEW_FOV}_{match.VIEW_PITCH}"
 )
@@ -365,7 +369,9 @@ class _Scenes:
     pair set right from its own matches (see depth); BD TOPO's facades near it proposed
     (`segments`); the walls drawn and removed by hand (`walls_path`) laid over them when asked.
     A pair's matches are made with the matcher (`lock` held while it runs) and kept on disk
-    (`matches`), their details KEPT_PAIRS of them; walls fitted are kept, KEPT_SCENES."""
+    (`matches`), their details KEPT_PAIRS of them; walls fitted are kept, KEPT_SCENES. A pair
+    is set right from all its matches, its details are those both panoramas see on a building
+    (`seen_on`: a panorama and rays from it, which fall on one; see segment)."""
 
     def __init__(
         self,
@@ -376,10 +382,12 @@ class _Scenes:
         segments: Callable[[float, float], list[facades.Segment]],
         walls_path: Path,
         matches: Path = PAIR_MATCHES,
+        seen_on: Callable[[match.Panorama, np.ndarray], np.ndarray] | None = None,
     ):
         self.by_id = {p.id: p for p in spheres}
         self.spheres, self.fixed, self.views, self.lock = spheres, fixed, views, lock
         self.segments, self.walls_path, self.matches = segments, walls_path, matches
+        self.seen_on = seen_on
         self.paired: OrderedDict[tuple[str, str], _Paired | None] = OrderedDict()
         self.fitted: OrderedDict[tuple, facades.Scene | None] = OrderedDict()
         self.guard = threading.Lock()  # the kept ones, read and changed one thread at a time
@@ -414,6 +422,9 @@ class _Scenes:
             pair = depth.set_right(a, b, rays_a, rays_b)
             if pair is None:
                 return None
+            if self.seen_on is not None:  # trees, cars, people: no walls
+                on = self.seen_on(home, rays_a) & self.seen_on(other, rays_b)
+                rays_a, rays_b = rays_a[on], rays_b[on]
             directions, metres = depth.placed(a, pair, rays_a, rays_b)
             return _Paired(pair, directions.astype(np.float32), metres.astype(np.float32))
 
@@ -491,6 +502,26 @@ class _Scenes:
         return facades.Scene(
             home.id, tuple(origin), ground, tuple(fitted), neighbours, len(details), chosen
         )
+
+
+def _on_buildings() -> Callable[[match.Panorama, np.ndarray], np.ndarray]:
+    """Which rays from a panorama fall on a building in its views (see segment), the masks made
+    the first time with the model (a lock of its own: photos are proposed meanwhile) and kept
+    in VIEW_STRUCTURE. The model failing (not fetched, short of memory), every ray: the walls
+    made as before, which is said once."""
+    segmenter = segment.Segmenter(VIEW_STRUCTURE, threading.Lock(), _levelled_name)
+    failed: list[str] = []
+
+    def on(panorama: match.Panorama, rays: np.ndarray) -> np.ndarray:
+        try:
+            return segment.on_structure(segmenter.masks(panorama), rays)
+        except Exception as error:  # the walls rather than none
+            if not failed:
+                failed.append(str(error))
+                typer.echo(f"segmentation impossible, murs sans elle : {error}", err=True)
+            return np.ones(len(rays), bool)
+
+    return on
 
 
 def _levelled_name(p: match.Panorama) -> str:
@@ -1826,7 +1857,9 @@ def compare_parallax(answers: Path = PLACINGS) -> None:
     with closing(db.connect(DB_PATH)) as conn:
         fixed = _fixed_by_colmap(panoramas.load(conn), register.load(FIXES))
     views = _views(kept=8)  # a panorama and its neighbours
-    made = _Scenes(spheres, fixed, lambda: views, threading.Lock(), segments, WALLS)
+    made = _Scenes(
+        spheres, fixed, lambda: views, threading.Lock(), segments, WALLS, seen_on=_on_buildings()
+    )
     found, skipped = [], 0
     for row in sorted(rows, key=lambda r: r["registration"]["panorama"]):  # its views kept
         panorama, image = row["registration"]["panorama"], _exported(row["photo_id"])
@@ -1997,7 +2030,7 @@ def place_photos(
         return np.ascontiguousarray(rgb[:, :, ::-1])  # as OpenCV reads pictures
 
     matching = threading.Lock()  # the matcher: proposals, and walls when they must be made
-    walls_made = _Scenes(spheres, fixed, models, matching, segments, WALLS)
+    walls_made = _Scenes(spheres, fixed, models, matching, segments, WALLS, seen_on=_on_buildings())
 
     def walls_at(panorama: str, chosen: tuple[str, ...] | None) -> facades.Scene | None:
         """Today's walls around a panorama (see _Scenes); live only."""
