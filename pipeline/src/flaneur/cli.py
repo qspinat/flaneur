@@ -36,6 +36,7 @@ from flaneur import (
     db,
     dedup,
     depth,
+    depthmaps,
     export,
     facades,
     fakes,
@@ -80,6 +81,12 @@ CORRECTIONS = DATA / "pilot" / "panorama_corrections.json"  # on the buildings (
 POSES = DATA / "pilot" / "panorama_poses.json"  # panoramas set right on two surveys (see poses)
 VIEW_STRUCTURE = (  # each panorama's views' pixel classes (see segment), as views are cut now
     DATA / "raw" / "view_structure" / f"{match.VIEW_SIDE}_{match.VIEW_FOV}_{match.VIEW_PITCH}"
+)
+VIEW_DEPTH = (  # each panorama's views' depth by a model (see depthmaps), as views are cut now
+    DATA
+    / "raw"
+    / "view_depth"
+    / f"{match.VIEW_SIDE}_{match.VIEW_FOV}_{match.VIEW_PITCH}_{depthmaps.SIDE}"
 )
 PAIR_MATCHES = (  # each pair's raw matches, made once (matcher), as views are cut now
     DATA / "raw" / "pair_matches" / f"{match.VIEW_SIDE}_{match.VIEW_FOV}_{match.VIEW_PITCH}"
@@ -1883,6 +1890,25 @@ def _to_neighbours(
     ]
 
 
+def _page_closed(page: int) -> None:
+    """Refused while the placing page runs on `page`: the two do not fit in memory together."""
+    with socket.socket() as probe:
+        if probe.connect_ex(("127.0.0.1", page)) == 0:
+            typer.echo(f"la page tourne sur le port {page} : l'arrêter d'abord (mémoire)", err=True)
+            raise typer.Exit(1)
+
+
+def _within(answers: Path, reach: float) -> list[match.Panorama]:
+    """The panoramas within `reach` of a photo of the walk, the nearest to one first."""
+    with closing(db.connect(DB_PATH)) as conn:
+        spots = np.array([_place_of(me) for me in _walk(conn, _placing_answers(answers)[0])])
+    if not len(spots):
+        return []
+    spheres = _spheres()
+    nearest, _ = cKDTree(spots).query([(p.x, p.y) for p in spheres])
+    return [spheres[i] for i in np.argsort(nearest) if nearest[i] <= reach]
+
+
 @app.command("segmenter")
 def segment_panoramas(answers: Path = PLACINGS, page: int = 8772) -> None:
     """Segmente d'avance (bâti, végétation, ciel...) les panoramas que la page pour placer peut
@@ -1890,28 +1916,42 @@ def segment_panoramas(answers: Path = PLACINGS, page: int = 8772) -> None:
     charge pas le modèle (plusieurs gigaoctets) : un panorama pas segmenté y a ses murs sans
     la segmentation. Reprend où il s'était arrêté ; refuse de tourner la page ouverte (sur le
     port `page`) : les deux ne tiennent pas en mémoire ensemble."""
-    with socket.socket() as probe:
-        if probe.connect_ex(("127.0.0.1", page)) == 0:
-            typer.echo(f"la page tourne sur le port {page} : l'arrêter d'abord (mémoire)", err=True)
-            raise typer.Exit(1)
-    with closing(db.connect(DB_PATH)) as conn:
-        spots = np.array([_place_of(me) for me in _walk(conn, _placing_answers(answers)[0])])
-    if not len(spots):
-        typer.echo("aucune photo : rien à segmenter")
-        return
-    spheres = _spheres()
-    reach = queueing.NEAR_M + depth.NEAR_M[1]
-    nearest, _ = cKDTree(spots).query([(p.x, p.y) for p in spheres])
+    _page_closed(page)
     segmenter = segment.Segmenter(VIEW_STRUCTURE, threading.Lock(), _levelled_name, make=True)
-    reached = [p for p, d in zip(spheres, nearest, strict=True) if d <= reach]
-    left = [p for p in reached if not segmenter.kept(p)]
+    _made_ahead(
+        answers, queueing.NEAR_M + depth.NEAR_M[1], segmenter.kept, segmenter.made, every=50
+    )
+
+
+def _made_ahead(
+    answers: Path,
+    reach: float,
+    kept: Callable[[match.Panorama], bool],
+    make: Callable[[match.Panorama], object | None],
+    every: int,
+) -> None:
+    """What `make` makes for each panorama within `reach` of a photo, nearest first, those
+    already `kept` left; how far it got told `every` so many (None made: its picture unread)."""
+    reached = _within(answers, reach)
+    left = [p for p in reached if not kept(p)]
     typer.echo(f"{len(reached)} panoramas à moins de {reach:g} m d'une photo, {len(left)} à faire")
     started = time.monotonic()
     for n, panorama in enumerate(left, 1):
-        if segmenter.made(panorama) is None:
+        if make(panorama) is None:
             typer.echo(f"{panorama.id} : image illisible")
-        if n % 50 == 0 or n == len(left):
+        if n % every == 0 or n == len(left):
             typer.echo(f"{n}/{len(left)} ({time.monotonic() - started:.0f} s)")
+
+
+@app.command("profondeur")
+def depth_of_panoramas(answers: Path = PLACINGS, page: int = 8772) -> None:
+    """Fait d'avance la profondeur des vues (Depth Pro, voir depthmaps) des panoramas où l'on
+    place les photos : ceux à moins de 40 m d'une photo, les plus proches d'abord. La page s'en
+    sert là où ses murs ne disent rien ; elle ne charge pas le modèle (plus de 5 Go). Reprend où
+    il s'était arrêté ; refuse de tourner la page ouverte (sur le port `page`)."""
+    _page_closed(page)
+    maker = depthmaps.Depthmaps(VIEW_DEPTH, threading.Lock(), _levelled_name, make=True)
+    _made_ahead(answers, queueing.NEAR_M, maker.kept, maker.maps, every=10)
 
 
 LIDAR_MNS = DATA / "raw" / "lidar_mns"  # IGN's LiDAR HD surface model, patches around panoramas
@@ -1998,6 +2038,7 @@ def compare_parallax(answers: Path = PLACINGS) -> None:
     made = _Scenes(
         spheres, fixed, lambda: views, threading.Lock(), segments, WALLS, seen=_seeing(make=True)
     )
+    depth_made = depthmaps.Depthmaps(VIEW_DEPTH, threading.Lock(), _levelled_name, make=False)
     found, skipped = [], 0
     for row in sorted(rows, key=lambda r: r["registration"]["panorama"]):  # its views kept
         panorama, image = row["registration"]["panorama"], _exported(row["photo_id"])
@@ -2010,6 +2051,7 @@ def compare_parallax(answers: Path = PLACINGS) -> None:
                 raise ValueError("pas de panorama voisin")
             with Image.open(image) as photo:
                 size = photo.size[::-1]  # height, width
+            maps = depth_made.maps(made.by_id[panorama])  # as the page: where no wall is met
             one = placing.compared(
                 row,
                 made.by_id[panorama],
@@ -2017,6 +2059,7 @@ def compare_parallax(answers: Path = PLACINGS) -> None:
                 walls,
                 made.by_id,
                 lambda other, at=panorama: made.pair_of(at, other),
+                fill=None if maps is None else depthmaps.Filler(walls, maps),
             )
         except Exception as error:  # the matcher, a fit refused: this photo, not the others
             typer.echo(f"{row['photo_id']} : laissée de côté ({error})")
@@ -2188,6 +2231,12 @@ def place_photos(
         """A neighbour set right against a panorama (see _Scenes.pair_of); live only."""
         return walls_made.pair_of(panorama, neighbour) if live else None
 
+    depth_made = depthmaps.Depthmaps(VIEW_DEPTH, threading.Lock(), _levelled_name, make=False)
+
+    def maps_of(panorama: str) -> np.ndarray | None:
+        """A panorama's views' depth by the model, made ahead (`flaneur profondeur`)."""
+        return depth_made.maps(by_id[panorama]) if panorama in by_id else None
+
     sources = placing.Sources(
         photos,
         spheres,
@@ -2204,6 +2253,7 @@ def place_photos(
         fixed=fixed,
         walls=WALLS,
         matching=matching,
+        depth=maps_of,
     )
     with httpx.Client(timeout=10, follow_redirects=True) as client:
         _serve_page(

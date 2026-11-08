@@ -19,7 +19,7 @@ import cv2
 import numpy as np
 from shapely.geometry import Point
 
-from flaneur import depth, facades, localpage, match, placings, queueing, registration
+from flaneur import depth, depthmaps, facades, localpage, match, placings, queueing, registration
 from flaneur.gazetteer import to_degrees, to_metres
 from flaneur.panoramas import PANORAMA_HEIGHT_M
 from flaneur.registration import ViewOf
@@ -37,6 +37,8 @@ RETRY_S = 60.0  # a larger picture not had (offline...) is asked for again after
 EPIPOLAR_M = (1.0, 200.0)  # a detail clicked in a view may stand this far: its ray, sampled
 EPIPOLAR_SAMPLES = 1000
 WALL_SAMPLES = 40  # points along a wall drawn in a view (a straight wall bends there)
+# How far along rays from a panorama, where its walls say nothing (see filler)
+Fill = Callable[[np.ndarray], np.ndarray]
 TINT_M = (2.0, 60.0)  # the view tinted by depth: warm this near, cool this far
 WARM, COOL = np.array([40, 120, 255], np.float32), np.array([255, 160, 40], np.float32)  # BGR
 # a pair's second click: its neighbour's camera and its ray, set right against the panorama
@@ -83,6 +85,8 @@ class Sources:
     segments: Callable[[float, float], list[facades.Segment]] = lambda *_: []
     fixed: set[str] = field(default_factory=set)  # the panoramas COLMAP placed itself
     walls: Path | None = None  # where walls drawn and removed by hand are kept (see facades)
+    # a model's depth of a panorama's views, made ahead (see depthmaps); none: walls only
+    depth: Callable[[str], np.ndarray | None] = lambda _: None
     # the matcher, one thing at a time: proposals, and depth when it must be made
     matching: threading.Lock = field(default_factory=threading.Lock)
 
@@ -161,12 +165,25 @@ def depth_at(
     return _depth(scene, _rays(view_px, view, sphere))
 
 
-def _depth(scene: facades.Scene, rays: np.ndarray) -> tuple[np.ndarray, list[str | None]]:
+def _depth(
+    scene: facades.Scene, rays: np.ndarray, fill: Fill | None = None
+) -> tuple[np.ndarray, list[str | None]]:
+    """See depth_at; where no wall is met, the street included, the model's depth (`fill`, see
+    depthmaps.Filler: "model"), when it has one (measured on the walls' test: 0.273; the street
+    plane kept, 0.259)."""
     metres, met = facades.cast(scene, rays)
     named = {facades.GROUND: "ground", facades.NOTHING: None} | {
         i: "drawn" if w.made == "drawn" else "wall" for i, w in enumerate(scene.walls)
     }
-    return metres, [named[m] for m in met]
+    source = [named[m] for m in met]
+    no_wall = np.flatnonzero(met < 0)
+    if fill is not None and len(no_wall):
+        found = fill(rays[no_wall])
+        known = np.isfinite(found)
+        metres[no_wall[known]] = found[known]
+        for i in no_wall[known]:
+            source[i] = "model"
+    return metres, source
 
 
 def _at(p: match.Panorama) -> np.ndarray:
@@ -210,12 +227,13 @@ def _pairs_depth(
     rays: np.ndarray,
     seconds: list[Second | None],
     refuse: bool = True,
+    fill: Fill | None = None,
 ) -> tuple[np.ndarray, list[str | None]]:
     """Each pair's depth along its ray from the panorama (`rays`): where its second click's
-    ray meets it ("click"), else where it meets today's walls (see _depth). A second click
-    whose rays do not meet is refused, or (`refuse` False: one saved, the panoramas placed
-    again since) left to the walls."""
-    metres, source = _depth(scene, rays)
+    ray meets it ("click"), else where it meets today's walls, else the model's (see _depth).
+    A second click whose rays do not meet is refused, or (`refuse` False: one saved, the
+    panoramas placed again since) left to the walls."""
+    metres, source = _depth(scene, rays, fill)
     for i, second in enumerate(seconds):
         if second is not None:
             try:
@@ -237,11 +255,12 @@ def _standing(
     start: registration.Registration,
     seconds: list[Second | None] = (),
     refuse: bool = True,
+    fill: Fill | None = None,
 ) -> _Standing:
     """The camera where the photographer stood: from the pairs whose panorama point has a
     depth (see _pairs_depth), started from the flat fit `start` and the user's `pin`."""
     rays = _rays(view_px, view, sphere)
-    metres, source = _pairs_depth(scene, sphere, rays, seconds, refuse)
+    metres, source = _pairs_depth(scene, sphere, rays, seconds, refuse, fill)
     world = np.array(scene.origin) + metres[:, None] * rays
     fitting = (photo_px, world, size, start, sphere.axes, pin, scene.ground)
     camera, used = registration.fit_standing(*fitting)
@@ -273,6 +292,7 @@ def parallax(
     pin: tuple[float, float],
     held_out: bool = True,
     seconds: list[Second | None] = (),
+    fill: Fill | None = None,
 ) -> dict:
     """The photo's camera where the photographer stood (see _standing), as the page has it:
     where it stood, each pair's depth and what gave it, the neighbours the walls were fitted
@@ -283,7 +303,7 @@ def parallax(
     else:
         start, _ = registration.fit(photo_px, view_px, size, SHOWN, sphere.id, view, sphere.axes)
     try:
-        s = _standing(photo_px, view_px, view, sphere, size, scene, pin, start, seconds)
+        s = _standing(photo_px, view_px, view, sphere, size, scene, pin, start, seconds, fill=fill)
     except registration.NotFitted as refused:
         if scene.walls:
             raise
@@ -362,6 +382,7 @@ def compared(
     scene: facades.Scene,
     spheres: dict[str, match.Panorama],
     pair_of: Callable[[str], depth.Pair | None] = lambda _: None,
+    fill: Fill | None = None,
 ) -> dict:
     """An answer's two fits made again from its saved pairs: the flat one, and the camera where
     the photographer stood (started from the pin its parallax fit started from, else from the
@@ -369,7 +390,7 @@ def compared(
     photo's diagonal), on the same pairs, those with a depth; a refit refused counts as the
     worst, and a camera refused outright as infinitely bad. How far it stood from its start.
     Second clicks give depth as they did (their neighbours among `spheres`, set right against
-    the panorama by `pair_of`)."""
+    the panorama by `pair_of`); where the walls say nothing, `fill` (see filler)."""
     pairs = row["pairs"]
     seconds = _kept_seconds(pairs, spheres, pair_of)
     view = ViewOf(**pairs["view"])
@@ -380,7 +401,7 @@ def compared(
     found = {"photo_id": row["photo_id"], "fit": row.get("fit") or "flat", "pairs": len(photo_px)}
     rays = _rays(view_px, view, sphere)
     same = ~np.isnan(
-        _pairs_depth(scene, sphere, rays, seconds, refuse=False)[0]
+        _pairs_depth(scene, sphere, rays, seconds, refuse=False, fill=fill)[0]
     )  # both fits: those with depth
     flat_off = registration.held_out_flat(
         photo_px[same], view_px[same], size, SHOWN, view, sphere.axes
@@ -388,7 +409,9 @@ def compared(
     found |= {"with_depth": int(same.sum()), "refused": {"flat": int(np.isinf(flat_off).sum())}}
     try:
         start = registration.fit(photo_px, view_px, size, SHOWN, sphere.id, view, sphere.axes)[0]
-        s = _standing(photo_px, view_px, view, sphere, size, scene, pin, start, seconds, False)
+        s = _standing(
+            photo_px, view_px, view, sphere, size, scene, pin, start, seconds, False, fill=fill
+        )
     except registration.NotFitted as refused:
         flat_median = float(np.median(flat_off)) if len(flat_off) else np.inf
         return {
@@ -811,9 +834,18 @@ def serve(sources: Sources, port: int) -> HTTPServer:
         return found
 
     @lru_cache(maxsize=KEPT_VIEWS)
+    def fill_of(scene: facades.Scene) -> Fill | None:
+        """The model's depth where the scene's walls say nothing (see depthmaps.Filler)."""
+        maps = sources.depth(scene.panorama)
+        return None if maps is None else depthmaps.Filler(scene, maps)
+
+    @lru_cache(maxsize=KEPT_VIEWS)
     def metres_in(scene: facades.Scene, view: ViewOf) -> np.ndarray:
-        # the same view and walls, refitted: made once (walls drawn since: another scene)
-        return facades.in_view(scene, view, SHOWN).astype(np.float32)
+        # the same view and walls, refitted: made once (walls drawn since: another scene); the
+        # model where no wall is met, as for the pairs
+        fill = fill_of(scene)
+        along = None if fill is None else (lambda rays: _depth(scene, rays, fill)[0])
+        return facades.in_view(scene, view, SHOWN, along).astype(np.float32)
 
     def laid_standing(body: dict, image: np.ndarray, sphere: match.Panorama) -> np.ndarray:
         """The view with the photo laid by its standing camera, through the walls there."""
@@ -834,7 +866,9 @@ def serve(sources: Sources, port: int) -> HTTPServer:
         start = _metres(body["parallax"]["lon"], body["parallax"]["lat"])
         scene = scene_of(sphere, body)
         seconds = seconds_of(body["pairs"], view, sphere)
-        found = parallax(photo_px, view_px, view, sphere, size, scene, start, False, seconds)
+        found = parallax(
+            photo_px, view_px, view, sphere, size, scene, start, False, seconds, fill=fill_of(scene)
+        )
         return {
             "camera": found["standing"],
             "metres": found["metres"],
@@ -967,7 +1001,18 @@ def serve(sources: Sources, port: int) -> HTTPServer:
                     pin = _metres(body["lon"], body["lat"])
                     seconds = seconds_of(body, view, sphere)
                     self._json(
-                        parallax(photo_px, view_px, view, sphere, size, scene, pin, True, seconds)
+                        parallax(
+                            photo_px,
+                            view_px,
+                            view,
+                            sphere,
+                            size,
+                            scene,
+                            pin,
+                            True,
+                            seconds,
+                            fill=fill_of(scene),
+                        )
                     )
                 elif self.path == "/api/composite" and body.get("standing") is not None:
                     image = photo_image(photo_id, bool(body.get("flipped")))

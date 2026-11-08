@@ -107,6 +107,15 @@ def test_the_sky_of_a_view_is_infinitely_far():
     assert np.isinf(metres[2, 32]) and np.isfinite(metres[32, 4])  # above; the left facade
 
 
+def test_a_view_s_depth_can_come_from_elsewhere_than_the_walls():
+    walls = [facades.Wall((-4.0, 0.0), (-4.0, 60.0), 12.0, "fitted")]
+    elsewhere = lambda rays: np.where(rays[:, 2] > 0.3, np.nan, 9.0)  # noqa: E731
+
+    metres = facades.in_view(_scene(walls), ViewOf(heading=0.0), 64, elsewhere)
+
+    assert np.isinf(metres[2, 32]) and metres[32, 4] == 9.0
+
+
 def test_a_wall_drawn_replaces_the_fitted_one_and_a_removed_one_stays_removed():
     fitted = [
         facades.Wall((-4.0, 2.0), (-4.0, 58.0), 12.0, "fitted"),

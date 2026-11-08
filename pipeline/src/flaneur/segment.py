@@ -58,12 +58,37 @@ class _NotRead(Exception):
     """A panorama whose picture could not be read: nothing kept, asked again next time."""
 
 
-def _by_model(path: Path) -> bool:
-    """Whether classes are kept at `path`, made by the model (another's are made again)."""
+def by_model(path: Path, model: str = MODEL) -> bool:
+    """Whether what is kept at `path` was made by `model` (another's is made again)."""
     if not path.exists():
         return False
     with np.load(path) as kept:
-        return str(kept["model"]) == MODEL
+        return str(kept["model"]) == model
+
+
+def loaded(name: str, kind: str) -> tuple:
+    """A model of transformers (`kind`: its class's name) and its processor, on the graphics
+    chip if there is one, in half precision there (half the memory), and the device and number
+    type: (model, processor, device, half). Torch and transformers are imported only here: they
+    take seconds, and most commands never use a model."""
+    if "pycolmap" in sys.modules:  # their OpenMP runtimes abort one process (see match)
+        raise RuntimeError(f"{name} et pycolmap ne se chargent pas ensemble")
+    import torch
+    import transformers
+
+    device = "mps" if torch.backends.mps.is_available() else "cpu"
+    half = torch.float16 if device == "mps" else torch.float32
+    processor = transformers.AutoImageProcessor.from_pretrained(name)
+    model = getattr(transformers, kind).from_pretrained(name, dtype=half)
+    return model.to(device).eval(), processor, device, half
+
+
+def let_go(device: str) -> None:
+    """The graphics chip's cache let go: memory is short."""
+    if device == "mps":
+        import torch
+
+        torch.mps.empty_cache()
 
 
 class NotSegmented(Exception):
@@ -108,13 +133,13 @@ class Segmenter:
 
     def kept(self, panorama: match.Panorama) -> bool:
         """Whether the panorama's classes are kept, made by the model."""
-        return _by_model(self._path(panorama))
+        return by_model(self._path(panorama))
 
     def made(self, panorama: match.Panorama) -> Path | None:
         """Where the panorama's classes are kept, made if they were not (or by another model);
         None if its picture cannot be read."""
         path = self._path(panorama)
-        if not _by_model(path):
+        if not by_model(path):
             if not self.make:
                 raise NotSegmented(panorama.id)
             picture = cv2.imread(str(panorama.path))
@@ -122,7 +147,7 @@ class Segmenter:
                 return None
             views = [match.perspective(picture, panorama.axes, h) for h in match.VIEW_HEADINGS]
             with self.lock:
-                if not _by_model(path):  # made meanwhile, by the request that held the lock
+                if not by_model(path):  # made meanwhile, by the request that held the lock
                     self._write(path, views)
         return path
 
@@ -141,10 +166,7 @@ class Segmenter:
     def _write(self, path: Path, views: list[np.ndarray]) -> None:
         model, processor, device, half, labels = self._model()
         classes = np.array([self._segmented(v, model, processor, device, half) for v in views])
-        if device == "mps":
-            import torch
-
-            torch.mps.empty_cache()  # memory is short: the chip's cache let go
+        let_go(device)
         path.parent.mkdir(parents=True, exist_ok=True)
         write_atomic(
             path,
@@ -158,18 +180,10 @@ class Segmenter:
         once; torch and transformers imported only here: they take seconds, and most commands
         never segment)."""
         if self.loaded is None:
-            if "pycolmap" in sys.modules:  # their OpenMP runtimes abort one process (see match)
-                raise RuntimeError("segmentation et pycolmap ne se chargent pas ensemble")
-            import torch
-            from transformers import AutoImageProcessor, Mask2FormerForUniversalSegmentation
-
-            device = "mps" if torch.backends.mps.is_available() else "cpu"
-            half = torch.float16 if device == "mps" else torch.float32  # half the memory
-            processor = AutoImageProcessor.from_pretrained(MODEL)
-            model = Mask2FormerForUniversalSegmentation.from_pretrained(MODEL, dtype=half)
+            model, processor, device, half = loaded(MODEL, "Mask2FormerForUniversalSegmentation")
             names = model.config.id2label
             labels = [names[i] for i in range(len(names))]
-            self.loaded = (model.to(device).eval(), processor, device, half, labels)
+            self.loaded = (model, processor, device, half, labels)
         return self.loaded
 
     @staticmethod
