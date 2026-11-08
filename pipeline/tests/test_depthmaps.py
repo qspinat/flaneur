@@ -6,7 +6,7 @@ import cv2
 import numpy as np
 import pytest
 
-from flaneur import depthmaps, match
+from flaneur import depthmaps, facades, match
 
 SIDE = 32
 VIEWS = len(match.VIEW_HEADINGS)
@@ -117,3 +117,49 @@ def test_without_making_a_missing_panorama_has_no_maps(tmp_path):
 
     assert reader.maps(_panorama(tmp_path)) is None
     assert not reader.kept(_panorama(tmp_path))
+
+
+def test_depth_pro_is_given_a_plain_rgb_picture(tmp_path):
+    torch = pytest.importorskip("torch")
+    given = {}
+
+    class Processor:
+        def __call__(self, images, **_):  # transformers' processors refuse reversed strides
+            given["contiguous"] = images.flags.c_contiguous
+            return _Inputs({"pixel_values": torch.zeros(1, 3, 4, 4)})
+
+        def post_process_depth_estimation(self, found, target_sizes):
+            return [{"predicted_depth": torch.ones(target_sizes[0])}]
+
+    maker = depthmaps.Depthmaps(tmp_path, threading.Lock(), lambda p: p.id)
+    maker.loaded = (lambda **_: None, Processor(), "cpu", torch.float32)
+
+    depth = maker._depth_pro(np.zeros((8, 8, 3), np.uint8)[:, ::-1])
+
+    assert given["contiguous"] and depth.shape == (8, 8)
+
+
+class _Inputs(dict):
+    def to(self, *_):
+        return self
+
+
+def test_the_sky_has_no_depth():
+    scene = facades.Scene(
+        "p1",
+        (0.0, 0.0, 2.0),
+        0.0,
+        (
+            facades.Wall((-4.0, -60.0), (-4.0, 60.0), 20.0, "fitted"),
+            facades.Wall((4.0, -60.0), (4.0, 60.0), 20.0, "fitted"),
+        ),
+        (),
+        0,
+    )
+    maps = np.ones((VIEWS, SIDE, SIDE))
+    maps[:, : SIDE // 3] = 1000.0  # the upper third: as far as models put the sky
+
+    fill = depthmaps.Filler(scene, maps)
+    up, ahead = _toward(0.0, 30.0), _toward(0.0, 0.0)
+
+    assert np.isnan(fill(up)).all() and np.isfinite(fill(ahead)).all()

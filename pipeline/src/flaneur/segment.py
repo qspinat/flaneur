@@ -83,6 +83,12 @@ def loaded(name: str, kind: str) -> tuple:
     return model.to(device).eval(), processor, device, half
 
 
+def rgb(view: np.ndarray) -> np.ndarray:
+    """A view as models take it: RGB, contiguous (transformers' processors refuse an OpenCV picture
+    reversed in place, its strides negative, once torchvision is installed)."""
+    return cv2.cvtColor(view, cv2.COLOR_BGR2RGB)
+
+
 def let_go(device: str) -> None:
     """The graphics chip's cache let go: memory is short."""
     if device == "mps":
@@ -193,7 +199,7 @@ class Segmenter:
 
         side = view.shape[0]
         inputs = processor(
-            images=view[:, :, ::-1],
+            images=rgb(view),
             size={"shortest_edge": side, "longest_edge": side},  # as cut: not 2048 (memory)
             return_tensors="pt",
         ).to(device, half)

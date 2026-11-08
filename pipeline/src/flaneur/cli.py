@@ -4,6 +4,7 @@ import functools
 import hashlib
 import io
 import json
+import os
 import shutil
 import socket
 import threading
@@ -1933,12 +1934,18 @@ def _made_ahead(
     """What `make` makes for each panorama within `reach` of a photo, nearest first, those
     already `kept` left; how far it got told `every` so many (None made: its picture unread)."""
     reached = _within(answers, reach)
+    if not reached:
+        typer.echo("aucune photo, ou aucun panorama à portée : rien à faire")
+        return
     left = [p for p in reached if not kept(p)]
     typer.echo(f"{len(reached)} panoramas à moins de {reach:g} m d'une photo, {len(left)} à faire")
     started = time.monotonic()
     for n, panorama in enumerate(left, 1):
-        if make(panorama) is None:
-            typer.echo(f"{panorama.id} : image illisible")
+        try:
+            if make(panorama) is None:
+                typer.echo(f"{panorama.id} : image illisible")
+        except Exception as error:  # this one left (memory, a picture): the others go on
+            typer.echo(f"{panorama.id} : laissé ({error})", err=True)
         if n % every == 0 or n == len(left):
             typer.echo(f"{n}/{len(left)} ({time.monotonic() - started:.0f} s)")
 
@@ -1950,6 +1957,9 @@ def depth_of_panoramas(answers: Path = PLACINGS, page: int = 8772) -> None:
     sert là où ses murs ne disent rien ; elle ne charge pas le modèle (plus de 5 Go). Reprend où
     il s'était arrêté ; refuse de tourner la page ouverte (sur le port `page`)."""
     _page_closed(page)
+    # the graphics chip's memory capped, set before torch starts (Depth Pro takes more than 5 GB)
+    os.environ.setdefault("PYTORCH_MPS_HIGH_WATERMARK_RATIO", "0.75")
+    os.environ.setdefault("PYTORCH_MPS_LOW_WATERMARK_RATIO", "0.6")
     maker = depthmaps.Depthmaps(VIEW_DEPTH, threading.Lock(), _levelled_name, make=True)
     _made_ahead(answers, queueing.NEAR_M, maker.kept, maker.maps, every=10)
 

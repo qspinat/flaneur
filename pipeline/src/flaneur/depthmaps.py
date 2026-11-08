@@ -23,6 +23,7 @@ from flaneur.sources import write_atomic
 MODEL = "apple/DepthPro-hf"
 SIDE = 160  # each view's depth kept this many cells across (its view is cut at match.VIEW_SIDE)
 NEAR_M = 30.0  # a wall this near scales a view (farther, its own depth is less sure)
+FAR_M = 150.0  # scaled, farther than this: the sky (models put it hundreds of metres off)
 SCALED_ON = 40  # cells across each view where the walls are cast, for its scale
 LEAST_CELLS = 25  # of those on walls, for a view to have a scale of its own
 LEAST_VIEWS = 3  # views with a scale, for those without to take theirs (the median)
@@ -87,7 +88,9 @@ class Filler:
         scale = scales(coarse, walls.reshape(coarse.shape))
         if scale is None:
             return np.empty(0, np.float32)
-        return (self.maps * scale[:, None, None]).astype(np.float32)
+        scaled = (self.maps * scale[:, None, None]).astype(np.float32)
+        scaled[scaled > FAR_M] = np.nan
+        return scaled
 
 
 def _along(side: int) -> np.ndarray:
@@ -161,7 +164,7 @@ class Depthmaps:
         if self.loaded is None:
             self.loaded = segment.loaded(MODEL, "AutoModelForDepthEstimation")
         model, processor, device, half = self.loaded
-        inputs = processor(images=view[:, :, ::-1], return_tensors="pt").to(device)
+        inputs = processor(images=segment.rgb(view), return_tensors="pt").to(device)
         inputs = {k: v.to(half) if v.is_floating_point() else v for k, v in inputs.items()}
         with torch.no_grad():
             found = model(**inputs)

@@ -114,3 +114,27 @@ def test_rays_see_building_sky_or_something_else(tmp_path):
     seen = segment.seen(segmenter.kinds(_panorama(tmp_path / "p.jpg")), rays)
 
     assert seen.tolist() == [segment.SKY, segment.BUILT, segment.OTHER, segment.UNSEEN]
+
+
+class _Inputs(dict):
+    def to(self, *_):
+        return self
+
+
+def test_the_model_is_given_a_plain_rgb_picture():
+    torch = pytest.importorskip("torch")
+    given = {}
+    view = np.zeros((8, 8, 3), np.uint8)
+    view[..., 0] = 255  # blue, as OpenCV reads pictures (BGR)
+
+    class Processor:
+        def __call__(self, images, **_):  # transformers' processors refuse reversed strides
+            given["contiguous"], given["blue"] = images.flags.c_contiguous, images[0, 0, 2]
+            return _Inputs()
+
+        def post_process_semantic_segmentation(self, found, target_sizes):
+            return [torch.zeros(target_sizes[0], dtype=torch.long)]
+
+    segment.Segmenter._segmented(view, lambda **_: None, Processor(), "cpu", torch.float32)
+
+    assert given == {"contiguous": True, "blue": 255}  # RGB: the blue channel last
