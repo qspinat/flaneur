@@ -51,6 +51,7 @@ from flaneur import (
     placements,
     placing,
     placings,
+    poses,
     proposals,
     proposing,
     queueing,
@@ -76,6 +77,7 @@ WEB_DATA = ROOT / "web" / "public" / "data"  # the walk, as the site reads it (n
 REVIEWS = DATA / "overrides" / "reviews.jsonl"
 SIGHTS = DATA / "overrides" / "sights.jsonl"  # the landmarks marked in photos, by hand
 CORRECTIONS = DATA / "pilot" / "panorama_corrections.json"  # on the buildings (register): unused
+POSES = DATA / "pilot" / "panorama_poses.json"  # panoramas set right on two surveys (see poses)
 VIEW_STRUCTURE = (  # each panorama's views' pixel classes (see segment), as views are cut now
     DATA / "raw" / "view_structure" / f"{match.VIEW_SIDE}_{match.VIEW_FOV}_{match.VIEW_PITCH}"
 )
@@ -347,7 +349,8 @@ def _levelled(pictures: list[Picture]) -> list[Picture]:
 def _placed(pictures: list[Picture]) -> list[Picture]:
     """The panoramas where they were taken: placed with each other (reconstruct), else moved
     as their run's nearest panoramas so placed (reconstruct.borrowed), else as recorded (not
-    by their own roofs and corners: see register)."""
+    by their own roofs and corners: see register; nor yet by what `flaneur recaler` finds, see
+    poses)."""
     fixes = register.load(FIXES)
     found = {i: tuple(fixes[i]["fix"]) for i in _fixed_by_colmap(pictures, fixes)}
     return register.applied(pictures, reconstruct.borrowed(found, pictures))
@@ -457,7 +460,7 @@ class _Scenes:
         """The pair's matched rays (see depth.matched), from disk once made: they are the same
         while the two panoramas are levelled as they are (in the name, as their views': see
         match.Views). Kept as float32, and used so when just made: the same walls either way."""
-        path = self.matches / f"{_levelled_name(home)}__{_levelled_name(other)}.npz"
+        path = self._path(home, other)
         if path.exists():
             with np.load(path) as found:
                 return found["a"].astype(float), found["b"].astype(float)
@@ -496,12 +499,26 @@ class _Scenes:
         walls = facades.with_drawn(list(fitted.walls), *drawn, fitted.ground)
         return replace(fitted, walls=tuple(walls))
 
+    def details(
+        self, home: match.Panorama, neighbours: list[match.Panorama], made_only: bool = False
+    ) -> np.ndarray:
+        """The details a panorama shares with `neighbours`, placed (n × 3); `made_only`, from
+        the pairs already kept on disk only (the matcher never woken)."""
+        if made_only:
+            neighbours = [p for p in neighbours if self._made(home, p)]
+        return _details_of(home, [f for p in neighbours if (f := self.pair(home, p))])
+
+    def _made(self, home: match.Panorama, other: match.Panorama) -> bool:
+        return self._path(home, other).exists()
+
+    def _path(self, home: match.Panorama, other: match.Panorama) -> Path:
+        return self.matches / f"{_levelled_name(home)}__{_levelled_name(other)}.npz"
+
     def _fit(
         self, home: match.Panorama, chosen: tuple | None, found: list[_Paired], neighbours: tuple
     ) -> facades.Scene:
         origin = placing._at(home)
-        points = [origin + f.directions * f.metres[:, None] for f in found]
-        details = np.vstack(points) if points else np.empty((0, 3))  # none: drawn walls only
+        details = _details_of(home, found)
         ground = home.z - PANORAMA_HEIGHT_M
         fitted = facades.fit(details, ground, self.segments(home.x, home.y), origin=origin)
         if self.seen is not None:
@@ -509,6 +526,13 @@ class _Scenes:
         return facades.Scene(
             home.id, tuple(origin), ground, tuple(fitted), neighbours, len(details), chosen
         )
+
+
+def _details_of(home: match.Panorama, found: list[_Paired]) -> np.ndarray:
+    """The details pairs placed, from the panorama (n × 3; none: an empty array)."""
+    origin = placing._at(home)
+    points = [origin + f.directions * f.metres[:, None] for f in found]
+    return np.vstack(points) if points else np.empty((0, 3))
 
 
 def _seeing(make: bool) -> Callable[[match.Panorama, np.ndarray], np.ndarray]:
@@ -1888,6 +1912,71 @@ def segment_panoramas(answers: Path = PLACINGS, page: int = 8772) -> None:
             typer.echo(f"{panorama.id} : image illisible")
         if n % 50 == 0 or n == len(left):
             typer.echo(f"{n}/{len(left)} ({time.monotonic() - started:.0f} s)")
+
+
+LIDAR_MNS = DATA / "raw" / "lidar_mns"  # IGN's LiDAR HD surface model, patches around panoramas
+
+
+@app.command("recaler")
+def set_panoramas_right(
+    only: Annotated[list[str] | None, typer.Argument(help="préfixes de panoramas")] = None,
+    again: Annotated[bool, typer.Option(help="rejuger ceux déjà jugés tels qu'ils sont")] = False,
+) -> None:
+    """Recale sur le plan les panoramas nommés (préfixes), sinon ceux dont les paires sont déjà
+    faites (sans en faire d'autres) : leurs détails de bâti contre les façades de la BD TOPO et
+    contre les contours du LiDAR HD de l'IGN, deux relevés ; une correction n'est gardée que si
+    les deux s'accordent et qu'elle dépasse leur propre écart (voir poses). Les panoramas sont
+    pris tels que COLMAP les a laissés ; chaque verdict est gardé au fur et à mesure (POSES),
+    avec où était le panorama : un panorama déjà jugé là n'est pas rejugé (sauf --again). Un
+    panorama dont un voisin n'est pas segmenté est laissé (`flaneur segmenter` d'abord)."""
+    spheres, segments = _placing_world()
+    by_id = {p.id: p for p in spheres}
+    with closing(db.connect(DB_PATH)) as conn:
+        fixed = _fixed_by_colmap(panoramas.load(conn), register.load(FIXES))
+    if only:
+        homes = [p for p in spheres if any(p.id.startswith(o) for o in only)]
+    else:  # those whose pairs are on disk (three or more)
+        made = Counter(f.name.split("_")[0] for f in PAIR_MATCHES.glob("*.npz"))
+        homes = [by_id[i] for i, n in sorted(made.items()) if n >= 3 and i in by_id]
+    views = functools.cache(lambda: _views(kept=8))  # the matcher, only if a pair must be made
+    scenes = _Scenes(
+        spheres, fixed, views, threading.Lock(), segments, WALLS, seen=_seeing(make=False)
+    )
+    masks = segment.Segmenter(VIEW_STRUCTURE, threading.Lock(), _levelled_name, make=False)
+    verdicts = poses.load(POSES)
+    with httpx.Client() as client:
+        for home in homes:
+            placed = (round(home.x, 2), round(home.y, 2), round(home.azimuth, 2))
+            if not again and (kept := verdicts.get(home.id)) and kept.placed == placed:
+                continue  # judged as it stands
+            neighbours = depth.candidates(home, spheres, fixed)
+            if not all(masks.kept(p) for p in [home, *neighbours]):
+                typer.echo(f"{home.id[:8]} : un voisin pas segmenté, laissé (`flaneur segmenter`)")
+                continue
+            details = scenes.details(home, neighbours, made_only=not only)
+            origin = np.array([home.x, home.y, home.z])
+            try:
+                found = poses.judge(
+                    details,
+                    origin,
+                    home.z - PANORAMA_HEIGHT_M,
+                    segments(home.x, home.y),
+                    LIDAR_MNS,
+                    client,
+                )
+            except (httpx.HTTPError, ValueError) as error:  # this one left: the others go on
+                typer.echo(f"{home.id[:8]} : laissé ({error})", err=True)
+                continue
+            verdicts[home.id] = replace(found, placed=placed)
+            poses.save(POSES, verdicts)
+            said = f"corrigé {found.correction}" if found.correction else "laissé"
+            how = "COLMAP" if home.id in fixed else "emprunté"
+            typer.echo(
+                f"{home.id[:8]} ({how}) : {said} — BD TOPO {found.bdtopo}, LiDAR {found.lidar}"
+            )
+    moved = poses.corrections(verdicts)
+    typer.echo(f"{len(moved)} panorama(s) corrigé(s) sur {len(verdicts)} jugés")
+    typer.echo("mesurées, pas encore appliquées : le cadre de la carte (voir poses)")
 
 
 @app.command("parallaxe")
