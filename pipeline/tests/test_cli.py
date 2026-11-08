@@ -288,3 +288,14 @@ def test_a_failing_model_is_asked_once_and_the_walls_made_as_before(monkeypatch,
     found = [seen(panorama, rays).tolist() for _ in range(3)]
 
     assert asked == ["p"] and found == [[segment.BUILT]] * 3
+
+
+def test_details_from_the_pairs_already_made_never_wake_the_matcher(monkeypatch, tmp_path):
+    asked, scenes, home = _scenes(monkeypatch, tmp_path)
+    candidates = depth.candidates(home, scenes.spheres, scenes.fixed)
+
+    before = scenes.details(home, candidates, made_only=True)
+    scenes.scene("home", None)  # the pair made (and kept on disk)
+    after = scenes.details(home, candidates, made_only=True)
+
+    assert len(before) == 0 and asked == [("home", "beside")] and len(after) > 0
