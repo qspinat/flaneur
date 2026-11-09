@@ -8,7 +8,7 @@ import numpy as np
 import pytest
 from shapely.geometry import Point
 
-from flaneur import depth, facades, match, placing, placings, registration
+from flaneur import depth, depthmaps, facades, match, placing, placings, registration
 from flaneur.gazetteer import to_degrees, to_metres
 from flaneur.registration import ViewOf
 
@@ -634,6 +634,63 @@ def test_pairs_on_the_street_or_meeting_nothing_say_so(page, one):
     assert status == 200
     assert (found["source"][6], found["metres"][6], found["used"][6]) == (None, None, False)
     assert placing.depth_at(scene, sphere, on_the_street, ViewOf(140.0))[1] == ["ground"]
+
+
+def test_a_point_meeting_nothing_takes_the_model_s_depth_where_it_is_given(page, one):
+    sources, _ = page
+    sphere = sources.spheres[0]
+    _, _, photo_px, view_px, scene = _street(sphere, open_from=10)  # (12, -4, 3) seen through
+    sources.scene = lambda panorama, chosen: scene
+    sources.fill = depthmaps.fills(
+        lambda panorama: np.ones((len(match.VIEW_HEADINGS), 40, 40), np.float32), lambda _: None
+    )
+
+    status, answer = one(
+        sources, "POST", "/api/parallax", _parallax_body(sphere, photo_px, view_px)
+    )
+
+    found = json.loads(answer)
+    assert status == 200
+    assert found["source"][6] == "model" and found["metres"][6] > 0
+    assert found["source"][:5] == ["wall", "wall", "wall", "wall", "drawn"]  # walls first
+
+
+def test_the_model_fills_rays_meeting_no_wall_the_street_too():
+    sphere = match.Panorama("p1", 0.0, 0.0, 0.0, 0.0, None)
+    _, _, _, _, scene = _street(sphere, open_from=10)
+    rays = np.array([AHEAD, -AHEAD + [0.0, 0.0, 0.5], AHEAD + [0.0, 0.0, -0.3]])
+    rays /= np.linalg.norm(rays, axis=1, keepdims=True)  # the street's end; up behind; down
+
+    metres, source = placing._depth(scene, rays, lambda r: np.full(len(r), 7.0))
+
+    assert source[0] == "drawn" and metres[0] != 7.0
+    assert (source[1], metres[1]) == ("model", 7.0)
+    assert (source[2], metres[2]) == ("model", 7.0)
+    assert placing._depth(scene, rays)[1][2] == "ground"  # without the model: the street
+
+
+def test_maps_are_scaled_to_the_scene_s_walls():
+    sphere = match.Panorama("p1", 0.0, 0.0, 0.0, 0.0, None)
+    _, _, _, _, scene = _street(sphere)
+    grid = depthmaps.grid_rays(40)
+    true = facades.cast(scene, grid.reshape(-1, 3))[0].reshape(grid.shape[:3])
+    maps = np.where(np.isfinite(true), true / 3, 1.0)  # the street's shape, a third too near
+    down_the_street = AHEAD[None]
+
+    fill = depthmaps.Filler(scene, maps)
+
+    assert fill(down_the_street)[0] == pytest.approx(
+        placing._depth(scene, down_the_street)[0][0], rel=0.05
+    )
+
+
+def test_maps_are_no_use_without_walls_to_scale_them():
+    sphere = match.Panorama("p1", 0.0, 0.0, 0.0, 0.0, None)
+    _, _, _, _, scene = _street(sphere, walls=False)
+
+    fill = depthmaps.Filler(scene, np.ones((len(match.VIEW_HEADINGS), 40, 40)))
+
+    assert np.isnan(fill(AHEAD[None])).all()
 
 
 def test_parallax_on_a_panorama_without_walls_says_why(page, one):

@@ -513,13 +513,18 @@ def _prisms(walls, ground: float, tops: list[float]) -> Blocks:
     return Blocks(np.array(edges, float).reshape(-1, 6), np.ones(len(edges), bool))
 
 
-def in_view(scene: Scene, view: ViewOf, side: int) -> np.ndarray:
-    """How far along each pixel's ray of a view (side × side) cut from the scene's panorama;
-    infinitely far meeting nothing (the sky)."""
+def in_view(
+    scene: Scene,
+    view: ViewOf,
+    side: int,
+    along: Callable[[np.ndarray], np.ndarray] | None = None,
+) -> np.ndarray:
+    """How far along each pixel's ray of a view (side × side) cut from the scene's panorama, by
+    its walls (or `along`: rays to metres); infinitely far meeting nothing (the sky)."""
     rays = match.view_directions(
         match.pixels_of((side, side)), view.heading, view.fov, side, view.pitch
     )
-    metres = cast(scene, rays)[0]
+    metres = cast(scene, rays)[0] if along is None else along(rays)
     return np.where(np.isnan(metres), np.inf, metres).reshape(side, side)
 
 

@@ -9,6 +9,7 @@ requires-python = ">=3.12"
 dependencies = [
     "httpx>=0.28.1",
     "kornia>=0.9.0",
+    "moge @ git+https://github.com/microsoft/MoGe@74fbce054ebed49800de42d0ad0e83495065719a",
     "onnxruntime>=1.31.1",
     "opencv-python-headless>=5.0.0.93",
     "pillow>=13.0.0",
@@ -20,6 +21,7 @@ dependencies = [
     "torch>=2.15.0",
     "transformers>=5.0",
     "typer>=0.27.3",
+    "utils3d-moge @ git+https://github.com/EasternJournalist/utils3d-moge@62f09d58509485564e24d5d9f6aac9ee9ebc0c37",
 ]
 
 [project.scripts]
@@ -33,6 +35,21 @@ build-backend = "uv_build"
 dev = [
     "pytest>=9.2.0",
     "ruff>=0.17.3",
+]
+
+[tool.uv]
+# MoGe's own project file sends torch to a CUDA-only index (Linux, Windows): its sources are not
+# ours to follow; this project declares none of its own
+no-sources = true
+# the platforms this pipeline runs on: dependencies left out below then drop from every lock
+environments = ["sys_platform == 'darwin'", "sys_platform == 'linux'"]
+# MoGe's demo and training pieces, never imported to estimate depth: left out (as never needed,
+# not `exclude-dependencies`: that still fetches their git sources to read them)
+override-dependencies = [
+    "gradio; sys_platform == 'never'",
+    "flex-gemm; sys_platform == 'never'",
+    "pipeline; sys_platform == 'never'",
+    "starlette; sys_platform == 'never'",
 ]
 
 [tool.ruff]

@@ -93,6 +93,7 @@
                   padding: 0; font-variant-numeric: tabular-nums; }
   #strip .wall { border-color: #3b7dd8; } #strip .drawn { border-color: #e8892b; }
   #strip .ground { border-color: #8c867c; } #strip .click { border-color: #4caf7a; }
+  #strip .model { border-color: #9b7bd4; border-style: dashed; }
   #strip .none { border: 2px dashed #e0523a; background: #2e2a25; }
   #strip button[aria-current=true] { outline: 2px solid #f2c14e; outline-offset: 1px; }
   #main { position: relative; display: grid; grid-template-rows: auto 1fr auto; min-height: 0; }
@@ -1004,7 +1005,8 @@ function dotClass(i) {
   if (typeof error !== 'number') return marks;
   return (error > 0.03 ? 'off' : error > 0.01 ? 'near' : '') + marks;
 }
-const DEPTH_FROM = { wall: 'mur trouvé', drawn: 'mur dessiné', ground: 'la rue', click: 'second clic' };
+const DEPTH_FROM = { wall: 'mur trouvé', drawn: 'mur dessiné', ground: 'la rue', click: 'second clic',
+  model: 'le modèle de profondeur (aucun mur ici)' };
 function dotTitle(i) {
   if (!fitted?.errors) return '';
   const percent = (v) => typeof v === 'number' ? `${(v * 100).toFixed(1)} %` : v === 'refusé' ? 'refusé' : '—';

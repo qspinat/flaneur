@@ -36,6 +36,7 @@ from flaneur import (
     db,
     dedup,
     depth,
+    depthmaps,
     export,
     facades,
     fakes,
@@ -535,13 +536,18 @@ def _details_of(home: match.Panorama, found: list[_Paired]) -> np.ndarray:
     return np.vstack(points) if points else np.empty((0, 3))
 
 
-def _seeing(make: bool) -> Callable[[match.Panorama, np.ndarray], np.ndarray]:
+def _seeing(
+    make: bool, segmenter: segment.Segmenter | None = None
+) -> Callable[[match.Panorama, np.ndarray], np.ndarray]:
     """What rays from a panorama see in its views (see segment.seen), read in VIEW_STRUCTURE;
     made the first time with the model (a lock of its own: photos are proposed meanwhile), or,
     without `make`, only read (`flaneur segmenter` makes them). The model failing (not
     fetched, short of memory) or a panorama not segmented: a building everywhere (the walls
-    made as before), which is said once for each; the model failing is not asked again."""
-    segmenter = segment.Segmenter(VIEW_STRUCTURE, threading.Lock(), _levelled_name, make)
+    made as before), which is said once for each; the model failing is not asked again.
+    `segmenter`: one shared with the depth's (see depthmaps.fills), read once for both."""
+    segmenter = segmenter or segment.Segmenter(
+        VIEW_STRUCTURE, threading.Lock(), _levelled_name, make
+    )
     said: set[str] = set()
     broken: list[Exception] = []
 
@@ -1883,6 +1889,25 @@ def _to_neighbours(
     ]
 
 
+def _page_closed(page: int) -> None:
+    """Refused while the placing page runs on `page`: the two do not fit in memory together."""
+    with socket.socket() as probe:
+        if probe.connect_ex(("127.0.0.1", page)) == 0:
+            typer.echo(f"la page tourne sur le port {page} : l'arrêter d'abord (mémoire)", err=True)
+            raise typer.Exit(1)
+
+
+def _within(answers: Path, reach: float) -> list[match.Panorama]:
+    """The panoramas within `reach` of a photo of the walk, the nearest to one first."""
+    with closing(db.connect(DB_PATH)) as conn:
+        spots = np.array([_place_of(me) for me in _walk(conn, _placing_answers(answers)[0])])
+    if not len(spots):
+        return []
+    spheres = _spheres()
+    nearest, _ = cKDTree(spots).query([(p.x, p.y) for p in spheres])
+    return [spheres[i] for i in np.argsort(nearest) if nearest[i] <= reach]
+
+
 @app.command("segmenter")
 def segment_panoramas(answers: Path = PLACINGS, page: int = 8772) -> None:
     """Segmente d'avance (bâti, végétation, ciel...) les panoramas que la page pour placer peut
@@ -1890,26 +1915,22 @@ def segment_panoramas(answers: Path = PLACINGS, page: int = 8772) -> None:
     charge pas le modèle (plusieurs gigaoctets) : un panorama pas segmenté y a ses murs sans
     la segmentation. Reprend où il s'était arrêté ; refuse de tourner la page ouverte (sur le
     port `page`) : les deux ne tiennent pas en mémoire ensemble."""
-    with socket.socket() as probe:
-        if probe.connect_ex(("127.0.0.1", page)) == 0:
-            typer.echo(f"la page tourne sur le port {page} : l'arrêter d'abord (mémoire)", err=True)
-            raise typer.Exit(1)
-    with closing(db.connect(DB_PATH)) as conn:
-        spots = np.array([_place_of(me) for me in _walk(conn, _placing_answers(answers)[0])])
-    if not len(spots):
-        typer.echo("aucune photo : rien à segmenter")
-        return
-    spheres = _spheres()
-    reach = queueing.NEAR_M + depth.NEAR_M[1]
-    nearest, _ = cKDTree(spots).query([(p.x, p.y) for p in spheres])
+    _page_closed(page)
     segmenter = segment.Segmenter(VIEW_STRUCTURE, threading.Lock(), _levelled_name, make=True)
-    reached = [p for p, d in zip(spheres, nearest, strict=True) if d <= reach]
+    reach = queueing.NEAR_M + depth.NEAR_M[1]
+    reached = _within(answers, reach)
+    if not reached:
+        typer.echo("aucune photo, ou aucun panorama à portée : rien à faire")
+        return
     left = [p for p in reached if not segmenter.kept(p)]
     typer.echo(f"{len(reached)} panoramas à moins de {reach:g} m d'une photo, {len(left)} à faire")
     started = time.monotonic()
     for n, panorama in enumerate(left, 1):
-        if segmenter.made(panorama) is None:
-            typer.echo(f"{panorama.id} : image illisible")
+        try:
+            if segmenter.made(panorama) is None:
+                typer.echo(f"{panorama.id} : image illisible")
+        except Exception as error:  # this one left (memory, a picture): the others go on
+            typer.echo(f"{panorama.id} : laissé ({error})", err=True)
         if n % 50 == 0 or n == len(left):
             typer.echo(f"{n}/{len(left)} ({time.monotonic() - started:.0f} s)")
 
@@ -1995,8 +2016,13 @@ def compare_parallax(answers: Path = PLACINGS) -> None:
     with closing(db.connect(DB_PATH)) as conn:
         fixed = _fixed_by_colmap(panoramas.load(conn), register.load(FIXES))
     views = _views(kept=8)  # a panorama and its neighbours
+    masks = segment.Segmenter(VIEW_STRUCTURE, threading.Lock(), _levelled_name, make=True)
     made = _Scenes(
-        spheres, fixed, lambda: views, threading.Lock(), segments, WALLS, seen=_seeing(make=True)
+        spheres, fixed, lambda: views, threading.Lock(), segments, WALLS, seen=_seeing(True, masks)
+    )
+    depth_made = depthmaps.Depthmaps(threading.Lock())  # live (MoGe-2), as on the page
+    fill = depthmaps.fills(
+        lambda p: depth_made.maps(made.by_id[p]), lambda p: masks.parts(made.by_id[p])
     )
     found, skipped = [], 0
     for row in sorted(rows, key=lambda r: r["registration"]["panorama"]):  # its views kept
@@ -2017,6 +2043,7 @@ def compare_parallax(answers: Path = PLACINGS) -> None:
                 walls,
                 made.by_id,
                 lambda other, at=panorama: made.pair_of(at, other),
+                fill=fill(walls),  # as the page: where no wall is met
             )
         except Exception as error:  # the matcher, a fit refused: this photo, not the others
             typer.echo(f"{row['photo_id']} : laissée de côté ({error})")
@@ -2168,8 +2195,9 @@ def place_photos(
         return np.ascontiguousarray(rgb[:, :, ::-1])  # as OpenCV reads pictures
 
     matching = threading.Lock()  # the matcher: proposals, and walls when they must be made
+    masks = segment.Segmenter(VIEW_STRUCTURE, threading.Lock(), _levelled_name, make=False)
     walls_made = _Scenes(
-        spheres, fixed, models, matching, segments, WALLS, seen=_seeing(make=False)
+        spheres, fixed, models, matching, segments, WALLS, seen=_seeing(False, masks)
     )
 
     def walls_at(panorama: str, chosen: tuple[str, ...] | None) -> facades.Scene | None:
@@ -2188,6 +2216,16 @@ def place_photos(
         """A neighbour set right against a panorama (see _Scenes.pair_of); live only."""
         return walls_made.pair_of(panorama, neighbour) if live else None
 
+    depth_made = depthmaps.Depthmaps(matching)  # live: the model loaded at the first need
+
+    def maps_of(panorama: str) -> np.ndarray | None:
+        """A panorama's views' depth by the model (MoGe-2), made the first time it is asked."""
+        return depth_made.maps(by_id[panorama]) if panorama in by_id else None
+
+    def parts_of(panorama: str) -> np.ndarray | None:
+        """What each pixel of a panorama's views shows (segmented ahead: `flaneur segmenter`)."""
+        return masks.parts(by_id[panorama]) if panorama in by_id else None
+
     sources = placing.Sources(
         photos,
         spheres,
@@ -2204,6 +2242,7 @@ def place_photos(
         fixed=fixed,
         walls=WALLS,
         matching=matching,
+        fill=depthmaps.fills(maps_of, parts_of),
     )
     with httpx.Client(timeout=10, follow_redirects=True) as client:
         _serve_page(
