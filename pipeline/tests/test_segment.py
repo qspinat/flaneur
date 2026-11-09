@@ -138,3 +138,36 @@ def test_the_model_is_given_a_plain_rgb_picture():
     segment.Segmenter._segmented(view, lambda **_: None, Processor(), "cpu", torch.float32)
 
     assert given == {"contiguous": True, "blue": 255}  # RGB: the blue channel last
+
+
+@pytest.mark.parametrize(
+    "name, part",
+    [
+        ("Building", segment.Part.BUILT),
+        ("Wall", segment.Part.BUILT),
+        ("Sidewalk", segment.Part.GROUND),
+        ("Road", segment.Part.GROUND),
+        ("Vegetation", segment.Part.STANDING),
+        ("Street Light", segment.Part.STANDING),
+        ("Car", segment.Part.MOVING),
+        ("Person", segment.Part.MOVING),
+        ("Bicycle", segment.Part.MOVING),
+        ("Sky", segment.Part.ELSE),
+        ("Something new", segment.Part.ELSE),
+    ],
+)
+def test_each_class_has_its_part(name, part):
+    assert segment.part_of(name) == part
+
+
+def test_kept_classes_give_each_pixel_its_part(tmp_path):
+    parts = _kept(tmp_path, ["Car", "Building"]).parts(_panorama(tmp_path / "p.jpg"))
+
+    assert parts.shape == (len(match.VIEW_HEADINGS), SIDE, SIDE)
+    assert (parts == segment.Part.MOVING).all()
+
+
+def test_parts_of_a_panorama_not_segmented_are_none(tmp_path):
+    segmenter = segment.Segmenter(tmp_path, threading.Lock(), lambda p: p.id, make=False)
+
+    assert segmenter.parts(_panorama(tmp_path / "p.jpg")) is None

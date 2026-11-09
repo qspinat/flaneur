@@ -6,7 +6,7 @@ import cv2
 import numpy as np
 import pytest
 
-from flaneur import depthmaps, facades, match
+from flaneur import depthmaps, facades, match, segment
 
 SIDE = 32
 VIEWS = len(match.VIEW_HEADINGS)
@@ -82,66 +82,58 @@ def test_the_grid_s_rays_fall_on_their_own_cells():
     assert found.tolist() == maps[:, :, middle].ravel().tolist()
 
 
-def _panorama(tmp_path, name="p1") -> match.Panorama:
+def _panorama(tmp_path) -> match.Panorama:
     """A panorama whose picture is a plain grey 360°."""
-    path = tmp_path / f"{name}.jpg"
+    path = tmp_path / "p1.jpg"
     cv2.imwrite(str(path), np.full((64, 128, 3), 128, np.uint8))
-    return match.Panorama(name, 0.0, 0.0, 0.0, 0.0, path)
+    return match.Panorama("p1", 0.0, 0.0, 0.0, 0.0, path)
 
 
-def test_maps_are_made_once_along_each_ray_and_kept(tmp_path):
+def test_maps_are_made_live_once_along_each_ray_and_kept_in_memory(tmp_path):
     calls = []
 
     def estimate(view: np.ndarray) -> np.ndarray:  # 4 m ahead everywhere along the axis
         calls.append(view.shape)
         return np.full(view.shape[:2], 4.0)
 
-    maker = depthmaps.Depthmaps(
-        tmp_path / "depth", threading.Lock(), lambda p: p.id, estimate=estimate, side=SIDE
-    )
+    maker = depthmaps.Depthmaps(threading.Lock(), estimate=estimate, side=SIDE)
     panorama = _panorama(tmp_path)
 
     first = maker.maps(panorama)
-    again = depthmaps.Depthmaps(tmp_path / "depth", threading.Lock(), lambda p: p.id, make=False)
+    again = maker.maps(panorama)
 
     assert len(calls) == VIEWS
     assert first.shape == (VIEWS, SIDE, SIDE)
     assert first[0, SIDE // 2, SIDE // 2] == pytest.approx(4.0, abs=0.05)  # the axis: as given
     assert first[0, 0, 0] > 4.0 * 1.2  # a corner's ray is longer than its depth
-    assert again.kept(panorama)
-    assert np.allclose(again.maps(panorama), first)
+    assert again is first
 
 
-def test_without_making_a_missing_panorama_has_no_maps(tmp_path):
-    reader = depthmaps.Depthmaps(tmp_path / "depth", threading.Lock(), lambda p: p.id, make=False)
+def test_an_unreadable_picture_has_no_maps(tmp_path):
+    maker = depthmaps.Depthmaps(threading.Lock(), estimate=lambda v: np.ones(v.shape[:2]))
+    missing = match.Panorama("gone", 0.0, 0.0, 0.0, 0.0, tmp_path / "gone.jpg")
 
-    assert reader.maps(_panorama(tmp_path)) is None
-    assert not reader.kept(_panorama(tmp_path))
+    assert maker.maps(missing) is None
 
 
-def test_depth_pro_is_given_a_plain_rgb_picture(tmp_path):
+def test_moge_is_given_a_plain_rgb_view_at_low_resolution():
     torch = pytest.importorskip("torch")
     given = {}
 
-    class Processor:
-        def __call__(self, images, **_):  # transformers' processors refuse reversed strides
-            given["contiguous"] = images.flags.c_contiguous
-            return _Inputs({"pixel_values": torch.zeros(1, 3, 4, 4)})
+    class Model:
+        def infer(self, image, **options):
+            given.update(options, shape=tuple(image.shape), dtype=image.dtype)
+            return {"depth": torch.full(image.shape[-2:], 7.0)}
 
-        def post_process_depth_estimation(self, found, target_sizes):
-            return [{"predicted_depth": torch.ones(target_sizes[0])}]
+    maker = depthmaps.Depthmaps(threading.Lock())
+    maker.loaded = (Model(), "cpu", torch.float32)
 
-    maker = depthmaps.Depthmaps(tmp_path, threading.Lock(), lambda p: p.id)
-    maker.loaded = (lambda **_: None, Processor(), "cpu", torch.float32)
+    depth = maker._moge(np.zeros((8, 8, 3), np.uint8)[:, ::-1])
 
-    depth = maker._depth_pro(np.zeros((8, 8, 3), np.uint8)[:, ::-1])
-
-    assert given["contiguous"] and depth.shape == (8, 8)
-
-
-class _Inputs(dict):
-    def to(self, *_):
-        return self
+    assert depth.shape == (8, 8) and depth[0, 0] == pytest.approx(7.0)
+    assert given["shape"] == (3, 8, 8) and given["dtype"] == torch.float32
+    assert given["fov_x"] == match.VIEW_FOV and given["resolution_level"] == depthmaps.LEVEL
+    assert given["apply_mask"] is False
 
 
 def test_the_sky_has_no_depth():
@@ -163,3 +155,53 @@ def test_the_sky_has_no_depth():
     up, ahead = _toward(0.0, 30.0), _toward(0.0, 0.0)
 
     assert np.isnan(fill(up)).all() and np.isfinite(fill(ahead)).all()
+
+
+def _scene() -> facades.Scene:
+    """A street running north, its walls 4 m to either side of a camera 2 m above it."""
+    return facades.Scene(
+        "p1",
+        (0.0, 0.0, 2.0),
+        0.0,
+        (
+            facades.Wall((-4.0, -60.0), (-4.0, 60.0), 20.0, "fitted"),
+            facades.Wall((4.0, -60.0), (4.0, 60.0), 20.0, "fitted"),
+        ),
+        (),
+        0,
+    )
+
+
+def test_the_model_is_taken_only_on_what_stands():
+    maps = np.full((VIEWS, SIDE, SIDE), 9.0)
+    parts = np.full((VIEWS, SIDE, SIDE), segment.Part.BUILT, np.int8)
+    parts[0, : SIDE // 2, :] = segment.Part.ELSE  # the upper half facing north: the sky
+    up = _toward(0.0, 20.0)
+
+    assert np.isnan(depthmaps.Filler(_scene(), maps, parts)(up)).all()
+    assert np.isfinite(depthmaps.Filler(_scene(), maps)(up)).all()
+
+
+def test_behind_what_passes_the_street_is_rebuilt():
+    maps = np.full((VIEWS, SIDE, SIDE), 9.0)
+    parts = np.full((VIEWS, SIDE, SIDE), segment.Part.GROUND, np.int8)
+    parts[0, SIDE // 2 :, SIDE // 3 : 2 * SIDE // 3] = segment.Part.MOVING
+    down = _toward(0.0, -20.0)  # meets the street 2 / tan(20°) ≈ 5.5 m ahead
+
+    found = depthmaps.Filler(_scene(), maps, parts)(down)
+
+    assert found[0] == pytest.approx(2.0 / np.sin(np.radians(20.0)), rel=0.05)
+
+
+def test_a_model_that_fails_leaves_the_walls_alone_and_is_not_asked_again(tmp_path):
+    calls = []
+
+    def broken(view: np.ndarray) -> np.ndarray:
+        calls.append(1)
+        raise RuntimeError("no memory left")
+
+    maker = depthmaps.Depthmaps(threading.Lock(), estimate=broken, side=SIDE)
+
+    assert maker.maps(_panorama(tmp_path)) is None
+    assert maker.maps(_panorama(tmp_path)) is None
+    assert len(calls) == 1

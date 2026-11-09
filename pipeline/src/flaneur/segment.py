@@ -12,6 +12,7 @@ import functools
 import sys
 import threading
 from collections.abc import Callable
+from enum import IntEnum
 from pathlib import Path
 
 import cv2
@@ -24,6 +25,114 @@ MODEL = "facebook/mask2former-swin-large-mapillary-vistas-semantic"
 STRUCTURE = ("Building", "Wall", "Bridge", "Tunnel")  # what a wall may stand on
 UNSEEN, BUILT, SKY, OTHER = 0, 1, 2, 3  # what a ray sees in a panorama's views (see seen)
 KEPT = 16  # panoramas' kinds kept in memory (a scene reads its own once per neighbour)
+# what stands where it stood, or near enough to give a depth (Mapillary Vistas' names): the
+# ground, and the rest of the street that does not pass (trees, fixed furniture)
+GROUND = frozenset(
+    {
+        "Curb",
+        "Bike Lane",
+        "Crosswalk - Plain",
+        "Curb Cut",
+        "Parking",
+        "Pedestrian Area",
+        "Rail Track",
+        "Road",
+        "Service Lane",
+        "Sidewalk",
+        "Lane Marking - Crosswalk",
+        "Lane Marking - General",
+        "Terrain",
+        "Sand",
+        "Snow",
+        "Water",
+        "Manhole",
+        "Catch Basin",
+        "Pothole",
+    }
+)
+STANDING = frozenset(
+    {
+        "Vegetation",
+        "Fence",
+        "Guard Rail",
+        "Barrier",
+        "Banner",
+        "Bench",
+        "Bike Rack",
+        "Billboard",
+        "CCTV Camera",
+        "Fire Hydrant",
+        "Junction Box",
+        "Mailbox",
+        "Phone Booth",
+        "Street Light",
+        "Pole",
+        "Traffic Sign Frame",
+        "Utility Pole",
+        "Traffic Light",
+        "Traffic Sign (Back)",
+        "Traffic Sign (Front)",
+        "Trash Can",
+    }
+)
+# what passes: its depth is that of the moment, not of the street behind it
+MOVING = frozenset(
+    {
+        "Bird",
+        "Ground Animal",
+        "Person",
+        "Bicyclist",
+        "Motorcyclist",
+        "Other Rider",
+        "Bicycle",
+        "Boat",
+        "Bus",
+        "Car",
+        "Caravan",
+        "Motorcycle",
+        "On Rails",
+        "Other Vehicle",
+        "Trailer",
+        "Truck",
+        "Wheeled Slow",
+        "Car Mount",
+        "Ego Vehicle",
+    }
+)
+
+
+class Part(IntEnum):
+    """What a pixel shows, for depth: a building, the ground, something else that stands (a
+    tree, a lamp post), something passing (a car, a person), or else (the sky, a class not
+    listed)."""
+
+    ELSE = 0
+    BUILT = 1
+    GROUND = 2
+    STANDING = 3
+    MOVING = 4
+
+
+STILL = (Part.BUILT, Part.GROUND, Part.STANDING)  # where a model's depth is the street's
+
+
+_PART = {
+    name: part
+    for part, names in (
+        (Part.BUILT, STRUCTURE),
+        (Part.GROUND, GROUND),
+        (Part.STANDING, STANDING),
+        (Part.MOVING, MOVING),
+    )
+    for name in names
+}
+
+
+def part_of(name: str) -> Part:
+    """A class's part (see Part), by its name."""
+    return _PART.get(name, Part.ELSE)
+
+
 _AXES = np.array([match._view_axes(h, match.VIEW_PITCH) for h in match.VIEW_HEADINGS])
 
 
@@ -58,43 +167,18 @@ class _NotRead(Exception):
     """A panorama whose picture could not be read: nothing kept, asked again next time."""
 
 
-def by_model(path: Path, model: str = MODEL) -> bool:
-    """Whether what is kept at `path` was made by `model` (another's is made again)."""
+def _by_model(path: Path) -> bool:
+    """Whether classes are kept at `path`, made by the model (another's are made again)."""
     if not path.exists():
         return False
     with np.load(path) as kept:
-        return str(kept["model"]) == model
-
-
-def loaded(name: str, kind: str) -> tuple:
-    """A model of transformers (`kind`: its class's name) and its processor, on the graphics
-    chip if there is one, in half precision there (half the memory), and the device and number
-    type: (model, processor, device, half). Torch and transformers are imported only here: they
-    take seconds, and most commands never use a model."""
-    if "pycolmap" in sys.modules:  # their OpenMP runtimes abort one process (see match)
-        raise RuntimeError(f"{name} et pycolmap ne se chargent pas ensemble")
-    import torch
-    import transformers
-
-    device = "mps" if torch.backends.mps.is_available() else "cpu"
-    half = torch.float16 if device == "mps" else torch.float32
-    processor = transformers.AutoImageProcessor.from_pretrained(name)
-    model = getattr(transformers, kind).from_pretrained(name, dtype=half)
-    return model.to(device).eval(), processor, device, half
+        return str(kept["model"]) == MODEL
 
 
 def rgb(view: np.ndarray) -> np.ndarray:
     """A view as models take it: RGB, contiguous (transformers' processors refuse an OpenCV picture
     reversed in place, its strides negative, once torchvision is installed)."""
     return cv2.cvtColor(view, cv2.COLOR_BGR2RGB)
-
-
-def let_go(device: str) -> None:
-    """The graphics chip's cache let go: memory is short."""
-    if device == "mps":
-        import torch
-
-        torch.mps.empty_cache()
 
 
 class NotSegmented(Exception):
@@ -117,6 +201,7 @@ class Segmenter:
         self.folder, self.lock, self.name, self.make = folder, lock, name, make
         self.loaded = None
         self._kept = functools.lru_cache(maxsize=KEPT)(self._kinds)
+        self.parts = functools.lru_cache(maxsize=KEPT)(self._parts)
 
     def kinds(self, panorama: match.Panorama) -> np.ndarray | None:
         """What each pixel of the panorama's views shows: BUILT (a building, a wall, a bridge, a
@@ -125,6 +210,15 @@ class Segmenter:
             return self._kept(panorama)
         except _NotRead:
             return None
+
+    def _parts(self, panorama: match.Panorama) -> np.ndarray | None:
+        """Each pixel of the panorama's views as building, ground, standing, moving or else (see
+        Part); None if it is not segmented, or its picture cannot be read."""
+        try:
+            classes, labels = self.classes(panorama)
+        except (NotSegmented, _NotRead):
+            return None
+        return np.array([part_of(str(name)) for name in labels], np.int8)[classes]
 
     def _kinds(self, panorama: match.Panorama) -> np.ndarray:
         classes, labels = self.classes(panorama)
@@ -139,13 +233,13 @@ class Segmenter:
 
     def kept(self, panorama: match.Panorama) -> bool:
         """Whether the panorama's classes are kept, made by the model."""
-        return by_model(self._path(panorama))
+        return _by_model(self._path(panorama))
 
     def made(self, panorama: match.Panorama) -> Path | None:
         """Where the panorama's classes are kept, made if they were not (or by another model);
         None if its picture cannot be read."""
         path = self._path(panorama)
-        if not by_model(path):
+        if not _by_model(path):
             if not self.make:
                 raise NotSegmented(panorama.id)
             picture = cv2.imread(str(panorama.path))
@@ -153,7 +247,7 @@ class Segmenter:
                 return None
             views = [match.perspective(picture, panorama.axes, h) for h in match.VIEW_HEADINGS]
             with self.lock:
-                if not by_model(path):  # made meanwhile, by the request that held the lock
+                if not _by_model(path):  # made meanwhile, by the request that held the lock
                     self._write(path, views)
         return path
 
@@ -172,7 +266,10 @@ class Segmenter:
     def _write(self, path: Path, views: list[np.ndarray]) -> None:
         model, processor, device, half, labels = self._model()
         classes = np.array([self._segmented(v, model, processor, device, half) for v in views])
-        let_go(device)
+        if device == "mps":
+            import torch
+
+            torch.mps.empty_cache()  # memory is short: the chip's cache let go
         path.parent.mkdir(parents=True, exist_ok=True)
         write_atomic(
             path,
@@ -186,10 +283,18 @@ class Segmenter:
         once; torch and transformers imported only here: they take seconds, and most commands
         never segment)."""
         if self.loaded is None:
-            model, processor, device, half = loaded(MODEL, "Mask2FormerForUniversalSegmentation")
+            if "pycolmap" in sys.modules:  # their OpenMP runtimes abort one process (see match)
+                raise RuntimeError("segmentation et pycolmap ne se chargent pas ensemble")
+            import torch
+            from transformers import AutoImageProcessor, Mask2FormerForUniversalSegmentation
+
+            device = "mps" if torch.backends.mps.is_available() else "cpu"
+            half = torch.float16 if device == "mps" else torch.float32  # half the memory
+            processor = AutoImageProcessor.from_pretrained(MODEL)
+            model = Mask2FormerForUniversalSegmentation.from_pretrained(MODEL, dtype=half)
             names = model.config.id2label
             labels = [names[i] for i in range(len(names))]
-            self.loaded = (model, processor, device, half, labels)
+            self.loaded = (model.to(device).eval(), processor, device, half, labels)
         return self.loaded
 
     @staticmethod

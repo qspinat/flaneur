@@ -4,7 +4,6 @@ import functools
 import hashlib
 import io
 import json
-import os
 import shutil
 import socket
 import threading
@@ -82,12 +81,6 @@ CORRECTIONS = DATA / "pilot" / "panorama_corrections.json"  # on the buildings (
 POSES = DATA / "pilot" / "panorama_poses.json"  # panoramas set right on two surveys (see poses)
 VIEW_STRUCTURE = (  # each panorama's views' pixel classes (see segment), as views are cut now
     DATA / "raw" / "view_structure" / f"{match.VIEW_SIDE}_{match.VIEW_FOV}_{match.VIEW_PITCH}"
-)
-VIEW_DEPTH = (  # each panorama's views' depth by a model (see depthmaps), as views are cut now
-    DATA
-    / "raw"
-    / "view_depth"
-    / f"{match.VIEW_SIDE}_{match.VIEW_FOV}_{match.VIEW_PITCH}_{depthmaps.SIDE}"
 )
 PAIR_MATCHES = (  # each pair's raw matches, made once (matcher), as views are cut now
     DATA / "raw" / "pair_matches" / f"{match.VIEW_SIDE}_{match.VIEW_FOV}_{match.VIEW_PITCH}"
@@ -543,13 +536,18 @@ def _details_of(home: match.Panorama, found: list[_Paired]) -> np.ndarray:
     return np.vstack(points) if points else np.empty((0, 3))
 
 
-def _seeing(make: bool) -> Callable[[match.Panorama, np.ndarray], np.ndarray]:
+def _seeing(
+    make: bool, segmenter: segment.Segmenter | None = None
+) -> Callable[[match.Panorama, np.ndarray], np.ndarray]:
     """What rays from a panorama see in its views (see segment.seen), read in VIEW_STRUCTURE;
     made the first time with the model (a lock of its own: photos are proposed meanwhile), or,
     without `make`, only read (`flaneur segmenter` makes them). The model failing (not
     fetched, short of memory) or a panorama not segmented: a building everywhere (the walls
-    made as before), which is said once for each; the model failing is not asked again."""
-    segmenter = segment.Segmenter(VIEW_STRUCTURE, threading.Lock(), _levelled_name, make)
+    made as before), which is said once for each; the model failing is not asked again.
+    `segmenter`: one shared with the depth's (see depthmaps.fills), read once for both."""
+    segmenter = segmenter or segment.Segmenter(
+        VIEW_STRUCTURE, threading.Lock(), _levelled_name, make
+    )
     said: set[str] = set()
     broken: list[Exception] = []
 
@@ -1919,49 +1917,22 @@ def segment_panoramas(answers: Path = PLACINGS, page: int = 8772) -> None:
     port `page`) : les deux ne tiennent pas en mémoire ensemble."""
     _page_closed(page)
     segmenter = segment.Segmenter(VIEW_STRUCTURE, threading.Lock(), _levelled_name, make=True)
-    _made_ahead(
-        answers, queueing.NEAR_M + depth.NEAR_M[1], segmenter.kept, segmenter.made, every=50
-    )
-
-
-def _made_ahead(
-    answers: Path,
-    reach: float,
-    kept: Callable[[match.Panorama], bool],
-    make: Callable[[match.Panorama], object | None],
-    every: int,
-) -> None:
-    """What `make` makes for each panorama within `reach` of a photo, nearest first, those
-    already `kept` left; how far it got told `every` so many (None made: its picture unread)."""
+    reach = queueing.NEAR_M + depth.NEAR_M[1]
     reached = _within(answers, reach)
     if not reached:
         typer.echo("aucune photo, ou aucun panorama à portée : rien à faire")
         return
-    left = [p for p in reached if not kept(p)]
+    left = [p for p in reached if not segmenter.kept(p)]
     typer.echo(f"{len(reached)} panoramas à moins de {reach:g} m d'une photo, {len(left)} à faire")
     started = time.monotonic()
     for n, panorama in enumerate(left, 1):
         try:
-            if make(panorama) is None:
+            if segmenter.made(panorama) is None:
                 typer.echo(f"{panorama.id} : image illisible")
         except Exception as error:  # this one left (memory, a picture): the others go on
             typer.echo(f"{panorama.id} : laissé ({error})", err=True)
-        if n % every == 0 or n == len(left):
+        if n % 50 == 0 or n == len(left):
             typer.echo(f"{n}/{len(left)} ({time.monotonic() - started:.0f} s)")
-
-
-@app.command("profondeur")
-def depth_of_panoramas(answers: Path = PLACINGS, page: int = 8772) -> None:
-    """Fait d'avance la profondeur des vues (Depth Pro, voir depthmaps) des panoramas où l'on
-    place les photos : ceux à moins de 40 m d'une photo, les plus proches d'abord. La page s'en
-    sert là où ses murs ne disent rien ; elle ne charge pas le modèle (plus de 5 Go). Reprend où
-    il s'était arrêté ; refuse de tourner la page ouverte (sur le port `page`)."""
-    _page_closed(page)
-    # the graphics chip's memory capped, set before torch starts (Depth Pro takes more than 5 GB)
-    os.environ.setdefault("PYTORCH_MPS_HIGH_WATERMARK_RATIO", "0.75")
-    os.environ.setdefault("PYTORCH_MPS_LOW_WATERMARK_RATIO", "0.6")
-    maker = depthmaps.Depthmaps(VIEW_DEPTH, threading.Lock(), _levelled_name, make=True)
-    _made_ahead(answers, queueing.NEAR_M, maker.kept, maker.maps, every=10)
 
 
 LIDAR_MNS = DATA / "raw" / "lidar_mns"  # IGN's LiDAR HD surface model, patches around panoramas
@@ -2045,10 +2016,14 @@ def compare_parallax(answers: Path = PLACINGS) -> None:
     with closing(db.connect(DB_PATH)) as conn:
         fixed = _fixed_by_colmap(panoramas.load(conn), register.load(FIXES))
     views = _views(kept=8)  # a panorama and its neighbours
+    masks = segment.Segmenter(VIEW_STRUCTURE, threading.Lock(), _levelled_name, make=True)
     made = _Scenes(
-        spheres, fixed, lambda: views, threading.Lock(), segments, WALLS, seen=_seeing(make=True)
+        spheres, fixed, lambda: views, threading.Lock(), segments, WALLS, seen=_seeing(True, masks)
     )
-    depth_made = depthmaps.Depthmaps(VIEW_DEPTH, threading.Lock(), _levelled_name, make=False)
+    depth_made = depthmaps.Depthmaps(threading.Lock())  # live (MoGe-2), as on the page
+    fill = depthmaps.fills(
+        lambda p: depth_made.maps(made.by_id[p]), lambda p: masks.parts(made.by_id[p])
+    )
     found, skipped = [], 0
     for row in sorted(rows, key=lambda r: r["registration"]["panorama"]):  # its views kept
         panorama, image = row["registration"]["panorama"], _exported(row["photo_id"])
@@ -2061,7 +2036,6 @@ def compare_parallax(answers: Path = PLACINGS) -> None:
                 raise ValueError("pas de panorama voisin")
             with Image.open(image) as photo:
                 size = photo.size[::-1]  # height, width
-            maps = depth_made.maps(made.by_id[panorama])  # as the page: where no wall is met
             one = placing.compared(
                 row,
                 made.by_id[panorama],
@@ -2069,7 +2043,7 @@ def compare_parallax(answers: Path = PLACINGS) -> None:
                 walls,
                 made.by_id,
                 lambda other, at=panorama: made.pair_of(at, other),
-                fill=None if maps is None else depthmaps.Filler(walls, maps),
+                fill=fill(walls),  # as the page: where no wall is met
             )
         except Exception as error:  # the matcher, a fit refused: this photo, not the others
             typer.echo(f"{row['photo_id']} : laissée de côté ({error})")
@@ -2221,8 +2195,9 @@ def place_photos(
         return np.ascontiguousarray(rgb[:, :, ::-1])  # as OpenCV reads pictures
 
     matching = threading.Lock()  # the matcher: proposals, and walls when they must be made
+    masks = segment.Segmenter(VIEW_STRUCTURE, threading.Lock(), _levelled_name, make=False)
     walls_made = _Scenes(
-        spheres, fixed, models, matching, segments, WALLS, seen=_seeing(make=False)
+        spheres, fixed, models, matching, segments, WALLS, seen=_seeing(False, masks)
     )
 
     def walls_at(panorama: str, chosen: tuple[str, ...] | None) -> facades.Scene | None:
@@ -2241,11 +2216,15 @@ def place_photos(
         """A neighbour set right against a panorama (see _Scenes.pair_of); live only."""
         return walls_made.pair_of(panorama, neighbour) if live else None
 
-    depth_made = depthmaps.Depthmaps(VIEW_DEPTH, threading.Lock(), _levelled_name, make=False)
+    depth_made = depthmaps.Depthmaps(matching)  # live: the model loaded at the first need
 
     def maps_of(panorama: str) -> np.ndarray | None:
-        """A panorama's views' depth by the model, made ahead (`flaneur profondeur`)."""
+        """A panorama's views' depth by the model (MoGe-2), made the first time it is asked."""
         return depth_made.maps(by_id[panorama]) if panorama in by_id else None
+
+    def parts_of(panorama: str) -> np.ndarray | None:
+        """What each pixel of a panorama's views shows (segmented ahead: `flaneur segmenter`)."""
+        return masks.parts(by_id[panorama]) if panorama in by_id else None
 
     sources = placing.Sources(
         photos,
@@ -2263,7 +2242,7 @@ def place_photos(
         fixed=fixed,
         walls=WALLS,
         matching=matching,
-        depth=maps_of,
+        fill=depthmaps.fills(maps_of, parts_of),
     )
     with httpx.Client(timeout=10, follow_redirects=True) as client:
         _serve_page(

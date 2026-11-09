@@ -641,7 +641,9 @@ def test_a_point_meeting_nothing_takes_the_model_s_depth_where_it_is_given(page,
     sphere = sources.spheres[0]
     _, _, photo_px, view_px, scene = _street(sphere, open_from=10)  # (12, -4, 3) seen through
     sources.scene = lambda panorama, chosen: scene
-    sources.depth = lambda panorama: np.ones((len(match.VIEW_HEADINGS), 40, 40), np.float32)
+    sources.fill = depthmaps.fills(
+        lambda panorama: np.ones((len(match.VIEW_HEADINGS), 40, 40), np.float32), lambda _: None
+    )
 
     status, answer = one(
         sources, "POST", "/api/parallax", _parallax_body(sphere, photo_px, view_px)

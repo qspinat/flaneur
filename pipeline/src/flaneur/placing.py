@@ -19,7 +19,7 @@ import cv2
 import numpy as np
 from shapely.geometry import Point
 
-from flaneur import depth, depthmaps, facades, localpage, match, placings, queueing, registration
+from flaneur import depth, facades, localpage, match, placings, queueing, registration
 from flaneur.gazetteer import to_degrees, to_metres
 from flaneur.panoramas import PANORAMA_HEIGHT_M
 from flaneur.registration import ViewOf
@@ -85,8 +85,8 @@ class Sources:
     segments: Callable[[float, float], list[facades.Segment]] = lambda *_: []
     fixed: set[str] = field(default_factory=set)  # the panoramas COLMAP placed itself
     walls: Path | None = None  # where walls drawn and removed by hand are kept (see facades)
-    # a model's depth of a panorama's views, made ahead (see depthmaps); none: walls only
-    depth: Callable[[str], np.ndarray | None] = lambda _: None
+    # a model's depth where a scene's walls say nothing (see depthmaps.fills); none: walls only
+    fill: Callable[[facades.Scene], Fill | None] = lambda _: None
     # the matcher, one thing at a time: proposals, and depth when it must be made
     matching: threading.Lock = field(default_factory=threading.Lock)
 
@@ -836,8 +836,7 @@ def serve(sources: Sources, port: int) -> HTTPServer:
     @lru_cache(maxsize=KEPT_VIEWS)
     def fill_of(scene: facades.Scene) -> Fill | None:
         """The model's depth where the scene's walls say nothing (see depthmaps.Filler)."""
-        maps = sources.depth(scene.panorama)
-        return None if maps is None else depthmaps.Filler(scene, maps)
+        return sources.fill(scene)
 
     @lru_cache(maxsize=KEPT_VIEWS)
     def metres_in(scene: facades.Scene, view: ViewOf) -> np.ndarray:
