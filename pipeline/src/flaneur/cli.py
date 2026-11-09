@@ -128,7 +128,8 @@ def read_captions() -> None:
 @app.command("geocode")
 def geocode_photos() -> None:
     """Place chaque photo sur sa rue, devant la porte du numéro que donne sa légende (atlas de
-    1836 et 1888, SoDUCo, CC BY-SA 4.0) ou au coin d'où elle a été prise ; puis compare avec
+    1836 et 1888, SoDUCo, CC BY-SA 4.0 ; numéros d'aujourd'hui, Base Adresse Nationale) ou au
+    coin d'où elle a été prise ; puis compare avec
     les positions de prise de vue connues (Albert-Kahn)."""
     with httpx.Client(timeout=300) as client:
         gazetteer = Gazetteer.load(client, DATA / "raw" / "gazetteer")
