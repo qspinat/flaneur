@@ -1,5 +1,6 @@
-"""Place each photo from its reading: the street it names, or the corner where the camera
-stood when the caption says "vue prise de <another street>".
+"""Place each photo from its reading: the street it names, the door of the number it gives on
+that street (the atlases of 1836 and 1888, see flaneur.addresses), or the corner where the
+camera stood when the caption says "vue prise de <another street>".
 
 A photo of a street that has since been removed gets the status "removed": its place will
 come from the old maps (Jacoubet), not from today's streets.
@@ -15,16 +16,25 @@ from shapely.geometry import Point
 from shapely.geometry.base import BaseGeometry
 
 from flaneur import db, dedup
+from flaneur.addresses import Addresses
 from flaneur.gazetteer import Gazetteer, Street, from_geojson, long_axis, to_geojson, to_metres
 from flaneur.read import NOT_A_STREET_VIEW, StreetMention, find_streets
 
 # Two streets closer than this are taken to meet: the camera stood where they meet.
 CORNER_TOLERANCE_M = 15
+# A door of the old atlases (flaneur.addresses): the true camera 24 m from it in the median,
+# 86 % within this (Albert-Kahn, 71 photos; the number is on the facade, the photographer
+# across the street or back from it).
+ADDRESS_M = 50
+# A door further than this from every street of its name the gazetteer knows is another
+# street's (a namesake elsewhere, or renamed or renumbered since the atlas).
+DOOR_FROM_STREET_M = 50
 
 
 @dataclass(frozen=True)
 class Location:
     # "corner": the camera stood where the photo's street meets the "vue prise de" street;
+    # "address": before the door of the number the caption gives (old atlases);
     # "viewpoint_street": on the "vue prise de" street, which does not meet the photo's;
     # "street": somewhere along the photo's street; "ambiguous": the name fits several
     # streets and nothing tells which; "removed": the street is gone (old maps will place
@@ -66,9 +76,52 @@ def choose(found: list[Street]) -> Street | None:
     return candidates[0] if len({id(s.geometry) for s in candidates}) == 1 else None
 
 
-def locate(reading: dict, gazetteer: Gazetteer) -> Location:
-    streets = [StreetMention(**s).label for s in json.loads(reading["streets"])]
+NO_DOORS = Addresses()
+
+
+def _door(
+    mentions: list[StreetMention],
+    arrondissements: list[int],
+    gazetteer: Gazetteer,
+    addresses: Addresses,
+) -> Location | None:
+    """Before the door of the first numbered street of the caption the atlases know, on that
+    street as the gazetteer knows it: the one nearest the door, within DOOR_FROM_STREET_M of
+    it (a street gone, or unknown today, cannot tell: its door is taken)."""
+    for mention in mentions:
+        if door := addresses.lookup(mention.label, mention.number):
+            found = gazetteer.lookup(mention.label, arrondissements)
+            placed = [s for s in found if s.geometry is not None]
+            if placed:
+                street = min(placed, key=lambda s: s.geometry.distance(door))
+                if street.geometry.distance(door) > DOOR_FROM_STREET_M:
+                    continue
+            else:
+                street = found[0] if found else None
+            label = f"{mention.number} {mention.label}"
+            return Location("address", label, street, door, precision_m=ADDRESS_M)
+    return None
+
+
+def locate(reading: dict, gazetteer: Gazetteer, addresses: Addresses = NO_DOORS) -> Location:
+    """Where a photo was taken, by its reading: the most precise of what its streets and its
+    numbered doors give (see STATUS_RANK)."""
+    mentions = [StreetMention(**s) for s in json.loads(reading["streets"])]
     arrondissements = json.loads(reading["arrondissements"])
+    door = _door(mentions, arrondissements, gazetteer, addresses)
+    by_street = _by_street(mentions, arrondissements, reading["viewpoint"], gazetteer)
+    return min(filter(None, (by_street, door)), key=_rank)
+
+
+def _by_street(
+    mentions: list[StreetMention],
+    arrondissements: list[int],
+    viewpoint: str | None,
+    gazetteer: Gazetteer,
+) -> Location:
+    """Where a photo was taken by its streets alone: their corner, the viewpoint's street, or
+    somewhere along its own."""
+    streets = [m.label for m in mentions]
     label, found = _first_found(streets, arrondissements, gazetteer)
     if not found:
         return Location("not_found")
@@ -77,11 +130,11 @@ def locate(reading: dict, gazetteer: Gazetteer) -> Location:
     street = choose(found)
     if street is None:
         return Location("ambiguous", label)
-    if reading["viewpoint"]:
+    if viewpoint:
         # Every street named in the viewpoint, except the photo's own street.
         others = [
             (mention.label, other)
-            for mention in find_streets(reading["viewpoint"])
+            for mention in find_streets(viewpoint)
             if (other := choose(gazetteer.lookup(mention.label, arrondissements)))
             and other.geometry is not street.geometry
         ]
@@ -104,7 +157,15 @@ def locate(reading: dict, gazetteer: Gazetteer) -> Location:
 
 
 # From the most precise kind of place to the least.
-STATUS_RANK = ("corner", "viewpoint_street", "street", "removed", "ambiguous", "not_found")
+STATUS_RANK = (  # a caption saying where the camera stood beats a door of the street shown
+    "corner",
+    "viewpoint_street",
+    "address",
+    "street",
+    "removed",
+    "ambiguous",
+    "not_found",
+)
 
 
 def _rank(location: Location) -> tuple[int, float]:
@@ -112,13 +173,15 @@ def _rank(location: Location) -> tuple[int, float]:
     return STATUS_RANK.index(location.status), precision
 
 
-def locate_negative(readings: list[dict], gazetteer: Gazetteer) -> Location:
+def locate_negative(
+    readings: list[dict], gazetteer: Gazetteer, addresses: Addresses = NO_DOORS
+) -> Location:
     """Where a negative printed several times was taken, from all its prints' captions read
     together: one print may name the street, another where the camera stood ("vue prise de
     la rue Galande"), so each print's streets are tried with every print's viewpoint."""
     viewpoints = {r["viewpoint"] for r in readings}
     return min(
-        (locate({**r, "viewpoint": v}, gazetteer) for r in readings for v in viewpoints),
+        (locate({**r, "viewpoint": v}, gazetteer, addresses) for r in readings for v in viewpoints),
         key=_rank,
     )
 
@@ -135,13 +198,15 @@ def _street_row(street: Street) -> dict:
     }
 
 
-def locate_all(conn: sqlite3.Connection, gazetteer: Gazetteer) -> Counter[str]:
+def locate_all(
+    conn: sqlite3.Connection, gazetteer: Gazetteer, addresses: Addresses = NO_DOORS
+) -> Counter[str]:
     """Locate every photo that may be a street view. Returns how many got each status."""
     excluded = ", ".join("?" * len(NOT_A_STREET_VIEW))
     readings = conn.execute(
         f"SELECT * FROM readings WHERE kind NOT IN ({excluded})", sorted(NOT_A_STREET_VIEW)
     ).fetchall()
-    locations = {r["photo_id"]: locate(r, gazetteer) for r in readings}
+    locations = {r["photo_id"]: locate(r, gazetteer, addresses) for r in readings}
     # A print of a negative printed several times (see flaneur.dedup) takes the place all
     # its prints' captions give together when it is of a more precise kind than its own (a
     # corner rather than a street). Two streets of the same kind are not compared: a shorter
@@ -156,7 +221,7 @@ def locate_all(conn: sqlite3.Connection, gazetteer: Gazetteer) -> Counter[str]:
         prints = [read[i] for i in negative if i in read]
         if not prints:
             continue
-        best = locate_negative(prints, gazetteer)
+        best = locate_negative(prints, gazetteer, addresses)
         for r in prints:
             own = locations.get(r["photo_id"])
             if own and _rank(best)[0] < _rank(own)[0]:

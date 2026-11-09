@@ -1,5 +1,6 @@
 """Archive sources. Each module exposes `harvest(client, cache_dir) -> Iterator[Photo]`."""
 
+import hashlib
 import json
 import math
 import time
@@ -15,6 +16,30 @@ def write_atomic(path: Path, write: Callable[[BinaryIO], None]) -> None:
     with tmp.open("wb") as out:
         write(out)
     tmp.replace(path)
+
+
+def sha256(path: Path) -> str:
+    with path.open("rb") as f:
+        return hashlib.file_digest(f, "sha256").hexdigest()
+
+
+def pinned_file(
+    path: Path, digest: str, download: Callable[[Path], None], source: str = ""
+) -> Path:
+    """`path`, fetched once by `download(part)` (from `source`, named if an error) and kept
+    only if its SHA-256 is `digest`; one kept that no longer has it is refused (to delete by
+    hand)."""
+    if not path.exists():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        part = path.with_name(f"{path.name}.part")
+        download(part)
+        if sha256(part) != digest:
+            part.unlink()
+            raise RuntimeError(f"{source or path.name} : SHA-256 inattendu, non gardé")
+        part.replace(path)
+    elif sha256(path) != digest:
+        raise RuntimeError(f"{path} : SHA-256 inattendu, refusé (à effacer)")
+    return path
 
 
 def write_text(path: Path, text: str) -> None:

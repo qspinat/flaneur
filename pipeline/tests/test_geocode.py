@@ -4,8 +4,9 @@ import json
 
 import pytest
 
+from flaneur.addresses import Addresses
 from flaneur.gazetteer import Gazetteer, key
-from flaneur.geocode import locate
+from flaneur.geocode import ADDRESS_M, locate
 
 
 def rectangle(lon_min, lat_min, lon_max, lat_max):
@@ -65,7 +66,9 @@ def gazetteer():
 
 def reading(streets, viewpoint=None, arrondissements=(1,)):
     return {
-        "streets": json.dumps([{"type": t, "name": n, "number": None} for t, n in streets]),
+        "streets": json.dumps(
+            [{"type": t, "name": n, "number": (number or [None])[0]} for t, n, *number in streets]
+        ),
         "arrondissements": json.dumps(list(arrondissements)),
         "viewpoint": viewpoint,
     }
@@ -235,3 +238,64 @@ def test_a_negative_whose_prints_were_never_read_is_left_alone(tmp_path, gazette
     dedup.save(conn, [{"p:1", "p:2"}])
 
     assert locate_all(conn, gazetteer) == {}
+
+
+DOORS = Addresses(
+    [
+        ("atlas_municipal_1888", "Rue Berger", "7 ", 2.3450, 48.8611),
+        ("atlas_municipal_1888", "Rue De La Poterie", "2 ", 2.3470, 48.8603),
+        ("atlas_jacoubet_1836", "Rue Des Prouvaires", "5 ", 2.3440, 48.8625),
+    ]
+)
+
+
+def test_a_street_and_number_the_atlases_know_place_the_photo_at_the_door(gazetteer):
+    location = locate(reading([("rue", "Berger", "7")]), gazetteer, DOORS)
+
+    assert location.status == "address" and location.label == "7 rue Berger"
+    assert location.street.label == "rue Berger" and location.precision_m == ADDRESS_M
+    assert location.point.geom_type == "Point"
+
+
+def test_a_number_the_atlases_lack_leaves_the_photo_on_its_street(gazetteer):
+    assert locate(reading([("rue", "Berger", "99")]), gazetteer, DOORS).status == "street"
+    assert locate(reading([("rue", "Berger", "7")]), gazetteer).status == "street"  # no atlases
+
+
+def test_a_corner_is_still_preferred_to_a_door(gazetteer):
+    location = locate(
+        reading([("rue", "de la Lingerie"), ("rue", "Berger", "7")], viewpoint="rue Berger"),
+        gazetteer,
+        DOORS,
+    )
+
+    assert location.status == "corner"
+
+
+def test_a_removed_or_unknown_street_with_a_known_door_is_placed_at_it(gazetteer):
+    removed = locate(reading([("rue", "de la Poterie", "2")]), gazetteer, DOORS)
+    unknown = locate(reading([("rue", "des Prouvaires", "5")]), gazetteer, DOORS)
+
+    assert removed.status == unknown.status == "address"
+    assert removed.street is not None and unknown.street is None
+
+
+def test_a_caption_s_name_gives_its_usable_keys_most_literal_first():
+    from flaneur.gazetteer import keys
+
+    assert list(keys("rue Berger enneigée")) == ["rue berger enneigee", "rue berger"]
+    assert list(keys("rue L")) == []
+
+
+def test_a_door_far_from_every_street_of_its_name_is_not_this_street_s(gazetteer):
+    far = Addresses([("atlas_municipal_1888", "Rue Berger", "7 ", 2.3600, 48.8700)])  # ~1.3 km
+
+    assert locate(reading([("rue", "Berger", "7")]), gazetteer, far).status == "street"
+
+
+def test_the_street_the_camera_stood_on_wins_over_the_door_of_the_one_it_shows(gazetteer):
+    location = locate(
+        reading([("rue", "Berger", "7")], viewpoint="quai de la Mégisserie"), gazetteer, DOORS
+    )
+
+    assert location.status == "viewpoint_street"

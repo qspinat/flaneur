@@ -25,3 +25,29 @@ def test_a_photos_crop_and_its_doubts_are_found_again_from_its_scan(tmp_path):
     assert info["crop_doubts"] == doubts == []
     assert info["photo_id"] == "pm:1"  # the rest of it kept
     assert not pilot.crop_again(folder)[0]  # found again, the same
+
+
+def test_a_photo_placed_at_a_door_of_a_street_no_longer_known_is_in_the_pilot(tmp_path):
+    from flaneur import db, pilot
+    from flaneur.gazetteer import to_geojson
+
+    conn = db.connect(tmp_path / "f.sqlite")
+    conn.execute(
+        "INSERT INTO photos (id, source, source_id, title, license, credit, image_url, raw) "
+        "VALUES ('pm:1', 'pm', '1', 'Rue', 'CC0', 'x', 'http://img/1', '{}')"
+    )
+    db.save_locations(
+        conn,
+        [
+            {
+                "photo_id": "pm:1",
+                "status": "address",
+                "label": "5 rue des Prouvaires",
+                "street_id": None,
+                "point": to_geojson(pilot.CENTRE),
+                "precision_m": 50,
+            }
+        ],
+    )
+
+    assert [r["id"] for r in pilot.select(conn)] == ["pm:1"]

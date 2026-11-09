@@ -64,6 +64,7 @@ from flaneur import (
     segment,
     stats,
 )
+from flaneur.addresses import Addresses
 from flaneur.blocks import Blocks
 from flaneur.gazetteer import Gazetteer, angle, to_degrees, to_metres
 from flaneur.panoramas import PANORAMA_HEIGHT_M
@@ -126,12 +127,14 @@ def read_captions() -> None:
 
 @app.command("geocode")
 def geocode_photos() -> None:
-    """Place chaque photo sur sa rue (ou au coin d'où elle a été prise) ; puis compare avec
+    """Place chaque photo sur sa rue, devant la porte du numéro que donne sa légende (atlas de
+    1836 et 1888, SoDUCo, CC BY-SA 4.0) ou au coin d'où elle a été prise ; puis compare avec
     les positions de prise de vue connues (Albert-Kahn)."""
     with httpx.Client(timeout=300) as client:
         gazetteer = Gazetteer.load(client, DATA / "raw" / "gazetteer")
+        doors = Addresses.load(client, DATA / "raw" / "addresses")
     with closing(db.connect(DB_PATH)) as conn:
-        counts = geocode.locate_all(conn, gazetteer)
+        counts = geocode.locate_all(conn, gazetteer, doors)
         distances = geocode.distances_to_truth(conn)
     typer.echo(f"placées : {dict(counts)}")
     for status, found in sorted(distances.items()):

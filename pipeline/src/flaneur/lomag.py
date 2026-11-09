@@ -13,7 +13,6 @@ if "pycolmap" in sys.modules:  # it would abort the process, without a word
     raise ImportError("pycolmap est chargé : torch ne peut pas l'être avec lui")
 
 import contextlib  # noqa: E402 (after the guard: torch must not load beside pycolmap)
-import hashlib  # noqa: E402
 from collections.abc import Iterator  # noqa: E402
 from pathlib import Path  # noqa: E402
 
@@ -24,6 +23,7 @@ from PIL import Image  # noqa: E402
 
 from flaneur import match  # noqa: E402
 from flaneur.match import KEYPOINTS, Features  # noqa: E402
+from flaneur.sources import pinned_file  # noqa: E402
 
 WEIGHTS = {  # file name → SHA-256, of every file LoMa-G loads
     "loma_G.pth": "9d925dc9861fb8e52489a1d2d2354780d5d38e34cbe0c6b10830d0ebe6055941",
@@ -41,24 +41,14 @@ def pinned(url: str, folder: Path, map_location=None) -> dict:
     name = url.rsplit("/", 1)[-1]
     if name not in WEIGHTS:
         raise RuntimeError(f"poids non épinglés, refusés : {url}")
-    path = folder / name
-    if not path.exists():
-        folder.mkdir(parents=True, exist_ok=True)
-        part = path.with_name(f"{name}.part")
-        torch.hub.download_url_to_file(url, str(part))
-        if _sha256(part) != WEIGHTS[name]:
-            part.unlink()
-            raise RuntimeError(f"{url} : SHA-256 inattendu, poids refusés (non gardés)")
-        part.replace(path)
-    elif _sha256(path) != WEIGHTS[name]:
-        raise RuntimeError(f"{path} : SHA-256 inattendu, poids refusés (à effacer)")
+    path = pinned_file(
+        folder / name,
+        WEIGHTS[name],
+        lambda part: torch.hub.download_url_to_file(url, str(part)),
+        url,
+    )
     # mapped from the file, not copied in: 2.7 GB of weights would otherwise go to swap
     return torch.load(path, map_location=map_location, weights_only=True, mmap=True)
-
-
-def _sha256(path: Path) -> str:
-    with path.open("rb") as weights:
-        return hashlib.file_digest(weights, "sha256").hexdigest()
 
 
 @contextlib.contextmanager

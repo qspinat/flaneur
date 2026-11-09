@@ -14,6 +14,7 @@ import math
 import re
 import unicodedata
 from collections import defaultdict
+from collections.abc import Iterator
 from dataclasses import dataclass, field, replace
 from functools import partial
 from pathlib import Path
@@ -115,6 +116,17 @@ def _usable(k: str) -> bool:
     return len(k.split()) >= 2
 
 
+def keys(label: str) -> Iterator[str]:
+    """The keys a caption's street name is looked up by, most literal first (see _variants),
+    those naming a street only (see _usable)."""
+    return (k for variant in _variants(label) if _usable(k := key(variant)))
+
+
+def lambert(lon, lat):
+    """Longitudes and latitudes (WGS 84, arrays) in metres, Lambert-93."""
+    return _TO_METRES(lon, lat)
+
+
 def _variants(label: str) -> list[str]:
     """Forms of a caption's street name to try, most literal first: the name itself (the
     part before " - "), "faubourg X" as "rue du Faubourg X", then the name without up to
@@ -169,14 +181,7 @@ class Gazetteer:
     def lookup(self, label: str, arrondissements: list[int] | None = None) -> list[Street]:
         """Streets that may carry this name; narrowed to the given arrondissements when that
         leaves at least one."""
-        found = next(
-            (
-                hit
-                for variant in _variants(label)
-                if _usable(k := key(variant)) and (hit := self.by_key.get(k))
-            ),
-            [],
-        )
+        found = next((hit for k in keys(label) if (hit := self.by_key.get(k))), [])
         if arrondissements:
             inside = [s for s in found if set(s.arrondissements) & set(arrondissements)]
             found = inside or found

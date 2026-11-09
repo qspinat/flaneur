@@ -36,7 +36,7 @@ INSIDE_SHARE = 0.5
 AROUND_POINT_M = 40
 MAX_SIDE = 1024
 SHEET_COLUMNS = 5
-PLACED = ("street", "corner", "viewpoint_street")
+PLACED = ("street", "corner", "address", "viewpoint_street")
 
 
 def select(conn: sqlite3.Connection) -> list[sqlite3.Row]:
@@ -48,8 +48,9 @@ def select(conn: sqlite3.Connection) -> list[sqlite3.Row]:
                    p.license, l.status, l.label, l.point, s.id AS street_id,
                    s.label AS street_label, s.geometry
             FROM locations l JOIN photos p ON p.id = l.photo_id
-            JOIN streets s ON s.id = l.street_id
+            LEFT JOIN streets s ON s.id = l.street_id
             WHERE l.status IN ({", ".join("?" * len(PLACED))})
+              AND (l.point IS NOT NULL OR s.id IS NOT NULL)
               AND (p.license = 'CC0' OR p.source = 'albert_kahn')""",
         PLACED,
     ).fetchall()
