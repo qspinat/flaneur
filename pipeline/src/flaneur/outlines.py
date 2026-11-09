@@ -29,14 +29,23 @@ class Edges:
     away_upright: np.ndarray
 
 
-def edges_of(photo: np.ndarray) -> Edges:
-    """The edges of a grey `photo`, found once for every camera tried on it."""
+def _canny(photo: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """A grey `photo`'s edges (thresholds from its own contrast), and its gradients."""
     soft = cv2.GaussianBlur(photo, (0, 0), 1.2)
     gx = cv2.Sobel(soft, cv2.CV_32F, 1, 0)
     gy = cv2.Sobel(soft, cv2.CV_32F, 0, 1)
-    strength = np.hypot(gx, gy)
-    low, high = np.percentile(strength, (70, 90))
-    edges = cv2.Canny(soft, max(low, 1.0), max(high, 2.0), L2gradient=True) > 0
+    low, high = np.percentile(np.hypot(gx, gy), (70, 90))
+    return cv2.Canny(soft, max(low, 1.0), max(high, 2.0), L2gradient=True) > 0, gx, gy
+
+
+def edge_mask(photo: np.ndarray) -> np.ndarray:
+    """The edges of a grey `photo`, as edges_of finds them (for drawing them)."""
+    return _canny(photo)[0]
+
+
+def edges_of(photo: np.ndarray) -> Edges:
+    """The edges of a grey `photo`, found once for every camera tried on it."""
+    edges, gx, gy = _canny(photo)
     upright = edges & (np.abs(gx) > UPRIGHT * np.abs(gy))
 
     def away(mask: np.ndarray) -> np.ndarray:

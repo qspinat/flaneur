@@ -950,10 +950,17 @@ def _nearest(
 
 SHEET_COLUMN = 300  # pixels per picture on the check sheets
 SHEET_PANORAMAS = 3  # today's view from the nearest of these whose picture is at hand
-OUTLINE_COLOUR = (0, 200, 255)  # BGR amber: the old photo's outlines over today, in grey
+SHEET_MOST_M = 30  # and no further from the camera: a view from further shows another street
+OUTLINE_COLOUR = (0, 200, 255)  # BGR amber (a golden yellow): the photo's outlines over today
 LABEL_BAND = 26  # pixels: the dark strip the sheet's labels are written on, above the pictures
 FRAME_COVER = 0.6  # a row or column this full of edges is a print's or mount's edge, not a street's
-SHEET_JPEG = [cv2.IMWRITE_JPEG_QUALITY, 85, cv2.IMWRITE_JPEG_SAMPLING_FACTOR, 0x111111]  # 4:4:4
+SHEET_JPEG = [  # colour not subsampled: the thin amber lines keep their colour
+    cv2.IMWRITE_JPEG_QUALITY,
+    85,
+    cv2.IMWRITE_JPEG_SAMPLING_FACTOR,
+    cv2.IMWRITE_JPEG_SAMPLING_FACTOR_444,
+]
+LINE_SHARE = 0.25  # of a sheet pixel an edge must cross to be drawn: texture stays lines
 
 
 def _unframed(edges: np.ndarray) -> np.ndarray:
@@ -975,9 +982,10 @@ def _outlines(old: np.ndarray, today: np.ndarray) -> np.ndarray:
     """Today's view (at the sheet's size) in grey, dimmed, with the old photo's outlines drawn
     on it in amber: the edges its camera was scored on (outlines.edges_of, at the size it is
     matched at), less the print's own border. Where they line up, it is placed right."""
-    edges = _unframed(outlines.edges_of(_grey(old)).away == 0)
+    edges = _unframed(outlines.edge_mask(_grey(old)))
     h, w = today.shape[:2]
-    edges = cv2.resize(edges.astype(np.float32), (w, h), interpolation=cv2.INTER_AREA) > 0
+    edges = cv2.resize(edges.astype(np.float32), (w, h), interpolation=cv2.INTER_AREA)
+    edges = edges >= LINE_SHARE
     drawn = cv2.cvtColor(
         cv2.convertScaleAbs(cv2.cvtColor(today, cv2.COLOR_BGR2GRAY), alpha=0.8), cv2.COLOR_GRAY2BGR
     )
@@ -1668,7 +1676,9 @@ def _sheet_row(
     if photo is None:
         return None
     old = _to_width(photo, width)
-    for panorama in _nearest(near_by, m.x, m.y)[:SHEET_PANORAMAS]:  # one may not be readable
+    for panorama in _nearest(near_by, m.x, m.y, SHEET_MOST_M)[
+        :SHEET_PANORAMAS
+    ]:  # one may be unreadable
         if (picture := read(panorama.path)) is not None:
             break
     else:
@@ -1679,13 +1689,15 @@ def _sheet_row(
     away = np.hypot(panorama.x - m.x, panorama.y - m.y)
     for column, text in enumerate(
         [
-            f"{photo_id}  {m.agree} pts, {m.panoramas} sources, {m.moved_m:.0f} m",
+            f"{photo_id}  {m.agree} pts, {m.panoramas} sources, a {m.moved_m:.0f} m de sa legende",
             f"aujourd'hui, panorama a {away:.0f} m",
             "contours de la photo sur aujourd'hui",
         ]
     ):
+        wide = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 0.45, 1)[0][0]
+        scale = 0.45 * min(1.0, (width - 12) / wide)  # within its own column
         cv2.putText(
-            row, text, (column * width + 6, 18), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1
+            row, text, (column * width + 6, 18), cv2.FONT_HERSHEY_SIMPLEX, scale, (255, 255, 255), 1
         )
     return row
 
@@ -1697,7 +1709,7 @@ def match_sheet(per_page: int = 10) -> None:
     heights, near_by, _ = _matching()
     if not near_by:
         raise typer.BadParameter("aucun panorama téléchargé")
-    read = functools.lru_cache(maxsize=4)(lambda path: cv2.imread(str(path)))
+    read = functools.lru_cache(maxsize=SHEET_PANORAMAS + 1)(lambda path: cv2.imread(str(path)))
     rows = [
         row
         for photo_id, m in sorted(_situated().items())
