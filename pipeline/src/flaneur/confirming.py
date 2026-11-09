@@ -1,6 +1,6 @@
 """The confirmation page: a local page where the user says yes or no to each photo placed
-(against today's panoramas, or chained from other old photos), seeing it beside today's
-street as rebuilt from the camera found. Verdicts are appended to
+(against today's panoramas, or chained from other old photos), seeing it beside today's true
+view framed as the camera found, with its outlines drawn on that view. Verdicts are appended to
 data/overrides/anchors.jsonl (versioned with the code): a "no" withdraws the photo, and the
 next chaining places again, without it, the photos it helped place. A "near" (the right
 buildings, the camera off) withdraws it too, kept for its camera to be set right later.
@@ -64,8 +64,8 @@ def serve(
     sheet: Callable[[str], bytes],
     port: int,
 ) -> HTTPServer:
-    """`sheet(photo_id)`: its row of pictures (JPEG): the photo, today's real view, today
-    rebuilt from its camera, the two laid over each other."""
+    """`sheet(photo_id)`: its row of pictures (JPEG): the photo, today's real view framed as
+    its camera, the photo's outlines on that view."""
     by_id = {photo["id"]: photo for photo in placed}
 
     class Handler(localpage.Handler):

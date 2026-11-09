@@ -405,3 +405,18 @@ def test_lomag_s_check_goes_stale_with_its_code_disk_s_with_the_panoramas_only()
     assert cli._check_setup("disk", "s") == "s"
     assert cli._check_setup("lomag", "s").startswith("s:")
     assert cli._check_setup("lomag", "s") != cli._check_setup("lomag", "t")
+
+
+def test_the_old_photo_s_outlines_are_drawn_on_today_s_view_in_amber():
+    old = np.full((400, 400, 3), 30, np.uint8)
+    old[120:280, 120:280] = 220  # a light square: its outline is the street's only edge
+    old[12:14] = old[:, 386:388] = 255  # the print's border, a few pixels in, as a crop leaves it
+    today = np.full((100, 100, 3), 100, np.uint8)  # the sheet's size: a quarter of the photo's
+
+    drawn = cli._outlines(old, today)
+
+    amber = (drawn == cli.OUTLINE_COLOUR).all(axis=2)
+    assert amber[29:32, 50].any()  # the square's top edge, at the sheet's size
+    assert not amber[45:55, 45:55].any()  # inside it
+    assert not amber[:6].any() and not amber[:, 94:].any()  # the print's border is not drawn
+    assert (drawn[50, 50] == 80).all()  # today, in grey, dimmed under the outlines

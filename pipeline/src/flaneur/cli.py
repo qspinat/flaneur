@@ -949,14 +949,40 @@ def _nearest(
 
 
 SHEET_COLUMN = 300  # pixels per picture on the check sheets
-REBUILT_FROM = 3  # the rebuilt view takes each spot from the best of these panoramas
-UNSEEN_COLOUR = (180, 0, 180)  # hatching (BGR), where no panorama sees: not a colour of Paris
+SHEET_PANORAMAS = 3  # today's view from the nearest of these whose picture is at hand
+OUTLINE_COLOUR = (0, 200, 255)  # BGR amber: the old photo's outlines over today, in grey
+LABEL_BAND = 26  # pixels: the dark strip the sheet's labels are written on, above the pictures
+FRAME_COVER = 0.6  # a row or column this full of edges is a print's or mount's edge, not a street's
+SHEET_JPEG = [cv2.IMWRITE_JPEG_QUALITY, 85, cv2.IMWRITE_JPEG_SAMPLING_FACTOR, 0x111111]  # 4:4:4
 
 
-def _hatching(size: tuple[int, int], every: int = 8) -> np.ndarray:
-    """Diagonal stripes over a picture of `size`."""
-    rows, columns = np.mgrid[0 : size[0], 0 : size[1]]
-    return (rows + columns) % every < 2
+def _unframed(edges: np.ndarray) -> np.ndarray:
+    """Edges without a print's own border or its mount's where they are found whole (the crop
+    may keep them, anywhere in the picture): a row or column they cover for the most part,
+    with its neighbours. Measured on the 297 photos exported: only mounts' and prints' edges
+    go; a border found in pieces stays (a thin frame, easy to tell from the street)."""
+    rows = np.flatnonzero(edges.mean(axis=1) > FRAME_COVER)
+    columns = np.flatnonzero(edges.mean(axis=0) > FRAME_COVER)
+    edges = edges.copy()
+    for i in rows:
+        edges[max(i - 1, 0) : i + 2] = False
+    for i in columns:
+        edges[:, max(i - 1, 0) : i + 2] = False
+    return edges
+
+
+def _outlines(old: np.ndarray, today: np.ndarray) -> np.ndarray:
+    """Today's view (at the sheet's size) in grey, dimmed, with the old photo's outlines drawn
+    on it in amber: the edges its camera was scored on (outlines.edges_of, at the size it is
+    matched at), less the print's own border. Where they line up, it is placed right."""
+    edges = _unframed(outlines.edges_of(_grey(old)).away == 0)
+    h, w = today.shape[:2]
+    edges = cv2.resize(edges.astype(np.float32), (w, h), interpolation=cv2.INTER_AREA) > 0
+    drawn = cv2.cvtColor(
+        cv2.convertScaleAbs(cv2.cvtColor(today, cv2.COLOR_BGR2GRAY), alpha=0.8), cv2.COLOR_GRAY2BGR
+    )
+    drawn[edges] = OUTLINE_COLOUR
+    return drawn
 
 
 def _to_width(image: np.ndarray, width: int) -> np.ndarray:
@@ -1632,86 +1658,56 @@ def _sheet_row(
     photo_id: str,
     m: match.Situated,
     heights: scene.CameraHeights,
-    blocks: Blocks,
     near_by: list[match.Panorama],
     read: Callable[[Path], np.ndarray | None],
     width: int = SHEET_COLUMN,
 ) -> np.ndarray | None:
-    """A photo situated, then the true view of a panorama nearby framed as it, today's street
-    rebuilt from its camera (hatched: what no panorama sees), and the photo laid over it;
-    each `width` wide."""
-    old = cv2.imread(str(_exported(photo_id)))
-    if old is None:
+    """A photo situated, then today's true view from the nearest panorama at hand, framed as
+    the camera found, and the photo's outlines drawn on that view; each `width` wide."""
+    photo = cv2.imread(str(_exported(photo_id)))
+    if photo is None:
         return None
-    old = _to_width(old, width)
-    size = old.shape[:2]
-    view = m.view(heights.street(m.x, m.y))
-    around = [
-        (p, picture)
-        for p in _nearest(near_by, m.x, m.y)[:REBUILT_FROM]
-        if (picture := read(p.path)) is not None
-    ]
-    if not around:
+    old = _to_width(photo, width)
+    for panorama in _nearest(near_by, m.x, m.y)[:SHEET_PANORAMAS]:  # one may not be readable
+        if (picture := read(panorama.path)) is not None:
+            break
+    else:
         return None
-    rebuilt, source = match.today_from(view, size, around, blocks, heights.streets)
-    unseen = source == match.UNSEEN
-    # the true view: from the panorama that gave the rebuilt view the most
-    most = (
-        int(np.bincount(source[source >= 0], minlength=len(around)).argmax())
-        if (source >= 0).any()
-        else 0
-    )
-    panorama, picture = around[most]
-    real = match.real_view(view, size, panorama, picture)
-    overlay = cv2.addWeighted(old, 0.55, rebuilt, 0.45, 0)
-    overlay[unseen] = old[unseen]  # where nothing of today is known: the old photo alone
-    rebuilt[unseen] = 128  # mid-grey between the stripes: not the sky, not a shadow
-    rebuilt[unseen & _hatching(size)] = UNSEEN_COLOUR
-    row = np.hstack([old, real, rebuilt, overlay])
+    real = match.real_view(m.view(heights.street(m.x, m.y)), old.shape[:2], panorama, picture)
+    pictures = np.hstack([old, real, _outlines(photo, real)])
+    row = np.vstack([np.full((LABEL_BAND, *pictures.shape[1:]), 40, np.uint8), pictures])
     away = np.hypot(panorama.x - m.x, panorama.y - m.y)
     for column, text in enumerate(
         [
-            f"{photo_id}  {m.agree} pts, {m.panoramas} sources, moved {m.moved_m:.0f} m",
-            f"real view, from {away:.0f} m away",
-            "rebuilt from the camera found",
-            "overlay",
+            f"{photo_id}  {m.agree} pts, {m.panoramas} sources, {m.moved_m:.0f} m",
+            f"aujourd'hui, panorama a {away:.0f} m",
+            "contours de la photo sur aujourd'hui",
         ]
     ):
-        for colour, thickness in (((0, 0, 0), 3), ((255, 255, 255), 1)):  # outlined
-            cv2.putText(
-                row,
-                text,
-                (column * width + 6, 18),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.45,
-                colour,
-                thickness,
-            )
+        cv2.putText(
+            row, text, (column * width + 6, 18), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1
+        )
     return row
 
 
 @app.command("match-sheet")
 def match_sheet(per_page: int = 10) -> None:
     """Planches de contrôle, une ligne par photo située : la photo ; la vraie vue d'un panorama
-    voisin, cadrée comme elle ; la rue d'aujourd'hui recomposée depuis sa caméra retrouvée
-    (hachures : ce qu'aucun panorama ne voit) ; la photo posée dessus."""
-    heights, near_by, then = _matching()
-    blocks = then(date.today().year).blocks
+    voisin, cadrée comme sa caméra retrouvée ; les contours de la photo sur cette vue."""
+    heights, near_by, _ = _matching()
     if not near_by:
         raise typer.BadParameter("aucun panorama téléchargé")
-    read = functools.lru_cache(maxsize=REBUILT_FROM)(lambda path: cv2.imread(str(path)))
+    read = functools.lru_cache(maxsize=4)(lambda path: cv2.imread(str(path)))
     rows = [
         row
         for photo_id, m in sorted(_situated().items())
-        if (row := _sheet_row(photo_id, m, heights, blocks, near_by, read)) is not None
+        if (row := _sheet_row(photo_id, m, heights, near_by, read)) is not None
     ]
     for stale in (DATA / "pilot").glob("match_sheet_*.jpg"):  # an earlier run's pages
         stale.unlink()
     for page in range(0, len(rows), per_page):
         out = DATA / "pilot" / f"match_sheet_{page // per_page + 1}.jpg"
-        cv2.imwrite(
-            str(out), np.vstack(rows[page : page + per_page]), [cv2.IMWRITE_JPEG_QUALITY, 82]
-        )
+        cv2.imwrite(str(out), np.vstack(rows[page : page + per_page]), SHEET_JPEG)
     typer.echo(f"{len(rows)} photos situées ; planches dans {DATA / 'pilot'}/match_sheet_*.jpg")
 
 
@@ -1741,11 +1737,10 @@ def _with_chained(
 @app.command("confirmer")
 def confirm_placed(port: int = 8768, open_browser: bool = True) -> None:
     """Ouvre la page de confirmation (locale) : oui ou non à chaque photo située, contre les
-    panoramas ou par enchaînement, vue à côté de la rue d'aujourd'hui refaite depuis sa
-    caméra. Un « non » la retire ; l'enchaînement suivant re-situe sans elle les photos
-    qu'elle avait aidé à situer."""
-    heights, near_by, then = _matching()
-    blocks = then(date.today().year).blocks
+    panoramas ou par enchaînement, à côté de la vraie vue d'aujourd'hui cadrée comme sa caméra
+    et de ses contours posés sur cette vue. Un « non » la retire ; l'enchaînement suivant
+    re-situe sans elle les photos qu'elle avait aidé à situer."""
+    heights, near_by, _ = _matching()
     with closing(db.connect(DB_PATH)) as conn:
         titles = {me.id: me.title for me in export.photos(conn, DATA / "pilot", REVIEWS)}
     chained = _chained()
@@ -1774,10 +1769,10 @@ def confirm_placed(port: int = 8768, open_browser: bool = True) -> None:
 
     @functools.lru_cache(maxsize=64)
     def sheet(photo_id: str) -> bytes:
-        row = _sheet_row(photo_id, situated[photo_id], heights, blocks, near_by, read, width=480)
+        row = _sheet_row(photo_id, situated[photo_id], heights, near_by, read, width=480)
         if row is None:
             return b""
-        return cv2.imencode(".jpg", row, [cv2.IMWRITE_JPEG_QUALITY, 85])[1].tobytes()
+        return cv2.imencode(".jpg", row, SHEET_JPEG)[1].tobytes()
 
     _serve_page(
         lambda: confirming.serve(placed, ANCHORS, _verdicts, sheet, port),
