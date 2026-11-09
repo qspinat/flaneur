@@ -1,6 +1,7 @@
 import hashlib
 import subprocess
 import sys
+from pathlib import Path
 from types import SimpleNamespace
 
 import cv2
@@ -72,3 +73,23 @@ def test_lomag_is_never_loaded_beside_pycolmap_torch_left_unloaded():
     )
     run = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True)
     assert run.stdout.strip() == "False"
+
+
+def test_weights_given_their_place_as_torch_hub_does_positionally_land_there(tmp_path, monkeypatch):
+    monkeypatch.setitem(lomag.WEIGHTS, "tiny.pth", _saved(tmp_path, {"w": torch.ones(3)}))
+    with lomag.loading_pinned(tmp_path):
+        loaded = torch.hub.load_state_dict_from_url(URL, None, "meta")
+
+    assert loaded["w"].device.type == "meta"
+
+
+def test_a_download_that_does_not_match_its_hash_is_not_kept(tmp_path, monkeypatch):
+    monkeypatch.setitem(lomag.WEIGHTS, "tiny.pth", "0" * 64)
+    monkeypatch.setattr(
+        torch.hub, "download_url_to_file", lambda url, dst, **_: Path(dst).write_bytes(b"garbled")
+    )
+
+    with pytest.raises(RuntimeError, match="SHA-256"):
+        lomag.pinned(URL, tmp_path)
+
+    assert not any(tmp_path.iterdir())

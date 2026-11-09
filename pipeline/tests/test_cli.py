@@ -325,26 +325,57 @@ def test_a_placement_kept_with_its_matcher_is_read_as_it_was_found():
     assert situated == match.Situated(**_kept())
 
 
+def test_a_placement_s_inputs_name_its_matcher_unless_disk_s_as_before():
+    assert cli._placed_inputs("i", "disk") == cli._placed_inputs("i", None) == "i"
+    assert cli._placed_inputs("i", "lomag") == "i:lomag"
+
+
 @pytest.mark.parametrize(
-    ("kept", "left"),
+    ("kept", "refused", "left"),
     [
-        (None, ["lomag", "disk"]),  # never matched
-        ({"inputs": "other"}, ["lomag", "disk"]),  # matched from other inputs
-        ({"inputs": "i"}, ["lomag"]),  # left unplaced by DISK alone, before LoMa-G
-        ({"inputs": "i", "tried": ["lomag"]}, ["disk"]),  # stopped before DISK
-        ({"inputs": "i", "tried": ["lomag", "disk"]}, []),
-        (_kept(), []),  # placed by DISK before LoMa-G: kept
-        (_kept(matcher="lomag"), []),
+        (None, False, ["lomag", "disk"]),  # never matched
+        ({"inputs": "other"}, False, ["lomag", "disk"]),  # matched from other inputs
+        ({"inputs": "i"}, False, ["lomag"]),  # left unplaced by DISK alone, before LoMa-G
+        ({"inputs": "i", "tried": ["lomag"]}, False, ["disk"]),  # stopped before DISK
+        ({"inputs": "i", "tried": ["disk"]}, False, ["lomag"]),  # LoMa-G's check had not passed
+        ({"inputs": "i", "tried": ["lomag", "disk"]}, False, []),
+        (_kept(), False, []),  # placed by DISK before LoMa-G: kept
+        (_kept(), True, ["lomag"]),  # ... unless turned down: LoMa-G's turn
+        (_kept(matcher="lomag", inputs="i:lomag", tried=["lomag"]), False, []),
+        (_kept(matcher="lomag", inputs="i:lomag", tried=["lomag"]), True, ["disk"]),
+        (_kept(matcher="disk", tried=["lomag", "disk"]), True, []),
+        (_kept(matcher="lomag", inputs="other:lomag", tried=["lomag"]), False, ["lomag", "disk"]),
     ],
 )
-def test_a_photo_is_matched_again_only_by_the_matchers_left_to_try(kept, left):
-    assert cli._left_to_try(kept, "i") == left
+def test_a_photo_is_matched_again_only_by_the_matchers_left_to_try(kept, refused, left):
+    assert cli._left_to_try(kept, "i", refused) == left
 
 
-def test_photos_placed_by_lomag_are_left_out_of_chaining_which_reads_disk_s_features():
-    matches = {"a": _kept(), "b": _kept(matcher="disk"), "c": _kept(matcher="lomag"), "d": None}
+def test_only_current_placements_by_lomag_are_left_out_of_chaining():
+    matches = {
+        "a": _kept(),
+        "b": _kept(matcher="disk"),
+        "c": _kept(matcher="lomag"),
+        "d": None,
+        "e": _kept(matcher="lomag"),  # stale or turned down: not situated
+    }
 
-    assert cli._not_chained(matches) == {"c"}
+    assert cli._not_chained(matches, {"a", "b", "c"}) == {"c"}
+
+
+def test_a_photo_placed_against_today_is_shown_so_rather_than_as_last_chained():
+    situated = {"a": "placed now"}
+    chained = {
+        "photos": {
+            "a": {"situated": _kept(), "round": 2, "from": ["b"]},
+            "c": {"situated": _kept(), "round": 1, "from": ["a"]},
+        }
+    }
+
+    shown, rounds = cli._with_chained(situated, chained, {"a", "c"})
+
+    assert shown["a"] == "placed now" and rounds["a"] == {"round": 0, "from": []}
+    assert shown["c"] == match.Situated(**_kept()) and rounds["c"] == {"round": 1, "from": ["a"]}
 
 
 def test_each_matcher_has_its_own_known_answer_check(tmp_path):
@@ -355,12 +386,22 @@ def test_each_matcher_has_its_own_known_answer_check(tmp_path):
 
 
 @pytest.mark.parametrize(
-    ("matcher", "found"),
+    ("kept", "found"),
     [
-        ("lomag", {"by": "LoMa-G"}),
-        ("disk", {"by": "DISK", "check": "LoMa-G n'a rien trouvé"}),
-        (None, {"by": "DISK (avant LoMa-G)"}),
+        (_kept(matcher="lomag", tried=["lomag"]), {"by": "LoMa-G"}),
+        (
+            _kept(matcher="disk", tried=["lomag", "disk"]),
+            {"by": "DISK", "check": "LoMa-G n'a rien trouvé de juste"},
+        ),
+        (_kept(matcher="disk", tried=["disk"]), {"by": "DISK"}),  # LoMa-G not tried yet
+        (_kept(), {"by": "DISK (avant LoMa-G)"}),
     ],
 )
-def test_the_page_tells_which_matcher_placed_a_photo_and_whether_to_check_it(matcher, found):
-    assert cli._found_by(_kept(matcher=matcher) if matcher else _kept()) == found
+def test_the_page_tells_which_matcher_placed_a_photo_and_whether_to_check_it(kept, found):
+    assert cli._found_by(kept) == found
+
+
+def test_lomag_s_check_goes_stale_with_its_code_disk_s_with_the_panoramas_only():
+    assert cli._check_setup("disk", "s") == "s"
+    assert cli._check_setup("lomag", "s").startswith("s:")
+    assert cli._check_setup("lomag", "s") != cli._check_setup("lomag", "t")

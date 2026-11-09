@@ -36,21 +36,29 @@ DESCRIBED_SIDE = 784  # DeDoDe reads the picture as a square of this side (LoMa'
 
 
 def pinned(url: str, folder: Path, map_location=None) -> dict:
-    """The weights at `url`, kept in `folder`: downloaded if missing, then loaded only if their
-    SHA-256 is the one pinned."""
+    """The weights at `url`, kept in `folder`: downloaded if missing (kept only if their SHA-256
+    is the one pinned), then loaded only if it is."""
     name = url.rsplit("/", 1)[-1]
     if name not in WEIGHTS:
         raise RuntimeError(f"poids non épinglés, refusés : {url}")
     path = folder / name
     if not path.exists():
         folder.mkdir(parents=True, exist_ok=True)
-        torch.hub.download_url_to_file(url, str(path))
-    with path.open("rb") as weights:
-        digest = hashlib.file_digest(weights, "sha256").hexdigest()
-    if digest != WEIGHTS[name]:
-        raise RuntimeError(f"{path} : SHA-256 inattendu, poids refusés")
+        part = path.with_name(f"{name}.part")
+        torch.hub.download_url_to_file(url, str(part))
+        if _sha256(part) != WEIGHTS[name]:
+            part.unlink()
+            raise RuntimeError(f"{url} : SHA-256 inattendu, poids refusés (non gardés)")
+        part.replace(path)
+    elif _sha256(path) != WEIGHTS[name]:
+        raise RuntimeError(f"{path} : SHA-256 inattendu, poids refusés (à effacer)")
     # mapped from the file, not copied in: 2.7 GB of weights would otherwise go to swap
     return torch.load(path, map_location=map_location, weights_only=True, mmap=True)
+
+
+def _sha256(path: Path) -> str:
+    with path.open("rb") as weights:
+        return hashlib.file_digest(weights, "sha256").hexdigest()
 
 
 @contextlib.contextmanager
@@ -58,8 +66,8 @@ def loading_pinned(folder: Path) -> Iterator[None]:
     """LoMa's weights loaded through `pinned` (from `folder`) while inside: torch.hub's
     loader, which LoMa calls for each of them, swapped for it."""
     before = torch.hub.load_state_dict_from_url
-    torch.hub.load_state_dict_from_url = lambda url, *args, **kwargs: pinned(
-        url, folder, kwargs.get("map_location")
+    torch.hub.load_state_dict_from_url = lambda url, model_dir=None, map_location=None, *_, **__: (
+        pinned(url, folder, map_location)
     )
     try:
         yield
@@ -102,10 +110,11 @@ class LoMaGMatcher(match.Matcher):
 
     def __init__(self, folder: Path):
         from loma import LoMa, LoMaG
+        from loma.device import device as loma_device
 
         with loading_pinned(folder / "torch" / "checkpoints"):
             self.model = LoMa(LoMaG())
-        self.device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
+        self.device = loma_device  # LoMa's own (cuda, else mps, else cpu)
         self.precision = "lomag"  # names the photos' pairs it makes (chain.Store.pairs)
 
     @torch.inference_mode()
