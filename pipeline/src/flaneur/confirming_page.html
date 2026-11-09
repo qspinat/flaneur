@@ -78,8 +78,9 @@ function open(n) {
     $('sheet').src = sheetOf(p);
   }
   const from = p.round === 0 ? 'contre les panoramas d\'aujourd\'hui' : `au tour ${p.round}, depuis ${p.from.join(', ')}`;
+  const by = p.by ? ` par ${p.by}` + (p.check ? ` (${p.check} : à vérifier de près)` : '') : '';
   $('meta').textContent = `${at + 1} / ${photos.length} · ${p.id} · ${p.title || ''}`;
-  $('why').textContent = `Située ${from} : ${p.agree} points d'accord, à ${p.moved_m} m de sa légende.`
+  $('why').textContent = `Située ${from}${by} : ${p.agree} points d'accord, à ${p.moved_m} m de sa légende.`
     + (p.doubt ? ` En désaccord avec les autres photos : ${p.doubt}.` : '');
   $('state').innerHTML = p.verdict ? `Déjà jugée : ${LABEL[p.verdict]}` : '';
   shownAt = performance.now();

@@ -52,3 +52,12 @@ def test_photos_the_others_disagree_with_come_first_among_those_to_judge():
     ]
 
     assert [p["id"] for p in confirming.queue(placed, {})] == ["b", "a"]
+
+
+def test_photos_to_check_closely_come_first_among_those_to_judge():
+    placed = [
+        {"id": "a", "round": 0, "inputs": "1", "by": "LoMa-G"},
+        {"id": "b", "round": 0, "inputs": "1", "by": "DISK", "check": "LoMa-G n'a rien trouvé"},
+    ]
+
+    assert [p["id"] for p in confirming.queue(placed, {})] == ["b", "a"]
