@@ -1,6 +1,7 @@
 import json
 import threading
 
+import cv2
 import numpy as np
 import pytest
 import typer
@@ -405,3 +406,34 @@ def test_lomag_s_check_goes_stale_with_its_code_disk_s_with_the_panoramas_only()
     assert cli._check_setup("disk", "s") == "s"
     assert cli._check_setup("lomag", "s").startswith("s:")
     assert cli._check_setup("lomag", "s") != cli._check_setup("lomag", "t")
+
+
+def test_the_old_photo_s_outlines_are_drawn_on_today_s_view_in_amber():
+    old = np.full((400, 400, 3), 30, np.uint8)
+    old[120:280, 120:280] = 220  # a light square: its outline is the street's only edge
+    old[12:14] = old[:, 386:388] = 255  # the print's border, a few pixels in, as a crop leaves it
+    grain = np.random.default_rng(0).integers(0, 255, (30, 27))
+    old[300:390, 20:100] = np.kron(grain, np.ones((3, 3)))[:90, :80, None]  # fine texture
+    today = np.full((300, 300, 3), 100, np.uint8)  # the sheet's size
+
+    drawn = cli._outlines(old, today)
+
+    amber = (drawn == cli.OUTLINE_COLOUR).all(axis=2)
+    assert amber[88:93, 150].any()  # the square's top edge, at the sheet's size
+    assert not amber[130:170, 130:170].any()  # inside it
+    assert not amber[:15].any() and not amber[:, 285:].any()  # the print's border is not drawn
+    assert amber[230:290, 20:70].mean() < 0.6  # texture stays lines, not a solid patch
+    assert (drawn[150, 150] == 80).all()  # today, in grey, dimmed under the outlines
+
+
+def test_no_view_of_today_is_shown_from_a_panorama_too_far_from_the_camera(tmp_path, monkeypatch):
+    photo = tmp_path / "old.jpg"
+    cv2.imwrite(str(photo), np.full((80, 60, 3), 128, np.uint8))
+    monkeypatch.setattr(cli, "_exported", lambda photo_id: photo)
+    far = match.Panorama("p", cli.SHEET_MOST_M + 5, 0.0, 2.5, 0.0, path=tmp_path / "p.jpg")
+    m = match.Situated(0.0, 0.0, 1.5, 90.0, 0.5, 60.0, 30, 2, 3.0, [], "i", 0.1)
+    heights = type("H", (), {"street": staticmethod(lambda x, y: 0.0)})()
+
+    row = cli._sheet_row("pm:1", m, heights, [far], lambda path: np.zeros((512, 1024, 3), np.uint8))
+
+    assert row is None

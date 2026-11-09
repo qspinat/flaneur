@@ -11,10 +11,10 @@
   header { display: flex; gap: 16px; align-items: baseline; padding: 10px 16px; border-bottom: 1px solid var(--line); flex-wrap: wrap; }
   header h1 { font-size: 18px; margin: 0; }
   main { padding: 16px; }
-  #sheet { display: block; width: 100%; max-width: 1920px; border: 1px solid var(--line); background: #ddd; }
+  #sheet { display: block; width: 100%; max-width: 1440px; border: 1px solid var(--line); background: #ddd; }
   #sheet.loading { opacity: 0.2; }
   #loading { font-size: 14px; color: #6b6255; }
-  .legend { display: grid; grid-template-columns: repeat(4, 1fr); max-width: 1920px; font-size: 13px; color: #6b6255; }
+  .legend { display: grid; grid-template-columns: repeat(3, 1fr); max-width: 1440px; font-size: 13px; color: #6b6255; }
   #meta { margin: 12px 0 4px; }
   #why { font-size: 13px; color: #6b6255; }
   .actions button { font: inherit; margin: 8px 6px 0 0; padding: 6px 14px; cursor: pointer; }
@@ -32,7 +32,7 @@
 </header>
 <main>
   <img id="sheet" alt="">
-  <div class="legend"><span>La photo</span><span>La vraie vue d'un panorama voisin</span><span>La rue d'aujourd'hui refaite depuis la caméra trouvée (hachures : rien de connu)</span><span>Les deux superposées</span></div>
+  <div class="legend"><span>La photo</span><span>La vraie vue d'un panorama voisin, cadrée comme la caméra trouvée</span><span>Les contours de la photo (en jaune) sur cette vue</span></div>
   <p id="meta"></p>
   <p id="why"></p>
   <div class="actions">
@@ -43,7 +43,7 @@
   </div>
   <p id="state"></p>
   <p class="keys"><kbd>Entrée</kbd> oui · <kbd>P</kbd> bons bâtiments, caméra à corriger · <kbd>X</kbd> non · <kbd>S</kbd> passer · <kbd>←</kbd> <kbd>→</kbd> précédente, suivante.
-    Oui : la rue refaite tombe sur la photo (mêmes façades, mêmes fuyantes), la caméra au bon endroit à un mètre près. P : les bons bâtiments, mais la caméra à déplacer ou à tourner ; elle sera corrigée plus tard. Un « non » ou un P la retire ; les photos situées à partir d'elle le seront de nouveau sans elle.</p>
+    Oui : les contours de la photo tombent sur les façades d'aujourd'hui (mêmes arêtes, mêmes fuyantes), la caméra au bon endroit à un mètre près. La vue vient du panorama le plus proche (sa distance est écrite au-dessus) : à quelques mètres, les façades proches se décalent un peu, les lointaines non. P : les bons bâtiments, mais la caméra à déplacer ou à tourner ; elle sera corrigée plus tard. Un « non » ou un P la retire ; les photos situées à partir d'elle le seront de nouveau sans elle.</p>
 </main>
 <script>
 let photos = [], at = 0, shownAt = 0, saving = false;
