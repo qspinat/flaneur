@@ -9,6 +9,7 @@ requires-python = ">=3.12"
 dependencies = [
     "httpx>=0.28.1",
     "kornia>=0.9.0",
+    "lomatch @ git+https://github.com/davnords/LoMa@415caedde23a9ed479172ed174fe4ff7b4514d4b",
     "moge @ git+https://github.com/microsoft/MoGe@74fbce054ebed49800de42d0ad0e83495065719a",
     "onnxruntime>=1.31.1",
     "opencv-python-headless>=5.0.0.93",
@@ -50,6 +51,9 @@ override-dependencies = [
     "flex-gemm; sys_platform == 'never'",
     "pipeline; sys_platform == 'never'",
     "starlette; sys_platform == 'never'",
+    # LoMa asks for opencv-python; opencv-python-headless above gives the same cv2 (two would
+    # overwrite each other's files)
+    "opencv-python; sys_platform == 'never'",
 ]
 
 [tool.ruff]

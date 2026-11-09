@@ -299,3 +299,68 @@ def test_details_from_the_pairs_already_made_never_wake_the_matcher(monkeypatch,
     after = scenes.details(home, candidates, made_only=True)
 
     assert len(before) == 0 and asked == [("home", "beside")] and len(after) > 0
+
+
+def _kept(**more) -> dict:
+    fields = dict(
+        x=1.0,
+        y=2.0,
+        above_street=1.5,
+        heading=90.0,
+        horizon=0.5,
+        fov=60.0,
+        agree=30,
+        panoramas=2,
+        moved_m=3.0,
+        walls=[],
+        inputs="i",
+        outline=0.1,
+    )
+    return {**fields, **more}
+
+
+def test_a_placement_kept_with_its_matcher_is_read_as_it_was_found():
+    situated = cli._situation(_kept(matcher="lomag"))
+
+    assert situated == match.Situated(**_kept())
+
+
+@pytest.mark.parametrize(
+    ("kept", "left"),
+    [
+        (None, ["lomag", "disk"]),  # never matched
+        ({"inputs": "other"}, ["lomag", "disk"]),  # matched from other inputs
+        ({"inputs": "i"}, ["lomag"]),  # left unplaced by DISK alone, before LoMa-G
+        ({"inputs": "i", "tried": ["lomag"]}, ["disk"]),  # stopped before DISK
+        ({"inputs": "i", "tried": ["lomag", "disk"]}, []),
+        (_kept(), []),  # placed by DISK before LoMa-G: kept
+        (_kept(matcher="lomag"), []),
+    ],
+)
+def test_a_photo_is_matched_again_only_by_the_matchers_left_to_try(kept, left):
+    assert cli._left_to_try(kept, "i") == left
+
+
+def test_photos_placed_by_lomag_are_left_out_of_chaining_which_reads_disk_s_features():
+    matches = {"a": _kept(), "b": _kept(matcher="disk"), "c": _kept(matcher="lomag"), "d": None}
+
+    assert cli._not_chained(matches) == {"c"}
+
+
+def test_each_matcher_has_its_own_known_answer_check(tmp_path):
+    path = tmp_path / "match_check.json"
+
+    assert cli._of_matcher(path, "disk") == path
+    assert cli._of_matcher(path, "lomag") == tmp_path / "match_check_lomag.json"
+
+
+@pytest.mark.parametrize(
+    ("matcher", "found"),
+    [
+        ("lomag", {"by": "LoMa-G"}),
+        ("disk", {"by": "DISK", "check": "LoMa-G n'a rien trouvé"}),
+        (None, {"by": "DISK (avant LoMa-G)"}),
+    ],
+)
+def test_the_page_tells_which_matcher_placed_a_photo_and_whether_to_check_it(matcher, found):
+    assert cli._found_by(_kept(matcher=matcher) if matcher else _kept()) == found

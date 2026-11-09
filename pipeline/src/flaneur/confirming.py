@@ -39,16 +39,21 @@ def record(
 
 def queue(placed: list[dict], verdicts: dict[str, dict]) -> list[dict]:
     """The photos placed (`placed`: id, title, round, inputs, `doubt` if the others disagree
-    with it…), those the user has not judged for how they are placed now first, those in
-    doubt first among them, round by round; each with its verdict (None: none for this
-    placement)."""
+    with it, `by` the matcher that found it, why to `check` it closely…), those the user has not
+    judged for how they are placed now first, those in doubt or to check first among them,
+    round by round; each with its verdict (None: none for this placement)."""
     items = []
     for photo in placed:
         last = verdicts.get(photo["id"])
         verdict = last["verdict"] if last and last["inputs"] == photo["inputs"] else None
         items.append({**photo, "verdict": verdict})
     return sorted(
-        items, key=lambda item: (item["verdict"] is not None, "doubt" not in item, item["round"])
+        items,
+        key=lambda item: (
+            item["verdict"] is not None,
+            "doubt" not in item and "check" not in item,
+            item["round"],
+        ),
     )
 
 
