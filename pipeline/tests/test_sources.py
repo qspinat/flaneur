@@ -98,3 +98,27 @@ def test_paris_musees_record_with_null_lists_is_skipped_not_fatal(load_fixture):
 
     record["fieldVisuels"] = None
     assert paris_musees.parse(record) is None
+
+
+def test_a_pinned_file_is_downloaded_once_and_kept_only_if_its_hash_matches(tmp_path):
+    import hashlib
+
+    from flaneur.sources import pinned_file
+
+    good = hashlib.sha256(b"atlas").hexdigest()
+    asked = []
+
+    def download(part):
+        asked.append(part)
+        part.write_bytes(b"atlas")
+
+    path = tmp_path / "f.zip"
+    assert pinned_file(path, good, download) == path
+    assert pinned_file(path, good, download) == path and len(asked) == 1
+
+    with pytest.raises(RuntimeError, match="https://example.org/g.zip"):
+        pinned_file(tmp_path / "g.zip", "0" * 64, download, "https://example.org/g.zip")
+    assert not (tmp_path / "g.zip").exists() and not list(tmp_path.glob("*.part"))
+
+    with pytest.raises(RuntimeError, match="SHA-256"):
+        pinned_file(path, "0" * 64, download)  # kept, then changed: refused
