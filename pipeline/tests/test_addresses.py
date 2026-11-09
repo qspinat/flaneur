@@ -1,5 +1,7 @@
-"""House numbers of 1836 and 1888 (SoDUCo): a caption's street and number to a door."""
+"""House numbers of 1836 and 1888 (SoDUCo) and of today (BAN): a caption's street and number
+to a door."""
 
+import gzip
 import io
 import zipfile
 
@@ -88,7 +90,89 @@ def test_the_atlases_are_read_from_the_deposit_s_two_house_number_files(tmp_path
 
     path = tmp_path / "deposit.zip"
     path.write_bytes(deposit.getvalue())
-    found = addresses.Addresses.from_deposit(path)
+    found = addresses.Addresses(addresses.deposit_doors(path))
 
     assert found.lookup("rue de la Lingerie", "12") is not None
     assert found.lookup("rue des Bons Enfans", "3") is not None
+
+
+@pytest.fixture
+def then_and_now():
+    return addresses.Addresses(
+        [
+            ("atlas_municipal_1888", "Rue Berger", "7 ", 2.3450, 48.8611),
+            (addresses.TODAY, "Rue Berger", "7", 2.3456, 48.8611),  # renumbered since: 44 m on
+            (addresses.TODAY, "Rue Berger", "40", 2.3470, 48.8611),  # only today's map has it
+        ]
+    )
+
+
+@pytest.mark.parametrize(("year", "lon"), [(1900, 2.3456), (1870, 2.3450), (None, 2.3450)])
+def test_today_s_numbers_come_first_for_photos_after_the_renumberings(then_and_now, year, lon):
+    door = then_and_now.lookup("rue Berger", "7", year)
+
+    assert door.distance(to_metres(Point(lon, 48.8611))) < 1
+
+
+def test_today_s_numbers_place_what_the_atlases_lack_whatever_the_year(then_and_now):
+    assert then_and_now.lookup("rue Berger", "40", 1870) is not None
+
+
+def test_today_s_numbers_are_read_from_the_national_address_base(tmp_path):
+    path = tmp_path / "ban-75-2026-11-09.csv.gz"
+    with gzip.open(path, "wt", encoding="utf-8") as out:
+        out.write("id;numero;rep;nom_voie;lon;lat\n")
+        out.write("75102_1;12;;Rue de la Lingerie;2.3461;48.8605\n")
+
+    found = addresses.Addresses(addresses.ban_doors(path))
+
+    assert found.lookup("rue de la Lingerie", "12 bis", 1920) is not None  # a caption's bis
+
+
+def test_today_s_bis_and_ter_doors_are_not_taken_for_the_plain_number(tmp_path):
+    path = tmp_path / "ban-75-2026-11-09.csv.gz"
+    with gzip.open(path, "wt", encoding="utf-8") as out:
+        out.write("id;numero;rep;nom_voie;lon;lat\n")
+        out.write("75102_1;12;;Rue de la Lingerie;2.3461;48.8605\n")
+        out.write("75102_2;12;bis;Rue de la Lingerie;2.3466;48.8605\n")  # 37 m on
+
+    found = addresses.Addresses(addresses.ban_doors(path))
+
+    assert (
+        found.lookup("rue de la Lingerie", "12", 1920).distance(to_metres(Point(2.3461, 48.8605)))
+        < 1
+    )
+
+
+def test_a_door_of_today_far_from_the_atlas_s_is_another_street_s_by_the_same_name(doors):
+    renamed = addresses.Addresses(
+        [
+            ("atlas_municipal_1888", "Rue Berger", "7 ", 2.3450, 48.8611),
+            (addresses.TODAY, "Rue Berger", "7", 2.3700, 48.8400),  # 3 km off: today's namesake
+        ]
+    )
+
+    door = renamed.lookup("rue Berger", "7", 1920)
+
+    assert door.distance(to_metres(Point(2.3450, 48.8611))) < 1
+
+
+def test_each_source_s_door_is_offered_in_turn(then_and_now):
+    found = list(then_and_now.doors("rue Berger", "7", 1900))
+
+    assert [source for source, _ in found] == [addresses.TODAY, "atlas_municipal_1888"]
+
+
+@pytest.mark.parametrize(
+    ("content", "valid"),
+    [
+        (b"<html>maintenance</html>", False),
+        (gzip.compress(b"id;numero;rep;nom_voie;lon;lat\n75102_1;1;;Rue X;2.3;48.8\n"), True),
+        (gzip.compress(b"id;num;voie\n1;1;x\n"), False),  # columns renamed
+    ],
+)
+def test_a_download_of_today_s_numbers_is_kept_only_if_it_reads(tmp_path, content, valid):
+    path = tmp_path / "ban.csv.gz"
+    path.write_bytes(content)
+
+    assert addresses.readable_ban(path) is valid

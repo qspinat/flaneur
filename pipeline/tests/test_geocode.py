@@ -71,6 +71,7 @@ def reading(streets, viewpoint=None, arrondissements=(1,)):
         ),
         "arrondissements": json.dumps(list(arrondissements)),
         "viewpoint": viewpoint,
+        "year": None,
     }
 
 
@@ -252,7 +253,7 @@ DOORS = Addresses(
 def test_a_street_and_number_the_atlases_know_place_the_photo_at_the_door(gazetteer):
     location = locate(reading([("rue", "Berger", "7")]), gazetteer, DOORS)
 
-    assert location.status == "address" and location.label == "7 rue Berger"
+    assert location.status == "address" and location.label == "7 rue Berger (atlas_municipal_1888)"
     assert location.street.label == "rue Berger" and location.precision_m == ADDRESS_M
     assert location.point.geom_type == "Point"
 
@@ -299,3 +300,33 @@ def test_the_street_the_camera_stood_on_wins_over_the_door_of_the_one_it_shows(g
     )
 
     assert location.status == "viewpoint_street"
+
+
+def test_a_photo_s_year_chooses_between_the_atlases_and_today_s_numbers(gazetteer):
+    from flaneur.addresses import TODAY
+
+    doors = Addresses(
+        [
+            ("atlas_municipal_1888", "Rue Berger", "7 ", 2.3450, 48.8611),
+            (TODAY, "Rue Berger", "7", 2.3456, 48.8611),
+        ]
+    )
+    early = locate({**reading([("rue", "Berger", "7")]), "year": 1865}, gazetteer, doors)
+    late = locate({**reading([("rue", "Berger", "7")]), "year": 1925}, gazetteer, doors)
+
+    assert early.point.distance(late.point) > 40
+
+
+def test_a_door_too_far_from_its_street_gives_way_to_the_next_source_s(gazetteer):
+    from flaneur.addresses import TODAY
+
+    doors = Addresses(
+        [
+            (TODAY, "Rue Berger", "7", 2.3600, 48.8700),  # a namesake today, 1.3 km off
+            ("atlas_municipal_1888", "Rue Berger", "7 ", 2.3450, 48.8611),
+        ]
+    )
+
+    location = locate({**reading([("rue", "Berger", "7")]), "year": 1925}, gazetteer, doors)
+
+    assert location.status == "address" and location.label == "7 rue Berger (atlas_municipal_1888)"

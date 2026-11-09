@@ -22,19 +22,19 @@ from flaneur.read import NOT_A_STREET_VIEW, StreetMention, find_streets
 
 # Two streets closer than this are taken to meet: the camera stood where they meet.
 CORNER_TOLERANCE_M = 15
-# A door of the old atlases (flaneur.addresses): the true camera 24 m from it in the median,
-# 86 % within this (Albert-Kahn, 71 photos; the number is on the facade, the photographer
-# across the street or back from it).
+# A door (flaneur.addresses): the true camera 24 m from it in the median, 86 % within this,
+# for the atlases' (Albert-Kahn, 71 photos); 17 m and 95 % for today's (77 photos). The number
+# is on the facade, the photographer across the street or back from it.
 ADDRESS_M = 50
 # A door further than this from every street of its name the gazetteer knows is another
-# street's (a namesake elsewhere, or renamed or renumbered since the atlas).
+# street's (a namesake elsewhere, or renamed or renumbered since).
 DOOR_FROM_STREET_M = 50
 
 
 @dataclass(frozen=True)
 class Location:
     # "corner": the camera stood where the photo's street meets the "vue prise de" street;
-    # "address": before the door of the number the caption gives (old atlases);
+    # "address": before the door of the number the caption gives (an atlas, or today's map);
     # "viewpoint_street": on the "vue prise de" street, which does not meet the photo's;
     # "street": somewhere along the photo's street; "ambiguous": the name fits several
     # streets and nothing tells which; "removed": the street is gone (old maps will place
@@ -82,23 +82,25 @@ NO_DOORS = Addresses()
 def _door(
     mentions: list[StreetMention],
     arrondissements: list[int],
+    year: int | None,
     gazetteer: Gazetteer,
     addresses: Addresses,
 ) -> Location | None:
-    """Before the door of the first numbered street of the caption the atlases know, on that
+    """Before the door of the first numbered street of the caption whose number is known (for
+    a photo of `year`: see Addresses.lookup), on that
     street as the gazetteer knows it: the one nearest the door, within DOOR_FROM_STREET_M of
     it (a street gone, or unknown today, cannot tell: its door is taken)."""
     for mention in mentions:
-        if door := addresses.lookup(mention.label, mention.number):
-            found = gazetteer.lookup(mention.label, arrondissements)
-            placed = [s for s in found if s.geometry is not None]
+        found = gazetteer.lookup(mention.label, arrondissements)
+        placed = [s for s in found if s.geometry is not None]
+        for source, door in addresses.doors(mention.label, mention.number, year):
             if placed:
                 street = min(placed, key=lambda s: s.geometry.distance(door))
                 if street.geometry.distance(door) > DOOR_FROM_STREET_M:
-                    continue
+                    continue  # another street's: the next source's door may be this one's
             else:
                 street = found[0] if found else None
-            label = f"{mention.number} {mention.label}"
+            label = f"{mention.number} {mention.label} ({source})"  # where the door comes from
             return Location("address", label, street, door, precision_m=ADDRESS_M)
     return None
 
@@ -108,7 +110,7 @@ def locate(reading: dict, gazetteer: Gazetteer, addresses: Addresses = NO_DOORS)
     numbered doors give (see STATUS_RANK)."""
     mentions = [StreetMention(**s) for s in json.loads(reading["streets"])]
     arrondissements = json.loads(reading["arrondissements"])
-    door = _door(mentions, arrondissements, gazetteer, addresses)
+    door = _door(mentions, arrondissements, reading["year"], gazetteer, addresses)
     by_street = _by_street(mentions, arrondissements, reading["viewpoint"], gazetteer)
     return min(filter(None, (by_street, door)), key=_rank)
 
@@ -198,13 +200,20 @@ def _street_row(street: Street) -> dict:
     }
 
 
+# each reading with its photo's first year (which house numbers to look in first)
+_READINGS = (
+    "SELECT r.*, p.year_start AS year FROM readings r LEFT JOIN photos p ON p.id = r.photo_id"
+)
+
+
 def locate_all(
     conn: sqlite3.Connection, gazetteer: Gazetteer, addresses: Addresses = NO_DOORS
 ) -> Counter[str]:
     """Locate every photo that may be a street view. Returns how many got each status."""
     excluded = ", ".join("?" * len(NOT_A_STREET_VIEW))
     readings = conn.execute(
-        f"SELECT * FROM readings WHERE kind NOT IN ({excluded})", sorted(NOT_A_STREET_VIEW)
+        f"{_READINGS} WHERE r.kind NOT IN ({excluded})",
+        sorted(NOT_A_STREET_VIEW),
     ).fetchall()
     locations = {r["photo_id"]: locate(r, gazetteer, addresses) for r in readings}
     # A print of a negative printed several times (see flaneur.dedup) takes the place all
@@ -213,9 +222,7 @@ def locate_all(
     # street is not a truer one.
     read = {
         r["photo_id"]: dict(r)
-        for r in conn.execute(
-            "SELECT * FROM readings WHERE photo_id IN (SELECT photo_id FROM copies)"
-        )
+        for r in conn.execute(f"{_READINGS} WHERE r.photo_id IN (SELECT photo_id FROM copies)")
     }
     for negative in {tuple(p) for p in dedup.negatives(conn).values()}:
         prints = [read[i] for i in negative if i in read]
