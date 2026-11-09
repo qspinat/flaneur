@@ -49,7 +49,8 @@ def pinned(url: str, folder: Path, map_location=None) -> dict:
         digest = hashlib.file_digest(weights, "sha256").hexdigest()
     if digest != WEIGHTS[name]:
         raise RuntimeError(f"{path} : SHA-256 inattendu, poids refusés")
-    return torch.load(path, map_location=map_location, weights_only=True)
+    # mapped from the file, not copied in: 2.7 GB of weights would otherwise go to swap
+    return torch.load(path, map_location=map_location, weights_only=True, mmap=True)
 
 
 @contextlib.contextmanager
