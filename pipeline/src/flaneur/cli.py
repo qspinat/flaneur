@@ -1043,7 +1043,7 @@ def match_photos(
             to_try[me.id] = _left_to_try(kept, inputs, turned_down)
     traces, run, placed = register.load(MATCH_TRACE), {}, set()  # placed: by this run
 
-    def tried(matcher: str, photos: list) -> None:
+    def match_with(matcher: str, photos: list) -> None:
         """Matches `photos` with one matcher (its own features, observations and points)."""
         views = _views(matcher=matcher)
         store = chain.Store(MATCHERS[matcher].photos, views.matcher)
@@ -1090,7 +1090,7 @@ def match_photos(
     chosen = sorted((me for me in chosen if to_try[me.id]), key=_visit)
     for matcher in checked:  # one model at a time: each let go before the next
         if photos := [me for me in chosen if matcher in to_try[me.id] and me.id not in placed]:
-            tried(matcher, photos)
+            match_with(matcher, photos)
             from flaneur import lomag
 
             lomag.released()  # the views' cache holds the matcher in a cycle: only gc frees it

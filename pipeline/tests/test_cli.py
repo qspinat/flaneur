@@ -437,3 +437,70 @@ def test_no_view_of_today_is_shown_from_a_panorama_too_far_from_the_camera(tmp_p
     row = cli._sheet_row("pm:1", m, heights, [far], lambda path: np.zeros((512, 1024, 3), np.uint8))
 
     assert row is None
+
+
+def test_match_tries_lomag_then_disk_on_the_photos_left_and_keeps_what_each_did(
+    tmp_path, monkeypatch
+):
+    from types import SimpleNamespace
+
+    photos = [SimpleNamespace(id="pm:1"), SimpleNamespace(id="pm:2")]
+    exported = tmp_path / "old.jpg"
+    cv2.imwrite(str(exported), np.zeros((8, 8, 3), np.uint8))
+    heights = SimpleNamespace(street=lambda x, y: 0.0, origin_z=0.0)
+    camera = match.Camera(1.0, 2.0, 1.5, 90.0, 0.5, 60.0, agree=30, panoramas=2)
+
+    class Store:
+        def __init__(self, folder, matcher):
+            pass
+
+        def features(self, *args):
+            return None
+
+        def save_observed(self, *args):
+            pass
+
+        def save_points(self, *args):
+            pass
+
+    for name, value in {
+        "MATCHES": tmp_path / "matches.json",
+        "MATCH_TRACE": tmp_path / "trace.json",
+        "_setup": lambda: "s",
+        "_matching": lambda: (heights, [], lambda year: SimpleNamespace(blocks=None)),
+        "_matches": lambda: {},
+        "_refused": lambda: set(),
+        "_situated": lambda: {},
+        "_exported": lambda photo_id: exported,
+        "_inputs": lambda photo_id, setup: "i",
+        "_image": lambda photo_id: "h",
+        "_place_of": lambda me: (0.0, 0.0),
+        "_where": lambda me, heights, now: None,
+        "_then_year": lambda me: 1900,
+        "_visit": lambda me: me.id,
+        "_traced": lambda trace: {"verdict": trace.verdict},
+        "_grey": lambda image: image,
+        "_views": lambda kept=None, matcher="disk": SimpleNamespace(matcher=matcher),
+    }.items():
+        monkeypatch.setattr(cli, name, value)
+    monkeypatch.setattr(cli.db, "connect", lambda path: SimpleNamespace(close=lambda: None))
+    monkeypatch.setattr(cli.export, "photos", lambda *args: photos)
+    monkeypatch.setattr(cli.chain, "Store", Store)
+    monkeypatch.setattr(cli.outlines, "contrast", lambda *args: 0.1)
+    monkeypatch.setattr(
+        cli.match, "observe", lambda image, near, blocks, views, *rest: views.matcher
+    )
+    # LoMa-G finds nothing; DISK places both
+    monkeypatch.setattr(
+        cli.match,
+        "place",
+        lambda observed, where, trace: (camera if observed == "disk" else None, [], None),
+    )
+
+    cli.match_photos(photo=None, again=False, force=True)
+
+    kept = json.loads((tmp_path / "matches.json").read_text())
+    assert {k: (m["matcher"], m["tried"]) for k, m in kept.items()} == {
+        "pm:1": ("disk", ["lomag", "disk"]),
+        "pm:2": ("disk", ["lomag", "disk"]),
+    }
