@@ -468,7 +468,9 @@ def to_apply(
     return {
         i: (c.east if shifts else 0.0, c.north if shifts else 0.0, -c.turn)
         for i, c in corrections(verdicts).items()
-        if i in placed and still(verdicts[i], placed[i])
+        if i in placed
+        and still(verdicts[i], placed[i])
+        and (shifts or abs(c.turn) >= LEAST_TURN_DEG)  # a turn alone: beyond the surveys' own
     }
 
 

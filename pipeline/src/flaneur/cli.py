@@ -361,12 +361,13 @@ def _placed(pictures: list[Picture], corrected: bool = True) -> list[Picture]:
     fixes = register.load(FIXES)
     found = {i: tuple(fixes[i]["fix"]) for i in _fixed_by_colmap(pictures, fixes)}
     placed = register.applied(pictures, reconstruct.borrowed(found, pictures))
+    if not corrected or poses.APPLIED == "none":
+        return placed
     verdicts = poses.load(POSES)
     where = {
         p.id: poses.at(p.point.x, p.point.y, p.azimuth or 0.0) for p in placed if p.id in verdicts
     }
-    applied = poses.APPLIED if corrected else "none"
-    return register.applied(placed, poses.to_apply(verdicts, where, applied))
+    return register.applied(placed, poses.to_apply(verdicts, where, poses.APPLIED))
 
 
 class _NotRead(Exception):
@@ -1856,10 +1857,10 @@ PROPOSALS = DATA / "pilot" / "proposals_3d.json"  # each photo proposed in its n
 PROPOSING_M = placing.NEAR_M  # a panorama farther from the photo's place is not tried
 
 
-def _spheres() -> list[match.Panorama]:
+def _spheres(corrected: bool = True) -> list[match.Panorama]:
     """The panoramas where they were taken, levelled, for cutting views (no height needed)."""
     with closing(db.connect(DB_PATH)) as conn:
-        pictures = _lined_up(panoramas.load(conn))
+        pictures = _lined_up(panoramas.load(conn), corrected)
     return _panoramas(pictures, lambda x, y: 0.0)
 
 
@@ -2103,13 +2104,20 @@ def _page_closed(page: int) -> None:
             raise typer.Exit(1)
 
 
-def _within(answers: Path, reach: float) -> list[match.Panorama]:
+def _paired_homes(spheres: list[match.Panorama], folder: Path) -> list[match.Panorama]:
+    """The panoramas with three pairs or more kept in `folder` under their name as they stand
+    (see _levelled_name: a panorama turned since has others), by id."""
+    made = Counter(f.name.split("__")[0] for f in folder.glob("*.npz"))
+    return sorted((p for p in spheres if made[_levelled_name(p)] >= 3), key=lambda p: p.id)
+
+
+def _within(answers: Path, reach: float, corrected: bool = True) -> list[match.Panorama]:
     """The panoramas within `reach` of a photo of the walk, the nearest to one first."""
     with closing(db.connect(DB_PATH)) as conn:
         spots = np.array([_place_of(me) for me in _walk(conn, _placing_answers(answers)[0])])
     if not len(spots):
         return []
-    spheres = _spheres()
+    spheres = _spheres(corrected)
     nearest, _ = cKDTree(spots).query([(p.x, p.y) for p in spheres])
     return [spheres[i] for i in np.argsort(nearest) if nearest[i] <= reach]
 
@@ -2125,6 +2133,9 @@ def segment_panoramas(answers: Path = PLACINGS, page: int = 8772) -> None:
     segmenter = segment.Segmenter(VIEW_STRUCTURE, threading.Lock(), _levelled_name, make=True)
     reach = queueing.NEAR_M + depth.NEAR_M[1]
     reached = _within(answers, reach)
+    if poses.APPLIED != "none":  # recaler judges them as COLMAP left them: its masks too
+        names = {_levelled_name(p) for p in reached}
+        reached += [p for p in _within(answers, reach, False) if _levelled_name(p) not in names]
     if not reached:
         typer.echo("aucune photo, ou aucun panorama à portée : rien à faire")
         return
@@ -2162,14 +2173,12 @@ def set_panoramas_right(
     poses.APPLIED) : appliquer des corrections périme les places de `match`, fait repasser son
     contrôle, et les panoramas tournés refont leurs caches (segmentation : `flaneur segmenter`)."""
     spheres, segments = _placing_world(corrected=False)  # as COLMAP left them
-    by_id = {p.id: p for p in spheres}
     with closing(db.connect(DB_PATH)) as conn:
         fixed = _fixed_by_colmap(panoramas.load(conn), register.load(FIXES))
     if only:
         homes = [p for p in spheres if any(p.id.startswith(o) for o in only)]
     else:  # those whose pairs are on disk (three or more)
-        made = Counter(f.name.split("_")[0] for f in PAIR_MATCHES.glob("*.npz"))
-        homes = [by_id[i] for i, n in sorted(made.items()) if n >= 3 and i in by_id]
+        homes = _paired_homes(spheres, PAIR_MATCHES)
     views = functools.cache(lambda: _views(kept=8))  # the matcher, only if a pair must be made
     scenes = _Scenes(
         spheres, fixed, views, threading.Lock(), segments, WALLS, seen=_seeing(make=False)
@@ -2204,10 +2213,12 @@ def set_panoramas_right(
             said = f"corrigé {found.correction}" if found.correction else "laissé"
             how = "COLMAP" if home.id in fixed else "emprunté"
             typer.echo(f"{home.id[:8]} ({how}) : {said} — BD TOPO {found.bdtopo}")
-    moved = poses.corrections(verdicts)
-    typer.echo(f"{len(moved)} panorama(s) corrigé(s) sur {len(verdicts)} jugés")
+    where = {p.id: poses.at(p.x, p.y, p.azimuth) for p in spheres}
+    standing = poses.to_apply(verdicts, where, "all")  # judged where COLMAP still puts them
+    typer.echo(f"{len(standing)} panorama(s) corrigé(s) sur {len(verdicts)} jugés")
+    applied = len(poses.to_apply(verdicts, where, poses.APPLIED))
     typer.echo(
-        f"appliquées : {poses.APPLIED}"
+        f"appliquées ({poses.APPLIED}) : {applied}"
         if poses.APPLIED != "none"
         else "mesurées, pas encore appliquées (poses.APPLIED)"
     )

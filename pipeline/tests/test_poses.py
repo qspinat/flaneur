@@ -426,3 +426,10 @@ def test_a_corrected_heading_turns_what_the_panorama_sees_as_the_correction_does
         match.camera_axes(30.0)[1][None, :2], np.zeros(2), turned["p"].correction
     )
     assert ahead == pytest.approx(expected[0], abs=1e-9)
+
+
+def test_turns_alone_are_applied_only_beyond_the_surveys_own_disagreement():
+    small = {"p": poses.Verdict(poses.Correction(2.0, 0.5, 1.2), None, 900, (1.0, 2.0, 30.0))}
+
+    assert poses.to_apply(small, {"p": (1.0, 2.0, 30.0)}, "turns") == {}
+    assert poses.to_apply(small, {"p": (1.0, 2.0, 30.0)}, "all") == {"p": (2.0, 0.5, -1.2)}

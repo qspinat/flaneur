@@ -127,6 +127,28 @@ def test_panoramas_stand_corrected_except_for_recaler(tmp_path, monkeypatch):
     assert corrected != here and as_colmap == here
 
 
+def test_nothing_applied_reads_no_verdict(tmp_path, monkeypatch):
+    from flaneur.panoramax import Picture
+
+    here = Picture("p1", 2.3466, 48.852, 40.0, True, "2024-01-01", "", "")
+    (tmp_path / "poses.json").write_text("not json")
+    monkeypatch.setattr(cli, "POSES", tmp_path / "poses.json")
+    monkeypatch.setattr(cli, "FIXES", tmp_path / "fixes.json")
+    monkeypatch.setattr(poses, "APPLIED", "none")
+
+    assert cli._placed([here]) == [here]
+
+
+def test_homes_with_pairs_are_counted_under_their_own_names(tmp_path):
+    a = match.Panorama("a", 0.0, 0.0, 0.0, 10.0, tmp_path / "a.jpg")
+    b = match.Panorama("b", 5.0, 0.0, 0.0, 20.0, tmp_path / "b.jpg")
+    for n in range(3):
+        (tmp_path / f"{cli._levelled_name(a)}__x{n}_0.0_0.00_0.00.npz").touch()
+        (tmp_path / f"b_99.0_0.00_0.00__x{n}_0.0_0.00_0.00.npz").touch()  # b as turned since
+
+    assert cli._paired_homes([a, b], tmp_path) == [a]
+
+
 LEFT = [[-4.0, y, z] for y in np.arange(2.0, 40.0, 0.5) for z in (-1.0, 3.0, 8.0)]
 STREET = np.array(LEFT + [[4.0, y, z] for _, y, z in LEFT])  # two facades along y
 
