@@ -107,8 +107,8 @@ TITLE_TYPES = frozenset(
     "chemin route butte montee esplanade jardin voie promenade passerelle cours terrasse sente "
     "poterne".split()
 )
-# A house number, as written before a street ("24 rue Pavée", "11 bis").
-NUMBER = re.compile(r"\d+(?:\s?(?:bis|ter))?", re.IGNORECASE)
+# A house number written just before a street: "24", "11 bis", "101,", "11-13" (its first).
+NUMBER_BEFORE = re.compile(r"(\d+(?:\s?(?:bis|ter))?)(?:\s?[-–]\s?\d+)?\s*,?\s*$", re.IGNORECASE)
 
 _TYPE = rf"(?i:{STREET_TYPES}|{ABBREVIATIONS})"
 # Where an obsolete name went, anywhere in the City's note: "Actuellement rue de Condé",
@@ -130,6 +130,15 @@ def key(label: str) -> str:
     text = "".join(c for c in text if not unicodedata.combining(c)).lower()
     words = re.sub(r"[-'’.]", " ", text).split()
     return " ".join(ABBREVIATED.get(w, w) for w in words if w not in PARTICLES)
+
+
+def _written(span: str, before: str) -> StreetMention:
+    """A street as a title writes it (its elided article off: "l'avenue Victoria"), with the
+    house number written just before it ("24 rue…", "11 bis rue…", "101, rue…", "11-13 rue…")."""
+    span = re.sub(r"^[A-Za-z]['’]", "", span).strip("-'’ ")
+    kind, name = re.split(r"[\s-]", span, maxsplit=1)
+    number = found[1] if (found := NUMBER_BEFORE.search(before)) else None
+    return StreetMention(kind.lower(), name.strip("-'’ "), number)
 
 
 def _usable(k: str) -> bool:
@@ -213,36 +222,34 @@ class Gazetteer:
             found = inside or found
         return found
 
-    def named_in(self, text: str) -> StreetMention | None:
-        """The first street of the gazetteer a title names, as it writes it (the longest name
-        starting there), with the house number written before it: its type first ("Le
-        Pont-Neuf, 1er arrondissement" names the pont Neuf; "la Grande Galerie" is a room),
-        words whole and to the end of a hyphenated name ("rue Saint-Louis-en-l'Isle" does not
-        name the rue Saint-Louis), never across punctuation, nor in a part giving
-        alternatives ("Cour X ou Y", "Passage X [ou Y]")."""
+    def named_in(self, text: str) -> Iterator[StreetMention]:
+        """The streets of the gazetteer a title names, in its order, as it writes them (the
+        longest name starting at each place), with the house number written before each: a
+        type first ("Le Pont-Neuf, 1er arrondissement" names the pont Neuf; "la Grande
+        Galerie" is a room), words whole and to the end of a hyphenated name ("rue
+        Saint-Louis-en-l'Isle" does not name the rue Saint-Louis), never across punctuation,
+        nor in a part giving alternatives ("Cour X ou Y", "Passage X [ou Y]")."""
         text = re.sub(r"[\[(]\s*(?=ou\b)", " ", text, flags=re.IGNORECASE)
-        for part in re.split(r"[^\w\s'’-]", text):
-            tokens = part.split()
-            if "ou" in (t.lower() for t in tokens):
+        for part in re.finditer(r"[\w\s'’-]+", text):
+            tokens = list(re.finditer(r"\S+", part.group()))
+            if "ou" in (t.group().lower() for t in tokens):
                 continue
-            words = [(w, t) for t, token in enumerate(tokens) for w in key(token).split()]
-            for i, (word, first) in enumerate(words):
-                if word not in TITLE_TYPES or (i and words[i - 1][1] == first):
-                    continue  # not a type, or inside a hyphenated name
-                for j in range(min(len(words), i + MOST_WORDS), i + 1, -1):
-                    last = words[j - 1][1]
-                    whole = j == len(words) or words[j][1] != last
-                    if whole and " ".join(w for w, _ in words[i:j]) in self.by_key:
-                        kind, name = re.split(
-                            r"[\s-]", " ".join(tokens[first : last + 1]), maxsplit=1
-                        )
-                        number = (
-                            tokens[first - 1]
-                            if first and NUMBER.fullmatch(tokens[first - 1])
-                            else None
-                        )
-                        return StreetMention(kind.lower(), name, number)
-        return None
+            words = [(w, n) for n, t in enumerate(tokens) for w in key(t.group()).split()]
+            i = 0
+            while i < len(words):
+                word, first = words[i]
+                if word in TITLE_TYPES and not (i and words[i - 1][1] == first):
+                    for j in range(min(len(words), i + MOST_WORDS), i + 1, -1):
+                        last = words[j - 1][1]
+                        whole = j == len(words) or words[j][1] != last
+                        if whole and " ".join(w for w, _ in words[i:j]) in self.by_key:
+                            start = part.start() + tokens[first].start()
+                            yield _written(
+                                text[start : part.start() + tokens[last].end()], text[:start]
+                            )
+                            i = j - 1
+                            break
+                i += 1
 
     @classmethod
     def from_records(cls, current: list[dict], obsolete: list[dict]) -> "Gazetteer":

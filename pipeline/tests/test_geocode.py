@@ -393,6 +393,22 @@ def test_the_first_street_a_title_names_is_the_one_it_is_about(with_a_bridge):
 @pytest.mark.parametrize(
     ("label", "title"),
     [
+        ("avenue de Versailles", "Angle de l'avenue de Versailles (1887)"),  # "vers", a word only
+        ("avenue de Foch", "Barricade de l'Avenue de Foch / après la défaite"),
+    ],
+)
+def test_a_title_names_its_street_as_a_caption_would(label, title):
+    street = current("31", label, 1, 2.3400, 48.8590, 2.3402, 48.8592)
+    gazetteer = Gazetteer.from_records([*CURRENT, street], OBSOLETE)
+
+    location = locate(reading([]) | {"title": title}, gazetteer)
+
+    assert (location.status, location.label) == ("street", label)
+
+
+@pytest.mark.parametrize(
+    ("label", "title"),
+    [
         ("rue de Paris", "Peintre de rue, Paris"),  # never across punctuation
         ("Grande Galerie", "Musée du Louvre, la Grande Galerie"),  # a room: its type is not first
         ("rue Berger", "Angle de la rue Berger-le-Franc"),  # only the start of another name
@@ -400,6 +416,7 @@ def test_the_first_street_a_title_names_is_the_one_it_is_about(with_a_bridge):
         ("pont Neuf", "Un bon coin (près du Pont-Neuf)"),  # near it
         ("rue Berger", "Cour Lamoignon ou rue Berger"),  # the caption does not know which
         ("rue Berger", "Passage Saint-Paul [ou rue Berger]"),
+        ("pont Neuf", "Le Louvre et le pont Neuf vus du Louvre"),  # looked at; stood elsewhere
     ],
 )
 def test_a_title_names_no_street_in_what_only_looks_like_one(label, title):
@@ -416,10 +433,35 @@ def test_a_street_named_in_a_title_lies_in_the_arrondissement_the_caption_gives(
     assert (elsewhere.status, there.status) == ("not_found", "street")
 
 
-def test_a_house_number_before_the_street_a_title_names_is_kept(with_a_bridge):
-    mention = with_a_bridge.named_in("Hôtel, 24 rue Berger")
+@pytest.mark.parametrize(
+    ("title", "number"),
+    [
+        ("Hôtel, 24 rue Berger", "24"),
+        ("Hôtel, 11 bis rue Berger", "11 bis"),
+        ("Tannerie, 101, rue Berger", "101"),
+        ("Immeubles 11-13 rue Berger", "11"),
+    ],
+)
+def test_a_house_number_before_the_street_a_title_names_is_kept(with_a_bridge, title, number):
+    mention = next(iter(with_a_bridge.named_in(title)))
 
-    assert (mention.type, mention.name, mention.number) == ("rue", "Berger", "24")
+    assert (mention.type, mention.name, mention.number) == ("rue", "Berger", number)
+
+
+def test_a_title_s_street_is_where_the_view_was_taken_from(with_a_bridge):
+    title = "Le Louvre et le pont Neuf vus du quai de la Mégisserie"
+
+    location = locate(reading([]) | {"title": title}, with_a_bridge)
+
+    assert location.street.label == "quai de la Mégisserie"
+
+
+def test_the_next_street_a_title_names_is_tried_when_the_first_lies_elsewhere(with_a_bridge):
+    title = "Rue Berger / Immeubles rue du Faubourg Saint-Denis"
+
+    location = locate(reading([], arrondissements=(10,)) | {"title": title}, with_a_bridge)
+
+    assert location.street.label == "rue du Faubourg Saint-Denis"
 
 
 def test_a_name_two_streets_bore_is_settled_by_the_other_street_the_caption_names():
@@ -447,3 +489,27 @@ def test_a_name_two_streets_bore_is_settled_by_the_street_the_camera_stood_in():
     )
 
     assert location.street is not None and location.street.current_label == "rue Berger"
+
+
+def test_a_name_two_streets_bore_is_not_settled_by_itself():
+    twice = [
+        obsolete("20", "rue des Sept Voies", "Dénommée rue Berger par arrêté du 16 août 1879."),
+        obsolete("21", "rue des Sept Voies", "Actuellement rue du Faubourg Saint-Denis."),
+    ]
+    gazetteer = Gazetteer.from_records(CURRENT, OBSOLETE + twice)
+
+    location = locate(
+        reading([("rue", "des Sept Voies")], viewpoint="rue des Sept Voies"), gazetteer
+    )
+
+    assert location.status == "ambiguous"
+
+
+def test_a_name_in_lowercase_is_a_street_only_where_the_caption_gives_an_arrondissement():
+    yard = current("32", "cour du Château", 1, 2.3400, 48.8590, 2.3402, 48.8592)
+    gazetteer = Gazetteer.from_records([*CURRENT, yard], OBSOLETE)
+    title = "Façade sur la cour du château de Vitry."  # outside Paris: no arrondissement
+
+    assert locate(reading([], arrondissements=()) | {"title": title}, gazetteer).status == (
+        "not_found"
+    )

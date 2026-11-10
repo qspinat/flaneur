@@ -96,11 +96,12 @@ def _seen_from(
     camera stood in ("rue des Sept-Voies, vue prise de la rue Saint-Hilaire")."""
     if not viewpoint:
         return None
-    stood = [
-        s.geometry
+    own = {s.record_id for s in found}
+    stood = [  # streets the viewpoint names unambiguously, not the photo's own name again
+        street.geometry
         for mention in find_streets(viewpoint)
-        for s in gazetteer.lookup(mention.label, arrondissements)
-        if s.geometry is not None
+        if (street := choose(gazetteer.lookup(mention.label, arrondissements)))
+        and street.record_id not in own
     ]
     meeting = {
         id(s.geometry): s
@@ -153,8 +154,16 @@ def locate(reading: dict, gazetteer: Gazetteer, addresses: Addresses = NO_DOORS)
     return min(filter(None, found), key=_rank)
 
 
-# Where a title turns to what the photo looks toward, or stands near: not where it was taken.
-TOWARDS = re.compile(r"\b(?:vers|en direction d|près d)", re.IGNORECASE)
+# Where a title says where the view was taken from ("X vus du Y", "prise de la rue Y", "depuis
+# Y"): the camera stood there, not on what comes before; and where it turns to what the photo
+# looks toward or stands near: not where it was taken.
+FROM = re.compile(
+    r"\b(?:vue?s?|prise?s?)\s+(?:du|des|de\s+la|de\s+l['’]|d['’]|de)\s*|\bdepuis\s", re.IGNORECASE
+)
+TOWARDS = re.compile(
+    r"\b(?:vers|en\s+direction\s+(?:du|des|de)|près\s+(?:du|des|de))\b|\b(?:en\s+direction|près)\s+d['’]",
+    re.IGNORECASE,
+)
 
 
 def _by_title(
@@ -162,18 +171,25 @@ def _by_title(
 ) -> list[Location | None]:
     """Where a photo was taken by the street its title names (see Gazetteer.named_in), when
     its reading found none the gazetteer knows ("Le Pont-Neuf": the type inside the name):
-    along it, or before its door; only in an arrondissement the caption gives, when it gives
-    one (a name can be a shorter one's, elsewhere)."""
-    mention = gazetteer.named_in(TOWARDS.split(reading["title"], maxsplit=1)[0])
-    if mention is None:
-        return []
-    found = gazetteer.lookup(mention.label, arrondissements)
-    if arrondissements and not any(set(s.arrondissements) & set(arrondissements) for s in found):
-        return []
-    return [
-        _by_street([mention.label], arrondissements, reading["viewpoint"], gazetteer),
-        _door([mention], arrondissements, reading["year"], gazetteer, addresses),
-    ]
+    the place it was taken from when the title says so; along the first street that lies in
+    an arrondissement the caption gives (a name can be a shorter one's, elsewhere), or before
+    its door. A name in lowercase ("la cour du château de Vitry") is a street only in a
+    caption that gives its arrondissement."""
+    parts = FROM.split(reading["title"], maxsplit=1)
+    seen = TOWARDS.split(parts[-1], maxsplit=1)[0]
+    for mention in gazetteer.named_in(seen):
+        if not arrondissements and not any(c.isupper() for c in mention.name):
+            continue
+        found = gazetteer.lookup(mention.label, arrondissements)
+        if arrondissements and not any(
+            set(s.arrondissements) & set(arrondissements) for s in found
+        ):
+            continue
+        return [
+            _by_street([mention.label], arrondissements, reading["viewpoint"], gazetteer),
+            _door([mention], arrondissements, reading["year"], gazetteer, addresses),
+        ]
+    return []
 
 
 def _by_street(
