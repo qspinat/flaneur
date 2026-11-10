@@ -2140,11 +2140,13 @@ def set_panoramas_right(
     again: Annotated[bool, typer.Option(help="rejuger ceux déjà jugés tels qu'ils sont")] = False,
 ) -> None:
     """Recale sur le plan les panoramas nommés (préfixes), sinon ceux dont les paires sont déjà
-    faites (sans en faire d'autres) : leurs détails de bâti contre les façades de la BD TOPO et
-    contre les contours du LiDAR HD de l'IGN, deux relevés ; une correction n'est gardée que si
-    les deux s'accordent et qu'elle dépasse leur propre écart (voir poses). Les panoramas sont
-    pris tels que COLMAP les a laissés ; chaque verdict est gardé au fur et à mesure (POSES),
-    avec où était le panorama : un panorama déjà jugé là n'est pas rejugé (sauf --again). Un
+    faites (sans en faire d'autres) : la forme entière de leurs détails de bâti cherchée sur les
+    façades de la BD TOPO, à toute rotation et tout décalage, comme le fait l'œil ; une correction
+    n'est gardée que si elle dépasse l'écart des deux relevés et que les contours du LiDAR HD de
+    l'IGN la confirment (les détails à moins de 4 m d'eux, et pas plus loin qu'avant ; voir poses).
+    Les panoramas sont pris tels que COLMAP les a laissés ; chaque verdict est gardé au fur et à
+    mesure (POSES), avec où était le panorama et la règle qui l'a donné : un panorama déjà jugé
+    là, par la règle d'aujourd'hui, n'est pas rejugé (sauf --again). Un
     panorama dont un voisin n'est pas segmenté est laissé (`flaneur segmenter` d'abord)."""
     spheres, segments = _placing_world()
     by_id = {p.id: p for p in spheres}
@@ -2164,7 +2166,7 @@ def set_panoramas_right(
     with httpx.Client() as client:
         for home in homes:
             placed = (round(home.x, 2), round(home.y, 2), round(home.azimuth, 2))
-            if not again and (kept := verdicts.get(home.id)) and kept.placed == placed:
+            if not again and (kept := verdicts.get(home.id)) and poses.still(kept, placed):
                 continue  # judged as it stands
             neighbours = depth.candidates(home, spheres, fixed)
             if not all(masks.kept(p) for p in [home, *neighbours]):
@@ -2188,9 +2190,7 @@ def set_panoramas_right(
             poses.save(POSES, verdicts)
             said = f"corrigé {found.correction}" if found.correction else "laissé"
             how = "COLMAP" if home.id in fixed else "emprunté"
-            typer.echo(
-                f"{home.id[:8]} ({how}) : {said} — BD TOPO {found.bdtopo}, LiDAR {found.lidar}"
-            )
+            typer.echo(f"{home.id[:8]} ({how}) : {said} — BD TOPO {found.bdtopo}")
     moved = poses.corrections(verdicts)
     typer.echo(f"{len(moved)} panorama(s) corrigé(s) sur {len(verdicts)} jugés")
     typer.echo("mesurées, pas encore appliquées : le cadre de la carte (voir poses)")
