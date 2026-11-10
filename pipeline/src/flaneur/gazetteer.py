@@ -25,7 +25,7 @@ from pyproj import Transformer
 from shapely.geometry import Point, shape
 from shapely.geometry.base import BaseGeometry
 
-from flaneur.read import ABBREVIATIONS, STREET_TYPES
+from flaneur.read import ABBREVIATIONS, STREET_TYPES, StreetMention
 from flaneur.sources import cached_json
 
 DATASETS = {
@@ -91,13 +91,24 @@ MAX_TRAILING_WORDS = 2
 # l'église de la Madeleine", "quai X le 14 juillet 1888", "rue Y pendant la crue". Cut here,
 # not by the reader: it applies to the readings kept and to the City's notes ("Actuellement
 # partie de la rue X entre les rues…"). Not "ou" ("rue Saint-Martin ou Saint-Denis" does not
-# say which), nor "du 4" ("rue du 4 Septembre" is a name).
+# say which), nor "du 4" ("rue du 4 Septembre" is a name), nor a year ("place du 18 Juin
+# 1940"): a year after the name goes as a trailing word (see _variants).
 DESCRIBED = re.compile(
-    r"\s+(?:entre|depuis|pendant|lors|avec|devant|derrière|(?:le|la|les)\s+\d|\d{3,4}\b)",
+    r"\s+(?:(?:entre|depuis|pendant|lors|avec|devant|derrière)\b|(?:le|la|les)\s+\d)",
     re.IGNORECASE,
 )
-# The longest street name looked for in a title, in words (see Gazetteer.named_in).
+# The longest street name looked for in a title, in words (see Gazetteer.named_in), and the
+# words a street's name starts with, as keys write them: a title names a street only with one
+# of them first (its "Grande Galerie" is a room).
 MOST_WORDS = 7
+TITLE_TYPES = frozenset(
+    "rue ruelle boulevard avenue place quai impasse passage pont carrefour faubourg cour cite "
+    "square villa allee chaussee port porte barriere parvis rond galerie marche cul sentier "
+    "chemin route butte montee esplanade jardin voie promenade passerelle cours terrasse sente "
+    "poterne".split()
+)
+# A house number, as written before a street ("24 rue Pavée", "11 bis").
+NUMBER = re.compile(r"\d+(?:\s?(?:bis|ter))?", re.IGNORECASE)
 
 _TYPE = rf"(?i:{STREET_TYPES}|{ABBREVIATIONS})"
 # Where an obsolete name went, anywhere in the City's note: "Actuellement rue de Condé",
@@ -121,10 +132,6 @@ def key(label: str) -> str:
     return " ".join(ABBREVIATED.get(w, w) for w in words if w not in PARTICLES)
 
 
-# The first word of each street type, as keys write it ("rond-point" → "rond").
-TYPE_WORDS = {key(re.sub(r"\(.*?\)", "", t)).split()[0] for t in STREET_TYPES.split("|")}
-
-
 def _usable(k: str) -> bool:
     """A key names a street only with a word besides the type ("rue L" alone would match
     every caption reduced to "rue de …")."""
@@ -144,22 +151,22 @@ def lambert(lon, lat):
 
 def _variants(label: str) -> list[str]:
     """Forms of a caption's street name to try, most literal first: the name itself (the
-    part before " - "), the name cut where what is said of the place starts (see DESCRIBED),
-    "faubourg X" as "rue du Faubourg X", then the name without up to MAX_TRAILING_WORDS
-    trailing lowercase words."""
+    part before " - "), then cut where what is said of the place starts (see DESCRIBED); each
+    as written, "faubourg X" as "rue du Faubourg X", then without up to MAX_TRAILING_WORDS
+    trailing lowercase words or years."""
     label = label.split(" - ")[0].strip()
-    variants = [label]
-    if (cut := DESCRIBED.split(label, maxsplit=1)[0].strip()) != label:
-        variants.append(cut)
-        label = cut
-    if label.lower().startswith("faubourg "):
-        variants.append(f"rue du {label}")
-    words = label.split()
-    for _ in range(MAX_TRAILING_WORDS):
-        if len(words) <= 2 or not words[-1][:1].islower() or words[-1] in PARTICLES:
-            break
-        words = words[:-1]
-        variants.append(" ".join(words))
+    variants = []
+    for name in dict.fromkeys([label, DESCRIBED.split(label, maxsplit=1)[0].strip()]):
+        variants.append(name)
+        if name.lower().startswith("faubourg "):
+            variants.append(f"rue du {name}")
+        words = name.split()
+        for _ in range(MAX_TRAILING_WORDS):
+            last = words[-1] if words else ""
+            if len(words) <= 2 or last in PARTICLES or not (last[:1].islower() or last.isdigit()):
+                break
+            words = words[:-1]
+            variants.append(" ".join(words))
     return variants
 
 
@@ -197,27 +204,44 @@ class Gazetteer:
         if _usable(k := key(street.label)):
             self.by_key[k].append(street)
 
-    def lookup(
-        self, label: str, arrondissements: list[int] | None = None, strict: bool = False
-    ) -> list[Street]:
+    def lookup(self, label: str, arrondissements: list[int] | None = None) -> list[Street]:
         """Streets that may carry this name; narrowed to the given arrondissements when that
-        leaves at least one (`strict`: always)."""
+        leaves at least one."""
         found = next((hit for k in keys(label) if (hit := self.by_key.get(k))), [])
         if arrondissements:
             inside = [s for s in found if set(s.arrondissements) & set(arrondissements)]
-            found = inside if strict else inside or found
+            found = inside or found
         return found
 
-    def named_in(self, text: str) -> str | None:
-        """The longest street name of the gazetteer written in `text` (as its key, two words
-        or more, as every key): words whole, never across punctuation, its type first ("Le
-        Pont-Neuf, 1er arrondissement" names the pont Neuf; "la Grande Galerie" is a room)."""
-        parts = [key(part).split() for part in re.split(r"[^\w\s'’-]", text)]
-        for n in range(MOST_WORDS, 1, -1):
-            for words in parts:
-                for i in range(len(words) - n + 1):
-                    if words[i] in TYPE_WORDS and (k := " ".join(words[i : i + n])) in self.by_key:
-                        return k
+    def named_in(self, text: str) -> StreetMention | None:
+        """The first street of the gazetteer a title names, as it writes it (the longest name
+        starting there), with the house number written before it: its type first ("Le
+        Pont-Neuf, 1er arrondissement" names the pont Neuf; "la Grande Galerie" is a room),
+        words whole and to the end of a hyphenated name ("rue Saint-Louis-en-l'Isle" does not
+        name the rue Saint-Louis), never across punctuation, nor in a part giving
+        alternatives ("Cour X ou Y", "Passage X [ou Y]")."""
+        text = re.sub(r"[\[(]\s*(?=ou\b)", " ", text, flags=re.IGNORECASE)
+        for part in re.split(r"[^\w\s'’-]", text):
+            tokens = part.split()
+            if "ou" in (t.lower() for t in tokens):
+                continue
+            words = [(w, t) for t, token in enumerate(tokens) for w in key(token).split()]
+            for i, (word, first) in enumerate(words):
+                if word not in TITLE_TYPES or (i and words[i - 1][1] == first):
+                    continue  # not a type, or inside a hyphenated name
+                for j in range(min(len(words), i + MOST_WORDS), i + 1, -1):
+                    last = words[j - 1][1]
+                    whole = j == len(words) or words[j][1] != last
+                    if whole and " ".join(w for w, _ in words[i:j]) in self.by_key:
+                        kind, name = re.split(
+                            r"[\s-]", " ".join(tokens[first : last + 1]), maxsplit=1
+                        )
+                        number = (
+                            tokens[first - 1]
+                            if first and NUMBER.fullmatch(tokens[first - 1])
+                            else None
+                        )
+                        return StreetMention(kind.lower(), name, number)
         return None
 
     @classmethod

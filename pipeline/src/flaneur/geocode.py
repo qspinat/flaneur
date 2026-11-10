@@ -7,6 +7,7 @@ come from the old maps (Jacoubet), not from today's streets.
 """
 
 import json
+import re
 import sqlite3
 import statistics
 from collections import Counter
@@ -46,12 +47,10 @@ class Location:
     precision_m: float | None = None  # None when unknown
 
 
-def _first_found(
-    labels: list[str], arrondissements: list[int], gazetteer: Gazetteer, strict: bool = False
-):
+def _first_found(labels: list[str], arrondissements: list[int], gazetteer: Gazetteer):
     """The first named street the gazetteer knows, with its candidates."""
     for label in labels:
-        if found := gazetteer.lookup(label, arrondissements, strict):
+        if found := gazetteer.lookup(label, arrondissements):
             return label, found
     return None, []
 
@@ -90,6 +89,28 @@ def _named_too(
     return None
 
 
+def _seen_from(
+    found: list[Street], viewpoint: str | None, arrondissements: list[int], gazetteer: Gazetteer
+) -> Street | None:
+    """Among the streets an old name designates, the only one that meets the street the
+    camera stood in ("rue des Sept-Voies, vue prise de la rue Saint-Hilaire")."""
+    if not viewpoint:
+        return None
+    stood = [
+        s.geometry
+        for mention in find_streets(viewpoint)
+        for s in gazetteer.lookup(mention.label, arrondissements)
+        if s.geometry is not None
+    ]
+    meeting = {
+        id(s.geometry): s
+        for s in found
+        if s.geometry is not None
+        and any(s.geometry.distance(g) <= CORNER_TOLERANCE_M for g in stood)
+    }
+    return next(iter(meeting.values())) if len(meeting) == 1 else None
+
+
 NO_DOORS = Addresses()
 
 
@@ -126,48 +147,62 @@ def locate(reading: dict, gazetteer: Gazetteer, addresses: Addresses = NO_DOORS)
     arrondissements = json.loads(reading["arrondissements"])
     door = _door(mentions, arrondissements, reading["year"], gazetteer, addresses)
     labels = [m.label for m in mentions]
-    by_street = _by_street(labels, arrondissements, reading["viewpoint"], gazetteer)
-    if by_street.status == "not_found" and door is None and reading["title"]:
-        by_street = _by_title(reading, arrondissements, gazetteer) or by_street
-    return min(filter(None, (by_street, door)), key=_rank)
+    found = [_by_street(labels, arrondissements, reading["viewpoint"], gazetteer), door]
+    if found[0].status == "not_found" and door is None and reading["title"]:
+        found += _by_title(reading, arrondissements, gazetteer, addresses)
+    return min(filter(None, found), key=_rank)
 
 
-def _by_title(reading, arrondissements: list[int], gazetteer: Gazetteer) -> Location | None:
-    """Where a photo was taken by a street its title names, when its reading found none the
-    gazetteer knows ("Le Pont-Neuf": the type inside the name); in an arrondissement the
-    caption gives, when it gives one (not "rue Saint-Simon" for "rue Saint-Simon-le-Franc")."""
-    if not (named := gazetteer.named_in(reading["title"])):
-        return None
-    return _by_street([named], arrondissements, reading["viewpoint"], gazetteer, strict=True)
+# Where a title turns to what the photo looks toward, or stands near: not where it was taken.
+TOWARDS = re.compile(r"\b(?:vers|en direction d|près d)", re.IGNORECASE)
+
+
+def _by_title(
+    reading, arrondissements: list[int], gazetteer: Gazetteer, addresses: Addresses
+) -> list[Location | None]:
+    """Where a photo was taken by the street its title names (see Gazetteer.named_in), when
+    its reading found none the gazetteer knows ("Le Pont-Neuf": the type inside the name):
+    along it, or before its door; only in an arrondissement the caption gives, when it gives
+    one (a name can be a shorter one's, elsewhere)."""
+    mention = gazetteer.named_in(TOWARDS.split(reading["title"], maxsplit=1)[0])
+    if mention is None:
+        return []
+    found = gazetteer.lookup(mention.label, arrondissements)
+    if arrondissements and not any(set(s.arrondissements) & set(arrondissements) for s in found):
+        return []
+    return [
+        _by_street([mention.label], arrondissements, reading["viewpoint"], gazetteer),
+        _door([mention], arrondissements, reading["year"], gazetteer, addresses),
+    ]
 
 
 def _by_street(
-    streets: list[str],
-    arrondissements: list[int],
-    viewpoint: str | None,
-    gazetteer: Gazetteer,
-    strict: bool = False,
+    streets: list[str], arrondissements: list[int], viewpoint: str | None, gazetteer: Gazetteer
 ) -> Location:
     """Where a photo was taken by its streets alone (their names): their corner, the
-    viewpoint's street, or somewhere along its own (`strict`: see Gazetteer.lookup)."""
-    label, found = _first_found(streets, arrondissements, gazetteer, strict)
+    viewpoint's street, or somewhere along its own."""
+    label, found = _first_found(streets, arrondissements, gazetteer)
     if not found:
         return Location("not_found")
     if all(s.geometry is None for s in found):
         return Location("removed", label, found[0])
-    others = [s for s in streets if s != label]
-    street = choose(found) or _named_too(found, others, arrondissements, gazetteer)
+    mentioned = [s for s in streets if s != label]
+    street = (
+        choose(found)
+        or _named_too(found, mentioned, arrondissements, gazetteer)
+        or _seen_from(found, viewpoint, arrondissements, gazetteer)
+    )
     if street is None:
         return Location("ambiguous", label)
     if viewpoint:
         # Every street named in the viewpoint, except the photo's own street.
-        others = [
+        crossing = [
             (mention.label, other)
             for mention in find_streets(viewpoint)
             if (other := choose(gazetteer.lookup(mention.label, arrondissements)))
             and other.geometry is not street.geometry
         ]
-        for other_label, other in others:
+        for other_label, other in crossing:
             if street.geometry.distance(other.geometry) <= CORNER_TOLERANCE_M:
                 meeting = street.geometry.buffer(CORNER_TOLERANCE_M).intersection(
                     other.geometry.buffer(CORNER_TOLERANCE_M)
@@ -179,8 +214,8 @@ def _by_street(
                     meeting.centroid,
                     precision_m=2 * CORNER_TOLERANCE_M,
                 )
-        if others:
-            other_label, other = others[0]
+        if crossing:
+            other_label, other = crossing[0]
             return Location("viewpoint_street", other_label, other, precision_m=_along(other))
     return Location("street", label, street, precision_m=_along(street))
 
