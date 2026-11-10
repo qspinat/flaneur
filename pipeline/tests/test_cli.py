@@ -178,6 +178,14 @@ def test_panoramas_used_by_more_photos_come_first(monkeypatch):
     assert [p.id for p in used] == ["b", "a"]  # b near both; c near none that match works on
 
 
+def test_recaler_refuses_prefixes_and_photos_together(monkeypatch):
+    monkeypatch.setattr(cli, "_placing_world", lambda **_: pytest.fail("loaded for nothing"))
+
+    result = CliRunner().invoke(app, ["recaler", "1a2b", "--photos"])
+
+    assert result.exit_code != 0 and "--photos" in result.output
+
+
 LEFT = [[-4.0, y, z] for y in np.arange(2.0, 40.0, 0.5) for z in (-1.0, 3.0, 8.0)]
 STREET = np.array(LEFT + [[4.0, y, z] for _, y, z in LEFT])  # two facades along y
 

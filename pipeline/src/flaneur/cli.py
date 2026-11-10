@@ -967,6 +967,20 @@ def _found_by(kept: dict) -> dict:
     return found
 
 
+def _to_match(walk: list[export.WalkPhoto]) -> list[export.WalkPhoto]:
+    """The walk's photos `match` works on: those exported."""
+    return [me for me in walk if _exported(me.id).exists()]
+
+
+def _compared_with(
+    near_by: list[match.Panorama], here: tuple[float, float]
+) -> list[match.Panorama]:
+    """The panoramas `match` compares a photo with: MATCH_PANORAMAS of those within
+    MATCH_RADIUS_M of its place (`here`: the caption's, or the review's, never a previous
+    match's: see _place_of), nearest first."""
+    return _nearest(near_by, *here, MATCH_RADIUS_M)[:MATCH_PANORAMAS]
+
+
 def _nearest(
     near_by: list[match.Panorama], x: float, y: float, radius: float = np.inf, but: str = ""
 ) -> list[match.Panorama]:
@@ -1056,7 +1070,7 @@ def _match_with(matcher: str, photos: list[export.WalkPhoto], at: _Run) -> None:
     for me in photos:
         inputs = _inputs(me.id, at.setup)
         here = _place_of(me)
-        near = _compared_with(at.near_by, me)
+        near = _compared_with(at.near_by, here)
         image = cv2.imread(str(_exported(me.id)))
         now = at.then(_then_year(me))
         where = _where(me, at.heights, now)
@@ -2166,24 +2180,12 @@ def segment_panoramas(answers: Path = PLACINGS, page: int = 8772) -> None:
 LIDAR_MNS = DATA / "raw" / "lidar_mns"  # IGN's LiDAR HD surface model, patches around panoramas
 
 
-def _to_match(walk: list[export.WalkPhoto]) -> list[export.WalkPhoto]:
-    """The walk's photos `match` works on: those exported (searched around the caption's place,
-    or the review's, never a previous match's)."""
-    return [me for me in walk if _exported(me.id).exists()]
-
-
-def _compared_with(near_by: list[match.Panorama], me: export.WalkPhoto) -> list[match.Panorama]:
-    """The panoramas `match` compares a photo with: MATCH_PANORAMAS of those within
-    MATCH_RADIUS_M of its place, nearest first."""
-    return _nearest(near_by, *_place_of(me), MATCH_RADIUS_M)[:MATCH_PANORAMAS]
-
-
 def _used_by_matching(
     walk: list[export.WalkPhoto], near_by: list[match.Panorama]
 ) -> list[match.Panorama]:
     """The panoramas `match` compares the walk's photos with (see _to_match, _compared_with),
     those of more photos first."""
-    used = Counter(p for me in _to_match(walk) for p in _compared_with(near_by, me))
+    used = Counter(p for me in _to_match(walk) for p in _compared_with(near_by, _place_of(me)))
     return sorted(used, key=lambda p: (-used[p], p.id))
 
 
@@ -2194,30 +2196,39 @@ def set_panoramas_right(
     photos: Annotated[
         bool, typer.Option(help="ceux que `match` compare aux photos, les plus employés d'abord")
     ] = False,
+    page: Annotated[int, typer.Option(help="le port de la page pour placer")] = 8772,
 ) -> None:
     """Recale sur le plan les panoramas nommés (préfixes), ou (--photos) ceux que `match`
     compare aux photos de la balade (leurs paires faites au besoin), sinon ceux dont les paires
     sont déjà faites (sans en faire d'autres) : la forme entière de leurs détails de bâti
     cherchée sur les façades de la BD TOPO, à toute rotation et tout décalage, comme le fait
-    l'œil ; une correction
-    n'est gardée que si elle dépasse l'écart des deux relevés et que les contours du LiDAR HD de
-    l'IGN la confirment (les détails à moins de 4 m d'eux, et pas plus loin qu'avant ; voir poses).
-    Les panoramas sont pris tels que COLMAP les a laissés ; chaque verdict est gardé au fur et à
-    mesure (POSES), avec où était le panorama et la règle qui l'a donné : un panorama déjà jugé
-    là, par la règle d'aujourd'hui, n'est pas rejugé (sauf --again). Un
-    panorama dont un voisin n'est pas segmenté est laissé (`flaneur segmenter` d'abord). Les
-    panoramas sont jugés tels que COLMAP les a laissés ; le reste les lit corrigés (selon
-    poses.APPLIED) : appliquer des corrections périme les places de `match`, fait repasser son
-    contrôle, et les panoramas tournés refont leurs caches (segmentation : `flaneur segmenter`)."""
+    l'œil ; une correction n'est gardée que si elle dépasse l'écart des deux relevés et que les
+    contours du LiDAR HD de l'IGN la confirment (les détails à moins de 4 m d'eux, et pas plus
+    loin qu'avant ; voir poses). Les panoramas sont jugés tels que COLMAP les a laissés (le
+    reste les lit corrigés, selon poses.APPLIED : appliquer des corrections périme les places de
+    `match`, fait repasser son contrôle, et les panoramas tournés refont leurs caches) ; chaque
+    verdict est gardé au fur et à mesure (POSES), avec où était le panorama et la règle qui l'a
+    donné : un panorama déjà jugé là, par la règle d'aujourd'hui, n'est pas rejugé (sauf
+    --again). Un panorama dont un voisin n'est pas segmenté est laissé (`flaneur segmenter`
+    d'abord). Refusé pendant que la page pour placer tourne : le modèle et elle ne tiennent pas
+    ensemble en mémoire."""
+    if only and photos:
+        raise typer.BadParameter("des préfixes, ou --photos : pas les deux")
+    _page_closed(page)
     spheres, segments = _placing_world(corrected=False)  # as COLMAP left them
     with closing(db.connect(DB_PATH)) as conn:
         fixed = _fixed_by_colmap(panoramas.load(conn), register.load(FIXES))
-        walk = export.photos(conn, DATA / "pilot", REVIEWS) if photos and not only else []
+        walk = export.photos(conn, DATA / "pilot", REVIEWS) if photos else []
     made_only = False  # their pairs made as needed, unless taken for having them on disk
     if only:
         homes = [p for p in spheres if any(p.id.startswith(o) for o in only)]
-    elif photos:
-        homes = _used_by_matching(walk, spheres)
+    elif photos:  # chosen where match will compare them (corrected), judged as COLMAP left them
+        by_id = {p.id: p for p in spheres}
+        homes = [by_id[p.id] for p in _used_by_matching(walk, _spheres()) if p.id in by_id]
+        if not homes:
+            typer.echo("aucune photo exportée à portée d'un panorama : rien à juger")
+            return
+        typer.echo(f"{len(homes)} panoramas que `match` compare aux photos, à juger")
     else:  # those whose pairs are on disk (three or more)
         homes, made_only = _paired_homes(spheres, PAIR_MATCHES), True
     views = functools.cache(lambda: _views(kept=8))  # the matcher, only if a pair must be made
