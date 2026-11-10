@@ -24,7 +24,7 @@ import json
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import NamedTuple
+from typing import Literal, NamedTuple
 
 import httpx
 import numpy as np
@@ -78,7 +78,8 @@ MARGIN = 1.02  # the best counts this many times another answer at least: a tie,
 # whole shape borne out by LiDAR, with what decides it. A verdict by another is judged again.
 # What of the corrections what reads panoramas' poses takes (cli._placed): "all", "turns" (their
 # turn only: no shift changes the distances to neighbours its depths come from) or "none".
-APPLIED = "none"
+Applied = Literal["all", "turns", "none"]
+APPLIED: Applied = "none"
 RULE = "2:" + ",".join(
     str(v)
     for v in (MARGIN, FAR_M, ON_WALL_M, RIVAL_M, NEAR_M, LEAST_SHIFT_M, LEAST_TURN_DEG)
@@ -446,21 +447,28 @@ def still(verdict: Verdict, placed: tuple[float, float, float]) -> bool:
     return verdict.placed == placed and verdict.rule == RULE
 
 
+def at(x: float, y: float, heading: float) -> tuple[float, float, float]:
+    """Where a panorama stands, as a verdict keeps it (Verdict.placed): to the hundredth."""
+    return round(x, 2), round(y, 2), round(heading, 2)
+
+
 def to_apply(
-    verdicts: dict[str, Verdict], placed: dict[str, tuple[float, float, float]], applied: str
+    verdicts: dict[str, Verdict], placed: dict[str, tuple[float, float, float]], applied: Applied
 ) -> dict[str, tuple[float, float, float]]:
     """The fixes (east, north, change of heading: compass degrees, clockwise) that set panoramas
     right, as register.applied takes them: the corrections by the RULE of now of those still
-    `placed` (east, north, heading, to the hundredth) where they were judged; `applied` (see
-    APPLIED) "turns": the turn only, "none": none. A correction turns counter-clockwise on the
-    plan: the heading by its opposite."""
+    `placed` (see at) where they were judged; `applied` (see APPLIED) "turns": the turn only,
+    "none": none. A correction turns counter-clockwise on the plan: the heading by its
+    opposite."""
+    if applied not in ("all", "turns", "none"):
+        raise ValueError(f"applied: all, turns or none, not {applied!r}")
     if applied == "none":
         return {}
     shifts = applied == "all"
     return {
         i: (c.east if shifts else 0.0, c.north if shifts else 0.0, -c.turn)
         for i, c in corrections(verdicts).items()
-        if i in placed and verdicts[i].placed == placed[i]
+        if i in placed and still(verdicts[i], placed[i])
     }
 
 

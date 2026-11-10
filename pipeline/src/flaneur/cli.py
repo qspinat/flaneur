@@ -356,16 +356,17 @@ def _placed(pictures: list[Picture], corrected: bool = True) -> list[Picture]:
     as their run's nearest panoramas so placed (reconstruct.borrowed), else as recorded (not
     by their own roofs and corners: see register); then, `corrected`, set right on the map as
     `flaneur recaler` found (poses.APPLIED of it) — which judges them as COLMAP left them. A
-    panorama turned so has caches of its own (_levelled_name: its views are other pixels)."""
+    panorama turned so has caches of its own (_levelled_name: its views are other pixels): the
+    corrected world and recaler's each make theirs (masks, pairs) when asked."""
     fixes = register.load(FIXES)
     found = {i: tuple(fixes[i]["fix"]) for i in _fixed_by_colmap(pictures, fixes)}
     placed = register.applied(pictures, reconstruct.borrowed(found, pictures))
-    if not corrected:
-        return placed
+    verdicts = poses.load(POSES)
     where = {
-        p.id: (round(p.point.x, 2), round(p.point.y, 2), round(p.azimuth or 0.0, 2)) for p in placed
+        p.id: poses.at(p.point.x, p.point.y, p.azimuth or 0.0) for p in placed if p.id in verdicts
     }
-    return register.applied(placed, poses.to_apply(poses.load(POSES), where, poses.APPLIED))
+    applied = poses.APPLIED if corrected else "none"
+    return register.applied(placed, poses.to_apply(verdicts, where, applied))
 
 
 class _NotRead(Exception):
@@ -2177,7 +2178,7 @@ def set_panoramas_right(
     verdicts = poses.load(POSES)
     with httpx.Client() as client:
         for home in homes:
-            placed = (round(home.x, 2), round(home.y, 2), round(home.azimuth, 2))
+            placed = poses.at(home.x, home.y, home.azimuth)
             if not again and (kept := verdicts.get(home.id)) and poses.still(kept, placed):
                 continue  # judged as it stands
             neighbours = depth.candidates(home, spheres, fixed)
@@ -2205,7 +2206,11 @@ def set_panoramas_right(
             typer.echo(f"{home.id[:8]} ({how}) : {said} — BD TOPO {found.bdtopo}")
     moved = poses.corrections(verdicts)
     typer.echo(f"{len(moved)} panorama(s) corrigé(s) sur {len(verdicts)} jugés")
-    typer.echo("mesurées, pas encore appliquées : le cadre de la carte (voir poses)")
+    typer.echo(
+        f"appliquées : {poses.APPLIED}"
+        if poses.APPLIED != "none"
+        else "mesurées, pas encore appliquées (poses.APPLIED)"
+    )
 
 
 @app.command("parallaxe")

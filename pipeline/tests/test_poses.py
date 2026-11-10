@@ -398,14 +398,22 @@ def test_lidar_cells_without_data_are_unknown_and_a_wrong_answer_is_refused(tmp_
 JUDGED = {"p": poses.Verdict(poses.Correction(2.0, -1.0, 4.0), None, 900, (1.0, 2.0, 30.0))}
 
 
-def test_corrections_apply_only_to_panoramas_where_they_were_judged():
-    assert poses.to_apply(JUDGED, {"p": (1.0, 2.0, 30.0)}, "all") == {"p": (2.0, -1.0, -4.0)}
-    assert poses.to_apply(JUDGED, {"p": (1.0, 2.5, 30.0)}, "all") == {}  # COLMAP moved it since
+@pytest.mark.parametrize(
+    "where, applied, expected",
+    [
+        ((1.0, 2.0, 30.0), "all", {"p": (2.0, -1.0, -4.0)}),
+        ((1.0, 2.5, 30.0), "all", {}),  # COLMAP moved it since it was judged
+        ((1.0, 2.0, 30.0), "turns", {"p": (0.0, 0.0, -4.0)}),
+        ((1.0, 2.0, 30.0), "none", {}),
+    ],
+)
+def test_corrections_apply_where_they_were_judged_as_much_as_asked(where, applied, expected):
+    assert poses.to_apply(JUDGED, {"p": where}, applied) == expected
 
 
-def test_turns_only_drops_the_shift_and_none_applies_nothing():
-    assert poses.to_apply(JUDGED, {"p": (1.0, 2.0, 30.0)}, "turns") == {"p": (0.0, 0.0, -4.0)}
-    assert poses.to_apply(JUDGED, {"p": (1.0, 2.0, 30.0)}, "none") == {}
+def test_an_unknown_way_of_applying_is_refused():
+    with pytest.raises(ValueError):
+        poses.to_apply(JUDGED, {"p": (1.0, 2.0, 30.0)}, "turn")
 
 
 def test_a_corrected_heading_turns_what_the_panorama_sees_as_the_correction_does():
