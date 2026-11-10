@@ -120,6 +120,15 @@ def moved(points: np.ndarray, origin: np.ndarray, c: Correction) -> np.ndarray:
     return origin + turned + [c.east, c.north]
 
 
+def carried(
+    points: np.ndarray, then: tuple[float, float, float], now: tuple[float, float, float]
+) -> np.ndarray:
+    """Plan points (n × 2) seen from a panorama that stood `then` (east, north, compass heading)
+    and stands `now`: moved and turned with it, about it."""
+    (x0, y0, a0), (x1, y1, a1) = then, now
+    return moved(points, np.array([x0, y0]), Correction(x1 - x0, y1 - y0, a0 - a1))
+
+
 def segment_distance(points: np.ndarray, segments: np.ndarray) -> np.ndarray:
     """Each plan point's distance to the nearest of `segments` (m × 2 × 2; none: infinite)."""
     nearest = np.full(len(points), np.inf)

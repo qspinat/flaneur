@@ -19,7 +19,7 @@ from scipy.sparse import csr_matrix
 from scipy.spatial import cKDTree
 from shapely.geometry import LineString, Point
 
-from flaneur import match
+from flaneur import match, poses
 from flaneur.blocks import Blocks
 from flaneur.registration import ViewOf
 from flaneur.segment import BUILT, SKY, UNSEEN
@@ -582,10 +582,12 @@ def record(
     drawn: list[Wall],
     removed: list[Segment],
     removed_since: list[int] | None = None,
+    at: tuple[float, float, float] | None = None,
 ) -> None:
     """Keep the walls drawn at a panorama and those removed there (a row; the latest holds),
     each with the save it first was in (`since`; `removed_since` for the removals): a wall or a
-    removal new, or sent back unchanged."""
+    removal new, or sent back unchanged. Where the panorama stood (`at`: east, north, heading),
+    for them to follow it if it is set right since (see saved_at)."""
     now = 1 + max((s for row in rows(path) for s in _ages(row)), default=0)
     ages = removed_since or [0] * len(removed)
     append_row(
@@ -596,6 +598,7 @@ def record(
             "removed": [
                 {"a": a, "b": b, "since": s or now} for (a, b), s in zip(removed, ages, strict=True)
             ],
+            "panorama_at": None if at is None else [float(v) for v in at],
         },
     )
 
@@ -612,24 +615,35 @@ def _latest(path: Path) -> dict[str, dict]:
     return latest
 
 
-def _read(row: dict) -> tuple[list[Wall], list[Segment], list[int]]:
-    """A row's walls drawn and its removals, and the save each removal first was in."""
+def _read(row: dict, now: dict | None = None) -> tuple[list[Wall], list[Segment], list[int]]:
+    """A row's walls drawn and its removals, and the save each removal first was in; with where
+    the panoramas stand `now` (east, north, heading by id), moved with their panorama since."""
+    then, stands = row.get("panorama_at"), (now or {}).get(row["panorama"])
+
+    def end(point) -> tuple[float, float]:
+        if not then or stands is None or tuple(then) == tuple(stands):
+            return tuple(point)
+        return tuple(float(v) for v in poses.carried(np.array([point], float), then, stands)[0])
+
     drawn = [
-        Wall(tuple(w["a"]), tuple(w["b"]), w["top"], "drawn", at=row["panorama"], since=w["since"])
+        Wall(end(w["a"]), end(w["b"]), w["top"], "drawn", at=row["panorama"], since=w["since"])
         for w in row["drawn"]
     ]
-    removed = [(tuple(r["a"]), tuple(r["b"])) for r in row["removed"]]
+    removed = [(end(r["a"]), end(r["b"])) for r in row["removed"]]
     return drawn, removed, [r["since"] for r in row["removed"]]
 
 
-def saved_at(path: Path, panorama: str) -> tuple[list[Wall], list[Segment], list[int]]:
-    """The walls drawn and removed at a panorama (its latest row), and when each removal was."""
+def saved_at(
+    path: Path, panorama: str, now: dict | None = None
+) -> tuple[list[Wall], list[Segment], list[int]]:
+    """The walls drawn and removed at a panorama (its latest row), and when each removal was
+    (`now`: see _read)."""
     row = _latest(path).get(panorama)
-    return _read(row) if row else ([], [], [])
+    return _read(row, now) if row else ([], [], [])
 
 
 def saved_near(
-    path: Path, x: float, y: float, radius: float = NEAR_M
+    path: Path, x: float, y: float, radius: float = NEAR_M, now: dict | None = None
 ) -> tuple[list[Wall], list[Segment]]:
     """The walls drawn and removed (the latest row of each panorama) reaching within `radius`
     of (x, y). A wall drawn at one panorama loses the stretches removed at others after it was
@@ -638,7 +652,7 @@ def saved_near(
     drawn: list[Wall] = []
     removals: list[tuple[Segment, int, str]] = []
     for panorama, row in _latest(path).items():
-        walls, removed, ages = _read(row)
+        walls, removed, ages = _read(row, now)
         drawn += [w for w in walls if _distance((x, y), (w.a, w.b)) <= radius]
         removals += [
             (r, s, panorama)

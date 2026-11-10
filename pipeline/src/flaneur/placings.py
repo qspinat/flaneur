@@ -148,7 +148,7 @@ def followed(row: dict, now: dict[str, tuple[float, float, float]]) -> dict:
     change = poses.Correction(x1 - x0, y1 - y0, a0 - a1)  # counter-clockwise on the plan
 
     def about(x: float, y: float) -> tuple[float, float]:
-        return tuple(poses.moved(np.array([[x, y]]), np.array([x0, y0]), change)[0])
+        return tuple(poses.carried(np.array([[x, y]]), row["panorama_at"], now[panorama])[0])
 
     def placed(place: dict) -> dict:  # a place on the plan (lon, lat, heading if any)
         spot = to_metres(Point(place["lon"], place["lat"]))

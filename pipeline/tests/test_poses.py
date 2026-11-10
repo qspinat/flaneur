@@ -433,3 +433,11 @@ def test_turns_alone_are_applied_only_beyond_the_surveys_own_disagreement():
 
     assert poses.to_apply(small, {"p": (1.0, 2.0, 30.0)}, "turns") == {}
     assert poses.to_apply(small, {"p": (1.0, 2.0, 30.0)}, "all") == {"p": (2.0, 0.5, -1.2)}
+
+
+def test_points_are_carried_as_their_panorama_moved_about_it():
+    points = np.array([[100.0, 210.0]])  # 10 m north of the panorama
+
+    moved = poses.carried(points, (100.0, 200.0, 0.0), (102.0, 200.0, 90.0))
+
+    assert moved == pytest.approx(np.array([[112.0, 200.0]]))  # 2 m east, turned right: east

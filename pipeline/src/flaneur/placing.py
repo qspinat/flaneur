@@ -775,7 +775,9 @@ def serve(sources: Sources, port: int) -> HTTPServer:
         drawn and removed as saved (`mine`, however far: what the page edits and sends back to
         /api/walls)."""
         drawn, removed, ages = (
-            facades.saved_at(sources.walls, sphere.id) if sources.walls else ([], [], [])
+            facades.saved_at(sources.walls, sphere.id, sources.now)
+            if sources.walls
+            else ([], [], [])
         )
         scene = scene_of(sphere, body)
         mine = {  # with the save each first was in, sent back unchanged (see facades.record)
@@ -976,7 +978,14 @@ def serve(sources: Sources, port: int) -> HTTPServer:
                     drawn = [_drawn(w, ground) for w in sent[0]]
                     removed = [_ends(r) for r in sent[1]]
                     ages = [_since(r) for r in sent[1]]
-                    facades.record(sources.walls, sphere.id, drawn, removed, ages)
+                    facades.record(
+                        sources.walls,
+                        sphere.id,
+                        drawn,
+                        removed,
+                        ages,
+                        at=poses.at(sphere.x, sphere.y, sphere.azimuth),
+                    )
                     self._json(walls_shown(sphere, body))
                 elif self.path == "/api/second":
                     sphere, view = here(sphere), ViewOf(**body["view"])

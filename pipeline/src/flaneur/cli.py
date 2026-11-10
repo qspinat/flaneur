@@ -242,11 +242,22 @@ def _on_image_now(placed: dict[str, dict]) -> dict[str, dict]:
     return {i: r for i, r in placed.items() if _exported(i).exists() and r["inputs"] == _image(i)}
 
 
-def _carried(placed: dict[str, dict]) -> dict[str, dict]:
+def _carried(placed: dict[str, dict], now: dict[str, tuple]) -> dict[str, dict]:
     """The copies carried to the neighbouring panoramas (`flaneur porter`) still made from
-    the answer that holds (`placed`)."""
+    the answer that holds (`placed`), with the panoramas involved standing where they did
+    (`now`: see placings.where; copies kept before poses were: only while none is applied)."""
     kept = json.loads(CARRIED.read_text()) if CARRIED.exists() else {}
-    return {i: c for i, c in kept.items() if i in placed and c["made"] == _answered_as(placed[i])}
+
+    def stands(c: dict) -> bool:
+        if "at" not in c:
+            return poses.APPLIED == "none"
+        return all(tuple(at) == tuple(now.get(p, at)) for p, at in c["at"].items())
+
+    return {
+        i: c
+        for i, c in kept.items()
+        if i in placed and c["made"] == _answered_as(placed[i]) and stands(c)
+    }
 
 
 @app.command("export")
@@ -416,6 +427,7 @@ class _Scenes:
         seen: Callable[[match.Panorama, np.ndarray], np.ndarray] | None = None,
     ):
         self.by_id = {p.id: p for p in spheres}
+        self.now = placings.where(spheres)  # drawn walls follow their panorama
         self.spheres, self.fixed, self.views, self.lock = spheres, fixed, views, lock
         self.segments, self.walls_path, self.matches = segments, walls_path, matches
         self.seen = seen
@@ -520,7 +532,7 @@ class _Scenes:
             lambda: self._fit(home, chosen, [found[i] for i in neighbours], neighbours),
             self.fitting,
         )
-        drawn = facades.saved_near(self.walls_path, home.x, home.y)
+        drawn = facades.saved_near(self.walls_path, home.x, home.y, now=self.now)
         walls = facades.with_drawn(list(fitted.walls), *drawn, fitted.ground)
         return replace(fitted, walls=tuple(walls))
 
@@ -1923,6 +1935,7 @@ def propose_in_panoramas(sheets: int = 20) -> None:
                 "inputs": _image(me.id),  # the image it was proposed on
                 "metres": round(float(np.hypot(home.x - here.x, home.y - here.y)), 1),
                 "registration": proposal and registration.to_json(proposal),
+                "at": list(poses.at(home.x, home.y, home.azimuth)),  # stale once it moves
             }
             if proposal and sheets > 0:
                 sheets -= 1
@@ -1962,6 +1975,19 @@ def _features(store: chain.Store, photo_id: str, extract: bool = True) -> match.
     path = _exported(photo_id)
     read = (lambda: match.shrunk(cv2.imread(str(path)))) if extract else None
     return store.features(photo_id, _image(photo_id), read)
+
+
+def _still_proposed(
+    known: dict, photo_id: str, panorama: str, stands: tuple[float, float, float] | None
+) -> bool:
+    """Whether a proposal made by `flaneur proposer` holds: on this panorama and the photo's
+    image now, the panorama standing where it was made (`stands`: see placings.where; one made
+    before poses were kept: only while none is applied)."""
+    if (known.get("panorama"), known.get("inputs")) != (panorama, _image(photo_id)):
+        return False
+    if "at" not in known:
+        return poses.APPLIED == "none"
+    return stands is not None and tuple(known["at"]) == tuple(stands)
 
 
 def _answered_as(row: dict) -> str:
@@ -2023,19 +2049,25 @@ def carry_placed() -> None:
     (data/pilot/carried.json) ; seules les photos répondues depuis la dernière fois sont
     refaites."""
     held = _on_image_now(_placing_answers()[1])  # those placed on another image: not exported
-    carried = _carried(held)
+    with closing(db.connect(DB_PATH)) as conn:
+        pictures = _lined_up(panoramas.load(conn))
+    spheres = {p.id: p for p in _panoramas(pictures, lambda x, y: 0.0)}
+    now = placings.where(spheres.values())
+    carried = _carried(held, now)
     todo = [i for i in held if i not in carried]
     if todo:
-        with closing(db.connect(DB_PATH)) as conn:
-            pictures = _lined_up(panoramas.load(conn))
-        spheres = {p.id: p for p in _panoramas(pictures, lambda x, y: 0.0)}
         street = panoramas.links(pictures)  # the next ones along the street, every way
         views = _views(kept=8)
         for photo_id in todo:
             r = placings.registration_of(held[photo_id])
             home = spheres.get(r.panorama)
             copies = [] if home is None else _to_neighbours(r, home, spheres, street, views)
-            carried[photo_id] = {"made": _answered_as(held[photo_id]), "copies": copies}
+            involved = [r.panorama] + [c["registration"]["panorama"] for c in copies]
+            carried[photo_id] = {
+                "made": _answered_as(held[photo_id]),
+                "copies": copies,
+                "at": {p: list(now[p]) for p in involved if p in now},
+            }
             write_json(CARRIED, carried)  # kept photo after photo: a stop loses one at most
     write_json(CARRIED, carried)
     counts = [len(c["copies"]) for c in carried.values()]
@@ -2214,7 +2246,8 @@ def set_panoramas_right(
     ensemble en mémoire."""
     if only and photos:
         raise typer.BadParameter("des préfixes, ou --photos : pas les deux")
-    _page_closed(page)
+    if only or photos:  # pairs made as needed: the matcher wakes
+        _page_closed(page)
     spheres, segments = _placing_world(corrected=False)  # as COLMAP left them
     with closing(db.connect(DB_PATH)) as conn:
         fixed = _fixed_by_colmap(panoramas.load(conn), register.load(FIXES))
@@ -2224,7 +2257,8 @@ def set_panoramas_right(
         homes = [p for p in spheres if any(p.id.startswith(o) for o in only)]
     elif photos:  # chosen where match will compare them (corrected), judged as COLMAP left them
         by_id = {p.id: p for p in spheres}
-        homes = [by_id[p.id] for p in _used_by_matching(walk, _spheres()) if p.id in by_id]
+        compared = spheres if poses.APPLIED == "none" else _spheres()  # where match compares
+        homes = [by_id[p.id] for p in _used_by_matching(walk, compared) if p.id in by_id]
         if not homes:
             typer.echo("aucune photo exportée à portée d'un panorama : rien à juger")
             return
@@ -2267,7 +2301,10 @@ def set_panoramas_right(
             typer.echo(f"{home.id[:8]} ({how}) : {said} — BD TOPO {found.bdtopo}")
     where = placings.where(spheres)
     standing = poses.to_apply(verdicts, where, "all")  # judged where COLMAP still puts them
-    typer.echo(f"{len(standing)} panorama(s) corrigé(s) sur {len(verdicts)} jugés")
+    judged = sum(v.rule == poses.RULE for v in verdicts.values())
+    typer.echo(
+        f"{len(standing)} panorama(s) corrigé(s) sur {judged} jugés par la règle d'aujourd'hui"
+    )
     applied = len(poses.to_apply(verdicts, where, poses.APPLIED))
     typer.echo(
         f"appliquées ({poses.APPLIED}) : {applied}"
@@ -2421,7 +2458,8 @@ def place_photos(
         """Computed by `flaneur proposer` for this panorama, else (live) made now (those carried
         from a photo placed come first: see placing.serve)."""
         known = computed.get(photo_id)
-        if known and (known["panorama"], known.get("inputs")) == (panorama, _image(photo_id)):
+        stands = placings.where([by_id[panorama]])[panorama] if panorama in by_id else None
+        if known and _still_proposed(known, photo_id, panorama, stands):
             found = placings.registration_of(known)
         elif live and panorama in by_id and photo_id in photos:
             views = models()
@@ -2542,7 +2580,8 @@ def write_scene() -> None:
     site = json.loads((WEB_DATA / "walk.json").read_text())
     marked = {p["id"] for p in site["photos"] if p["in_3d"]}  # by the export, on its images
     shown = {i: r for i, r in in_3d.items() if i in marked}
-    copies = {i: c["copies"] for i, c in _carried(shown).items()}
+    now = placings.where(_panoramas(pictures, lambda x, y: 0.0))
+    copies = {i: c["copies"] for i, c in _carried(shown, now).items()}
     built, holding = scene.build3d(
         [p for p in pictures if (PANORAMAS / f"{p.id}.jpg").exists()], shown, copies, walk
     )

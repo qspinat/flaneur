@@ -186,6 +186,54 @@ def test_recaler_refuses_prefixes_and_photos_together(monkeypatch):
     assert result.exit_code != 0 and "--photos" in result.output
 
 
+@pytest.mark.parametrize(
+    "known_at, applied, holds",
+    [
+        ([1.0, 2.0, 30.0], "all", True),
+        ([1.0, 2.0, 33.0], "all", False),  # its panorama turned since
+        (None, "none", True),  # made before poses were kept, nothing applied
+        (None, "all", False),
+    ],
+)
+def test_a_proposal_holds_while_its_panorama_stands_where_it_was_made(
+    monkeypatch, known_at, applied, holds
+):
+    monkeypatch.setattr(cli, "_image", lambda photo_id: "h")
+    monkeypatch.setattr(poses, "APPLIED", applied)
+    known = {"panorama": "p1", "inputs": "h", **({"at": known_at} if known_at else {})}
+
+    assert cli._still_proposed(known, "pm:1", "p1", (1.0, 2.0, 30.0)) is holds
+
+
+def test_copies_carried_from_panoramas_moved_since_are_made_again(tmp_path, monkeypatch):
+    row = {"registration": {"panorama": "a"}, "inputs": "i", "flipped": False}
+    made = cli._answered_as(row)
+    kept = {
+        "pm:1": {"made": made, "copies": [], "at": {"a": [0.0, 0.0, 0.0], "b": [5.0, 0.0, 0.0]}},
+        "pm:2": {"made": made, "copies": [], "at": {"a": [0.0, 0.0, 0.0], "c": [9.0, 0.0, 0.0]}},
+    }
+    (tmp_path / "carried.json").write_text(json.dumps(kept))
+    monkeypatch.setattr(cli, "CARRIED", tmp_path / "carried.json")
+    now = {"a": (0.0, 0.0, 0.0), "b": (5.0, 0.0, 0.0), "c": (9.0, 0.0, 4.0)}  # c turned since
+
+    assert set(cli._carried({"pm:1": row, "pm:2": row}, now)) == {"pm:1"}
+
+
+def test_recaler_keeps_clear_of_the_page_only_when_it_wakes_the_matcher(monkeypatch):
+    guarded = []
+    monkeypatch.setattr(cli, "_page_closed", lambda page: guarded.append(page))
+
+    def world(**_):
+        raise RuntimeError("world")
+
+    monkeypatch.setattr(cli, "_placing_world", world)
+
+    CliRunner().invoke(app, ["recaler"])  # pairs on disk only: no model
+    assert guarded == []
+    CliRunner().invoke(app, ["recaler", "--photos"])
+    assert guarded == [8772]
+
+
 LEFT = [[-4.0, y, z] for y in np.arange(2.0, 40.0, 0.5) for z in (-1.0, 3.0, 8.0)]
 STREET = np.array(LEFT + [[4.0, y, z] for _, y, z in LEFT])  # two facades along y
 
