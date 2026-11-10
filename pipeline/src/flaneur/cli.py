@@ -775,17 +775,22 @@ def _tried(kept: dict | None, inputs: str) -> list[str]:
     if not kept:
         return []
     if "x" in kept:
-        matcher = kept.get("matcher")
-        current = kept["inputs"] == _placed_inputs(inputs, matcher)
-        return kept.get("tried", [matcher or DISK]) if current else []
+        return kept.get("tried", [kept.get("matcher") or DISK]) if _placed_now(kept, inputs) else []
     return kept.get("tried", [DISK]) if kept.get("inputs") == inputs else []
+
+
+def _placed_now(kept: dict | None, inputs: str) -> bool:
+    """Whether a kept match is a placement found from these `inputs`."""
+    return (
+        bool(kept) and "x" in kept and kept["inputs"] == _placed_inputs(inputs, kept.get("matcher"))
+    )
 
 
 def _left_to_try(kept: dict | None, inputs: str, refused: bool = False) -> list[str]:
     """The matchers a photo is still to be tried with, in order: those it was not tried with,
     unless it is placed as it is now and the user did not turn that placement down."""
     tried = _tried(kept, inputs)
-    if tried and "x" in kept and not refused:
+    if _placed_now(kept, inputs) and not refused:
         return []
     return [m for m in MATCHERS if m not in tried]
 
@@ -803,9 +808,8 @@ def _situated() -> dict[str, match.Situated]:
     setup, refused = _setup(), _refused()
     found = {}
     for photo_id, m in _matches().items():
-        if m and "x" in m and _exported(photo_id).exists():
-            now = _placed_inputs(_inputs(photo_id, setup), m.get("matcher"))
-            if m["inputs"] == now and (photo_id, now) not in refused:
+        if m and "x" in m and _exported(photo_id).exists():  # cheap checks before the hash
+            if _placed_now(m, _inputs(photo_id, setup)) and (photo_id, m["inputs"]) not in refused:
                 found[photo_id] = _situation(m)
     return found
 
@@ -1005,7 +1009,8 @@ def _to_width(image: np.ndarray, width: int) -> np.ndarray:
 
 class _Run(NamedTuple):
     """What one `match` run reads (the panoramas' setup, where they stand, the buildings) and
-    keeps (each photo's match, the matchers it was tried with, traces, those placed)."""
+    keeps (each photo's match, the matchers it was tried with, traces, those placed; the
+    placements the user turned down)."""
 
     setup: str
     near_by: list[match.Panorama]
@@ -1017,11 +1022,13 @@ class _Run(NamedTuple):
     traces: dict
     run: dict
     placed: set[str]
+    refused: set[tuple[str, str]]
 
 
 def _match_with(matcher: str, photos: list[export.WalkPhoto], at: _Run) -> None:
     """Matches `photos` with one matcher (its own features, observations and points), writing
-    each one's match as it goes."""
+    each one's match as it goes. A redo that finds nothing leaves a placement made from the
+    same inputs, unless turned down."""
     views = _views(matcher=matcher)
     store = chain.Store(MATCHERS[matcher].photos, views.matcher)
     for me in photos:
@@ -1041,7 +1048,9 @@ def _match_with(matcher: str, photos: list[export.WalkPhoto], at: _Run) -> None:
         at.traces[me.id] = at.run[me.id] = {**_traced(trace), "place": list(here)}  # caption's
         at.tried[me.id] = [m for m in MATCHERS if m in at.tried[me.id] or m == matcher]
         if camera is None:  # kept, with what it was tried from: not tried again for nothing
-            at.found[me.id] = {"inputs": inputs, "tried": at.tried[me.id]}
+            before = at.found.get(me.id)
+            if not (_placed_now(before, inputs) and (me.id, before["inputs"]) not in at.refused):
+                at.found[me.id] = {"inputs": inputs, "tried": at.tried[me.id]}
             typer.echo(f"{me.id} : rien de sûr ({MATCHERS[matcher].label})")
         else:
             moved = float(np.hypot(camera.x - here[0], camera.y - here[1]))
@@ -1068,7 +1077,12 @@ def _match_with(matcher: str, photos: list[export.WalkPhoto], at: _Run) -> None:
 @app.command("match")
 def match_photos(
     photo: Annotated[list[str] | None, typer.Option(help="seulement ces photos")] = None,
-    again: Annotated[bool, typer.Option(help="refaire les photos déjà faites")] = False,
+    again: Annotated[
+        bool,
+        typer.Option(
+            help="refaire les photos déjà faites (une place trouvée reste si rien n'est trouvé)"
+        ),
+    ] = False,
     force: Annotated[bool, typer.Option(help="sans le contrôle à réponse connue")] = False,
 ) -> None:
     """Situe les photos en les comparant aux panoramas d'aujourd'hui autour d'elles : position,
@@ -1114,6 +1128,7 @@ def match_photos(
         traces=register.load(MATCH_TRACE),
         run={},
         placed=set(),
+        refused=refused,
     )
 
     chosen = sorted((me for me in chosen if to_try[me.id]), key=_visit)

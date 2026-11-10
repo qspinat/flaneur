@@ -440,21 +440,20 @@ def test_no_view_of_today_is_shown_from_a_panorama_too_far_from_the_camera(tmp_p
     assert row is None
 
 
-def test_match_tries_lomag_then_disk_on_the_photos_left_and_keeps_what_each_did(
-    tmp_path, monkeypatch
-):
+def _match_world(tmp_path, monkeypatch, previous: dict, places) -> None:
+    """`match` over two photos pm:1 and pm:2 with everything faked: `previous` as matches.json
+    held, `places(matcher)` the camera each matcher finds (None: nothing)."""
     photos = [SimpleNamespace(id="pm:1"), SimpleNamespace(id="pm:2")]
     exported = tmp_path / "old.jpg"
     cv2.imwrite(str(exported), np.zeros((8, 8, 3), np.uint8))
     heights = SimpleNamespace(street=lambda x, y: 0.0, origin_z=0.0)
-    camera = match.Camera(1.0, 2.0, 1.5, 90.0, 0.5, 60.0, agree=30, panoramas=2)
 
     for name, value in {
         "MATCHES": tmp_path / "matches.json",
         "MATCH_TRACE": tmp_path / "trace.json",
         "_setup": lambda: "s",
         "_matching": lambda: (heights, [], lambda year: SimpleNamespace(blocks=None)),
-        "_matches": lambda: {},
+        "_matches": lambda: previous,
         "_refused": lambda: set(),
         "_situated": lambda: {},
         "_exported": lambda photo_id: exported,
@@ -478,11 +477,19 @@ def test_match_tries_lomag_then_disk_on_the_photos_left_and_keeps_what_each_did(
     monkeypatch.setattr(
         cli.match, "observe", lambda image, near, blocks, views, *rest: views.matcher
     )
-    # LoMa-G finds nothing; DISK places both
     monkeypatch.setattr(
-        cli.match,
-        "place",
-        lambda observed, where, trace: (camera if observed == "disk" else None, [], None),
+        cli.match, "place", lambda observed, where, trace: (places(observed), [], None)
+    )
+
+
+CAMERA = match.Camera(1.0, 2.0, 1.5, 90.0, 0.5, 60.0, agree=30, panoramas=2)
+
+
+def test_match_tries_lomag_then_disk_on_the_photos_left_and_keeps_what_each_did(
+    tmp_path, monkeypatch
+):
+    _match_world(  # LoMa-G finds nothing; DISK places both
+        tmp_path, monkeypatch, {}, lambda matcher: CAMERA if matcher == "disk" else None
     )
 
     cli.match_photos(photo=None, again=False, force=True)
@@ -492,3 +499,33 @@ def test_match_tries_lomag_then_disk_on_the_photos_left_and_keeps_what_each_did(
         "pm:1": ("disk", ["lomag", "disk"]),
         "pm:2": ("disk", ["lomag", "disk"]),
     }
+
+
+def test_a_redo_that_finds_nothing_keeps_the_placement_made_from_these_inputs(
+    tmp_path, monkeypatch
+):
+    before = _kept(matcher="disk", tried=["disk"])  # placed from today's inputs ("i")
+    _match_world(tmp_path, monkeypatch, {"pm:1": dict(before)}, lambda matcher: None)
+
+    cli.match_photos(photo=["pm:1"], again=False, force=True)
+
+    assert json.loads((tmp_path / "matches.json").read_text())["pm:1"] == before
+
+
+@pytest.mark.parametrize(
+    "before, refused",
+    [
+        (_kept(inputs="other", matcher="disk", tried=["disk"]), set()),  # placed from others
+        (_kept(matcher="disk", tried=["disk"]), {("pm:1", "i")}),  # turned down
+    ],
+)
+def test_a_run_that_finds_nothing_replaces_a_stale_or_refused_placement(
+    tmp_path, monkeypatch, before, refused
+):
+    _match_world(tmp_path, monkeypatch, {"pm:1": dict(before)}, lambda matcher: None)
+    monkeypatch.setattr(cli, "_refused", lambda: refused)
+
+    cli.match_photos(photo=None, again=False, force=True)
+
+    kept = json.loads((tmp_path / "matches.json").read_text())["pm:1"]
+    assert kept == {"inputs": "i", "tried": ["lomag", "disk"]}
