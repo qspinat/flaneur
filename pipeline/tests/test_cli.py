@@ -453,7 +453,7 @@ def _match_world(tmp_path, monkeypatch, previous: dict, places) -> None:
         "MATCH_TRACE": tmp_path / "trace.json",
         "_setup": lambda: "s",
         "_matching": lambda: (heights, [], lambda year: SimpleNamespace(blocks=None)),
-        "_matches": lambda: dict(previous),
+        "_matches": lambda: previous,
         "_refused": lambda: set(),
         "_situated": lambda: {},
         "_exported": lambda photo_id: exported,
@@ -502,13 +502,12 @@ def test_match_tries_lomag_then_disk_on_the_photos_left_and_keeps_what_each_did(
 
 
 def test_a_run_that_finds_nothing_keeps_the_placement_found_before(tmp_path, monkeypatch):
-    before = {"x": 1.0, "y": 2.0, "inputs": "other", "matcher": "disk", "tried": ["disk"]}
-    _match_world(tmp_path, monkeypatch, {"pm:1": before}, lambda matcher: None)
+    before = _kept(inputs="other", matcher="disk", tried=["disk"])
+    _match_world(tmp_path, monkeypatch, {"pm:1": dict(before)}, lambda matcher: None)
 
     cli.match_photos(photo=None, again=False, force=True)
 
     kept = json.loads((tmp_path / "matches.json").read_text())
-    assert {k: v for k, v in kept["pm:1"].items() if k != "failed"} == before
-    assert kept["pm:1"]["failed"] == {"inputs": "i", "tried": ["lomag", "disk"]}
+    assert kept["pm:1"] == {**before, "failed": {"inputs": "i", "tried": ["lomag", "disk"]}}
     assert cli._left_to_try(kept["pm:1"], "i") == []  # tried from these: not again for nothing
     assert kept["pm:2"] == {"inputs": "i", "tried": ["lomag", "disk"]}

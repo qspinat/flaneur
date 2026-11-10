@@ -810,9 +810,8 @@ def _situated() -> dict[str, match.Situated]:
     setup, refused = _setup(), _refused()
     found = {}
     for photo_id, m in _matches().items():
-        if m and "x" in m and _exported(photo_id).exists():
-            now = _placed_inputs(_inputs(photo_id, setup), m.get("matcher"))
-            if m["inputs"] == now and (photo_id, now) not in refused:
+        if _placed_now(m, _inputs(photo_id, setup)) and _exported(photo_id).exists():
+            if (photo_id, m["inputs"]) not in refused:
                 found[photo_id] = _situation(m)
     return found
 
@@ -1049,8 +1048,10 @@ def _match_with(matcher: str, photos: list[export.WalkPhoto], at: _Run) -> None:
         at.tried[me.id] = [m for m in MATCHERS if m in at.tried[me.id] or m == matcher]
         if camera is None:  # kept, with what it was tried from: not tried again for nothing
             attempt = {"inputs": inputs, "tried": at.tried[me.id]}
-            before = at.found.get(me.id) or {}
-            at.found[me.id] = {**before, "failed": attempt} if "x" in before else attempt
+            if "x" in (at.found.get(me.id) or {}):  # a placement found before stays
+                at.found[me.id]["failed"] = attempt
+            else:
+                at.found[me.id] = attempt
             typer.echo(f"{me.id} : rien de sûr ({MATCHERS[matcher].label})")
         else:
             moved = float(np.hypot(camera.x - here[0], camera.y - here[1]))
@@ -1077,7 +1078,12 @@ def _match_with(matcher: str, photos: list[export.WalkPhoto], at: _Run) -> None:
 @app.command("match")
 def match_photos(
     photo: Annotated[list[str] | None, typer.Option(help="seulement ces photos")] = None,
-    again: Annotated[bool, typer.Option(help="refaire les photos déjà faites")] = False,
+    again: Annotated[
+        bool,
+        typer.Option(
+            help="refaire les photos déjà faites (une place trouvée reste si rien n'est trouvé)"
+        ),
+    ] = False,
     force: Annotated[bool, typer.Option(help="sans le contrôle à réponse connue")] = False,
 ) -> None:
     """Situe les photos en les comparant aux panoramas d'aujourd'hui autour d'elles : position,
