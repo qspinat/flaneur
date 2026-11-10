@@ -387,9 +387,7 @@ def _placed(pictures: list[Picture], corrected: bool = True) -> list[Picture]:
     if not corrected or poses.APPLIED == "none":
         return placed
     verdicts = poses.load(POSES)
-    where = {
-        p.id: poses.at(p.point.x, p.point.y, p.azimuth or 0.0) for p in placed if p.id in verdicts
-    }
+    where = _standing([p for p in placed if p.id in verdicts])
     return register.applied(placed, poses.to_apply(verdicts, where, poses.APPLIED))
 
 
@@ -2060,12 +2058,13 @@ def carry_placed() -> None:
         for photo_id in todo:
             r = placings.registration_of(held[photo_id])
             home = spheres.get(r.panorama)
-            tried: set[str] = set()  # those carried to, or tried and not
-            copies = [] if home is None else _to_neighbours(r, home, spheres, street, views, tried)
+            copies, tried = (
+                ([], set()) if home is None else _to_neighbours(r, home, spheres, street, views)
+            )
             carried[photo_id] = {
                 "made": _answered_as(held[photo_id]),
                 "copies": copies,
-                "at": {p: now.get(p) and list(now[p]) for p in {r.panorama, *tried}},
+                "at": {p: list(now[p]) if p in now else None for p in {r.panorama, *tried}},
             }
             write_json(CARRIED, carried)  # kept photo after photo: a stop loses one at most
     write_json(CARRIED, carried)
@@ -2095,23 +2094,22 @@ def _to_neighbours(
     spheres: dict[str, match.Panorama],
     street: dict[str, list[tuple[str, float, float]]],
     views: match.Views,
-    tried: set[str] | None = None,
-) -> list[dict]:
+) -> tuple[list[dict], set[str]]:
     """A photo placed on `home`, carried outward along the street to the panoramas that see
     the same details (the home view's under the photo, matched in their views around its
-    direction, the nearest first)."""
+    direction, the nearest first), and the panoramas it was carried to or tried on."""
     n = proposing.around(r.view.heading)[1]  # the kept view it was placed in, or the nearest
     home_view = registration.ViewOf(heading=float(match.VIEW_HEADINGS[n]))
     seen = views.of(home)
     if not seen:
-        return []
+        return [], set()
     kept = seen[n]
     try:
         inverse = np.linalg.inv(registration.in_view(r, home_view, home.axes))
     except np.linalg.LinAlgError:
-        return []
+        return [], set()
     if not len(kept.keypoints):  # a view with no details (sky): nothing to carry it by
-        return []
+        return [], set()
     under = cv2.perspectiveTransform(
         (kept.keypoints / proposing.SIDE)[None].astype(float), inverse
     )[0]
@@ -2119,9 +2117,10 @@ def _to_neighbours(
     patch = match.Features(kept.keypoints[inside], kept.descriptors[inside], kept.size)
     left, nearest, right = proposing.around(home_view.heading)  # the nearest tried first
 
+    tried: set[str] = set()  # those carried to, or tried and not
+
     def carry(panorama: str) -> registration.Registration | None:
-        if tried is not None:
-            tried.add(panorama)
+        tried.add(panorama)
         sphere = spheres[panorama]
         theirs = views.of(sphere)
         for m in (nearest, left, right) if theirs else ():
@@ -2148,10 +2147,11 @@ def _to_neighbours(
         p = spheres[panorama]
         return float(np.hypot(p.x - home.x, p.y - home.y))
 
-    return [
+    copies = [
         {"registration": registration.to_json(copy), "strength": carrying.strength(from_home(q))}
         for q, copy in carrying.outward(home.id, links, from_home, carry)
     ]
+    return copies, tried
 
 
 def _page_closed(page: int) -> None:
@@ -2302,10 +2302,7 @@ def set_panoramas_right(
             typer.echo(f"{home.id[:8]} ({how}) : {said} — BD TOPO {found.bdtopo}")
     where = placings.where(spheres)
     standing = poses.to_apply(verdicts, where, "all")  # judged where COLMAP still puts them
-    judged = sum(  # by the rule of now, where COLMAP still puts them
-        v.rule == poses.RULE and i in where and poses.still(v, where[i])
-        for i, v in verdicts.items()
-    )
+    judged = len(poses.holding(verdicts, where))  # by the rule of now, where COLMAP puts them
     typer.echo(
         f"{len(standing)} panorama(s) corrigé(s) sur {judged} jugés par la règle d'aujourd'hui"
     )
