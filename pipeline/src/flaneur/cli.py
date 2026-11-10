@@ -2128,9 +2128,10 @@ def set_panoramas_right(
     faites (sans en faire d'autres) : la forme entière de leurs détails de bâti cherchée sur les
     façades de la BD TOPO, à toute rotation et tout décalage, comme le fait l'œil ; une correction
     n'est gardée que si elle dépasse l'écart des deux relevés et que les contours du LiDAR HD de
-    l'IGN la confirment (les détails pas plus loin d'eux qu'avant ; voir poses). Les panoramas sont
-    pris tels que COLMAP les a laissés ; chaque verdict est gardé au fur et à mesure (POSES),
-    avec où était le panorama : un panorama déjà jugé là n'est pas rejugé (sauf --again). Un
+    l'IGN la confirment (les détails à moins de 4 m d'eux, et pas plus loin qu'avant ; voir poses).
+    Les panoramas sont pris tels que COLMAP les a laissés ; chaque verdict est gardé au fur et à
+    mesure (POSES), avec où était le panorama et la règle qui l'a donné : un panorama déjà jugé
+    là, par la règle d'aujourd'hui, n'est pas rejugé (sauf --again). Un
     panorama dont un voisin n'est pas segmenté est laissé (`flaneur segmenter` d'abord)."""
     spheres, segments = _placing_world()
     by_id = {p.id: p for p in spheres}

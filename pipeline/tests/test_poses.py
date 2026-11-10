@@ -78,7 +78,7 @@ def test_verdicts_kept_with_a_lidar_fit_of_their_own_still_read(tmp_path):
 
     found = poses.load(path)["p1"]
 
-    assert (found.bdtopo, found.details, found.rule) == (poses.Correction(0.1, 0.0, 0.2), 40, 1)
+    assert found == poses.Verdict(None, poses.Correction(0.1, 0.0, 0.2), 40, None, "1")
 
 
 def test_a_panorama_both_surveys_place_off_alike_is_corrected():
@@ -187,6 +187,31 @@ def test_a_correction_found_on_bd_topo_is_kept_when_the_lidar_bears_it_out_thoug
 
     back = poses.moved(seen, ORIGIN, found.correction)
     assert np.median(np.linalg.norm(back - true, axis=1)) < 0.1
+
+
+def test_a_panorama_off_diagonally_within_the_search_is_found():
+    true = _details()
+    seen = poses.moved(true, ORIGIN, poses.Correction(11.0, -11.0, 0.0))  # 15.6 m, each way 11
+
+    found = poses.fitted(seen, ORIGIN, lambda p: poses.segment_distance(p, FACADES))
+
+    back = poses.moved(seen, ORIGIN, found)
+    assert np.median(np.linalg.norm(back - true, axis=1)) < 0.1
+
+
+def test_only_corrections_by_the_rule_of_now_are_to_apply():
+    now = poses.Verdict(poses.Correction(2.0, 0.0, 0.0), None, 900)
+    before = poses.Verdict(poses.Correction(3.0, 0.0, 0.0), None, 900, rule="1")
+
+    assert poses.corrections({"p1": now, "p2": before}) == {"p1": poses.Correction(2.0, 0.0, 0.0)}
+
+
+def test_a_building_cut_by_the_patch_edge_has_no_outline_along_the_edge():
+    heights = np.full((160, 160), 33.0)  # 0.5 m cells, x 960..1040, y 1960..2040
+    heights[:, :80] = 50.0  # a building over the patch's west half, its facade at x = 1000
+    lidar = poses.outline_distance(heights, x0=960.0, y1=2040.0, street=33.0)
+
+    assert lidar(np.array([[960.5, 2000.0]]))[0] > 35.0  # far from the facade, at the edge
 
 
 def test_a_lidar_with_nothing_near_the_details_bears_nothing_out():

@@ -6,12 +6,12 @@ So a panorama's walls, right in its own picture, may stand off the buildings on 
 A panorama's correction (a shift east and north, a turn about it) is what lays its building
 details (see cli._Scenes) on the buildings: found as the eye finds it, the details' whole shape
 against BD TOPO's facades (every turn and shift, then refined), and borne out by the outlines of
-IGN's LiDAR HD surface model (where it stands above the street): the details no further from
-them than as the panorama stands. Neither survey is right to better than about a metre here (BD
-TOPO generalises; LiDAR sees eaves, and takes tree crowns for buildings: measured 0.9 m apart
-around one crossroads), so only a correction larger than that is kept. LiDAR alone does not find
-(measured 2026-11-10 on 99 panoramas: its outlines, trees and courtyards among them, meet the
-details nearly as well in several places, nearly always).
+IGN's LiDAR HD surface model (where it stands above the street): the details within FAR_M of
+them, and no further from them than as the panorama stands. Neither survey is right to better
+than about a metre here (BD TOPO generalises; LiDAR sees eaves, and takes tree crowns for
+buildings: measured 0.9 m apart around one crossroads), so only a correction larger than that
+is kept. LiDAR alone does not find (measured 2026-11-10 on 99 panoramas: its outlines, trees
+and courtyards among them, meet the details nearly as well in several places, nearly always).
 
 Measured, not yet applied (2026-11-08): moving a panorama placed by COLMAP alone breaks the
 distances to its neighbours that its pairs' depths come from (depth.set_right), and its walls got
@@ -61,10 +61,11 @@ PINNED = 0.1  # a shift's weaker direction this much of its stronger at least, e
 # A fit starts where the details' whole shape best meets the walls, as the eye finds it (see
 # _searched): every turn and shift within these, on a grid this fine, details this near a wall
 # counted; kept only if no other answer (another peak of the counts, putting the details this
-# far from where the best does, of the RIVALS highest) counts nearly as many.
+# far from where the best does) counts nearly as many, and if it lies within what is tried.
 SEARCH_TURN_DEG = 20.0
 SEARCH_STEP_DEG = 0.5
-SEARCH_SHIFT_M = 15.0  # details (REACH_M) shifted this stay within LiDAR's patch (HALF_M)
+SEARCH_SHIFT_M = 14.0  # each way: details (REACH_M) shifted this stay within LiDAR's patch
+# (HALF_M about a panorama's place rounded to the metre)
 SEARCH_CELL_M = 0.25
 ON_WALL_M = 0.75
 RIVAL_M = 3.0
@@ -72,9 +73,14 @@ TURNS = np.arange(-SEARCH_TURN_DEG, SEARCH_TURN_DEG + 1e-9, SEARCH_STEP_DEG)
 _K = round(SEARCH_SHIFT_M / SEARCH_CELL_M)
 OFFSETS = (np.arange(2 * _K + 1) - _K) * SEARCH_CELL_M  # the shifts tried, either way
 MARGIN = 1.02  # the best counts this many times another answer at least: a tie, refused
-RULE = 2  # how verdicts are reached: 1, two surveys' fits agreeing; 2, BD TOPO's whole shape,
-# borne out by LiDAR (2026-11-10). A verdict by another is judged again.
 # (measured on 99 panoramas, 10/11: above it, LiDAR tells right from wrong better than a margin)
+# How verdicts are reached: "1", two surveys' fits agreeing (until 2026-11-10); "2", BD TOPO's
+# whole shape borne out by LiDAR, with what decides it. A verdict by another is judged again.
+RULE = "2:" + ",".join(
+    str(v)
+    for v in (MARGIN, FAR_M, ON_WALL_M, RIVAL_M, NEAR_M, LEAST_SHIFT_M, LEAST_TURN_DEG)
+    + (SEARCH_TURN_DEG, SEARCH_STEP_DEG, SEARCH_SHIFT_M, SEARCH_CELL_M, REACH_M, LEAST_DETAILS)
+)
 
 
 class Correction(NamedTuple):
@@ -97,7 +103,7 @@ class Verdict:
     bdtopo: Correction | None
     details: int
     placed: tuple[float, float, float] | None = None
-    rule: int = RULE
+    rule: str = RULE
 
 
 def moved(points: np.ndarray, origin: np.ndarray, c: Correction) -> np.ndarray:
@@ -127,7 +133,7 @@ def outline_distance(
     street in a surface model (`heights`, rows north to south from `y1`, columns east from `x0`,
     CELL_M square; NaN: no data)."""
     built = np.nan_to_num(heights, nan=street) > street + ABOVE_STREET_M
-    outline = built & ~ndimage.binary_erosion(built)
+    outline = built & ~ndimage.binary_erosion(built, border_value=1)  # the patch's edge: none
     far = ndimage.distance_transform_edt(~outline) * CELL_M
 
     def distance(points: np.ndarray) -> np.ndarray:  # bilinear: smooth, for the fit to follow
@@ -184,7 +190,8 @@ def fitted(
     found = _refined(points, origin, distance, _at(best))
     if (
         found is None
-        or np.hypot(found[0].east, found[0].north) > SEARCH_SHIFT_M
+        or max(abs(found[0].east), abs(found[0].north)) > SEARCH_SHIFT_M
+        or abs(found[0].turn) > SEARCH_TURN_DEG  # refined beyond what is tried: unchecked
         or _margin(points, origin, counts, best, found[1]) < MARGIN
     ):
         return None
@@ -290,6 +297,11 @@ def _margin(
     peaks = np.flatnonzero(
         (counts == ndimage.maximum_filter(counts, size=(3, 5, 5))) & (counts > 0)
     )
+    t, row, column = np.unravel_index(peaks, counts.shape)
+    # no detail (within REACH_M) moves further than this between two answers: those nearer than
+    # RIVAL_M this way are the best's own plateau, not other answers
+    most = np.hypot(OFFSETS[row] - OFFSETS[best[1]], OFFSETS[column] - OFFSETS[best[2]])
+    peaks = peaks[most + np.radians(np.abs(TURNS[t] - TURNS[best[0]])) * REACH_M >= RIVAL_M]
     sample = points[:: max(1, len(points) // 2000)]
     there = moved(sample, origin, _at(best))
     for flat in peaks[np.argsort(-counts.ravel()[peaks], kind="stable")]:
@@ -415,7 +427,7 @@ def load(path: Path) -> dict[str, Verdict]:
             *(_correction(r[k]) for k in ("correction", "bdtopo")),
             r["details"],
             tuple(r["placed"]) if r.get("placed") else None,
-            r.get("rule", 1),
+            str(r.get("rule", 1)),
         )
         for i, r in rows.items()
     }
@@ -432,5 +444,5 @@ def still(verdict: Verdict, placed: tuple[float, float, float]) -> bool:
 
 
 def corrections(verdicts: dict[str, Verdict]) -> dict[str, Correction]:
-    """The panoramas to move, and how."""
-    return {i: v.correction for i, v in verdicts.items() if v.correction}
+    """The panoramas to move, and how (by the RULE of now)."""
+    return {i: v.correction for i, v in verdicts.items() if v.correction and v.rule == RULE}
