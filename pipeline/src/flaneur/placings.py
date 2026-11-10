@@ -144,8 +144,7 @@ def followed(row: dict, now: dict[str, tuple[float, float, float]]) -> dict:
     panorama = registration_of(row).panorama
     if panorama not in now or tuple(row["panorama_at"]) == tuple(now[panorama]):
         return row
-    (x0, y0, a0), (x1, y1, a1) = row["panorama_at"], now[panorama]
-    change = poses.Correction(x1 - x0, y1 - y0, a0 - a1)  # counter-clockwise on the plan
+    (_, _, a0), (x1, y1, a1) = row["panorama_at"], now[panorama]
 
     def about(x: float, y: float) -> tuple[float, float]:
         return tuple(poses.carried(np.array([[x, y]]), row["panorama_at"], now[panorama])[0])
@@ -175,7 +174,7 @@ def followed(row: dict, now: dict[str, tuple[float, float, float]]) -> dict:
             camera = standing["camera"]
             turn = (
                 Rotation.from_rotvec(camera["turn"])
-                * Rotation.from_euler("z", change.turn, degrees=True).inv()
+                * Rotation.from_euler("z", a0 - a1, degrees=True).inv()  # counter-clockwise
             )
             standing["camera"] = {
                 **camera,

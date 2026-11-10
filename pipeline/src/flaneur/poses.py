@@ -120,6 +120,13 @@ def moved(points: np.ndarray, origin: np.ndarray, c: Correction) -> np.ndarray:
     return origin + turned + [c.east, c.north]
 
 
+def stands(then: list | tuple | None, now: tuple[float, float, float] | None) -> bool:
+    """Whether what was made from a panorama standing `then` (see at) holds with it standing
+    `now`: both known, and alike (made before poses were kept, or its panorama no longer at
+    hand: made again)."""
+    return then is not None and now is not None and tuple(then) == tuple(now)
+
+
 def carried(
     points: np.ndarray, then: tuple[float, float, float], now: tuple[float, float, float]
 ) -> np.ndarray:

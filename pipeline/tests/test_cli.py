@@ -187,19 +187,15 @@ def test_recaler_refuses_prefixes_and_photos_together(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    "known_at, applied, holds",
+    "known_at, holds",
     [
-        ([1.0, 2.0, 30.0], "all", True),
-        ([1.0, 2.0, 33.0], "all", False),  # its panorama turned since
-        (None, "none", True),  # made before poses were kept, nothing applied
-        (None, "all", False),
+        ([1.0, 2.0, 30.0], True),
+        ([1.0, 2.0, 33.0], False),  # its panorama turned since
+        (None, False),  # made before poses were kept: made again
     ],
 )
-def test_a_proposal_holds_while_its_panorama_stands_where_it_was_made(
-    monkeypatch, known_at, applied, holds
-):
+def test_a_proposal_holds_while_its_panorama_stands_where_it_was_made(monkeypatch, known_at, holds):
     monkeypatch.setattr(cli, "_image", lambda photo_id: "h")
-    monkeypatch.setattr(poses, "APPLIED", applied)
     known = {"panorama": "p1", "inputs": "h", **({"at": known_at} if known_at else {})}
 
     assert cli._still_proposed(known, "pm:1", "p1", (1.0, 2.0, 30.0)) is holds
@@ -211,12 +207,13 @@ def test_copies_carried_from_panoramas_moved_since_are_made_again(tmp_path, monk
     kept = {
         "pm:1": {"made": made, "copies": [], "at": {"a": [0.0, 0.0, 0.0], "b": [5.0, 0.0, 0.0]}},
         "pm:2": {"made": made, "copies": [], "at": {"a": [0.0, 0.0, 0.0], "c": [9.0, 0.0, 0.0]}},
+        "pm:3": {"made": made, "copies": [], "at": {"d": None}},  # its home at hand since
     }
     (tmp_path / "carried.json").write_text(json.dumps(kept))
     monkeypatch.setattr(cli, "CARRIED", tmp_path / "carried.json")
-    now = {"a": (0.0, 0.0, 0.0), "b": (5.0, 0.0, 0.0), "c": (9.0, 0.0, 4.0)}  # c turned since
+    now = {"a": (0.0, 0.0, 0.0), "b": (5.0, 0.0, 0.0), "c": (9.0, 0.0, 4.0), "d": (1.0, 1.0, 0.0)}
 
-    assert set(cli._carried({"pm:1": row, "pm:2": row}, now)) == {"pm:1"}
+    assert set(cli._carried({"pm:1": row, "pm:2": row, "pm:3": row}, now)) == {"pm:1"}
 
 
 def test_recaler_keeps_clear_of_the_page_only_when_it_wakes_the_matcher(monkeypatch):

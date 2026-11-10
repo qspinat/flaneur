@@ -441,3 +441,10 @@ def test_points_are_carried_as_their_panorama_moved_about_it():
     moved = poses.carried(points, (100.0, 200.0, 0.0), (102.0, 200.0, 90.0))
 
     assert moved == pytest.approx(np.array([[112.0, 200.0]]))  # 2 m east, turned right: east
+
+
+def test_a_pose_stands_only_where_it_was_recorded():
+    assert poses.stands([1.0, 2.0, 30.0], (1.0, 2.0, 30.0))
+    assert not poses.stands([1.0, 2.0, 30.0], (1.0, 2.0, 33.0))
+    assert not poses.stands(None, (1.0, 2.0, 30.0))  # made before poses were kept
+    assert not poses.stands([1.0, 2.0, 30.0], None)  # its panorama no longer at hand
