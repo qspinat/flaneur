@@ -231,6 +231,12 @@ def test_recaler_keeps_clear_of_the_page_only_when_it_wakes_the_matcher(monkeypa
     assert guarded == [8772]
 
 
+def test_copies_are_carried_from_panoramas_as_they_stand_and_lean():
+    a = match.Panorama("a", 1.0, 2.0, 0.0, 30.0, None, 1.5, -0.5)
+
+    assert cli._poised([a]) == {"a": (1.0, 2.0, 30.0, 1.5, -0.5)}
+
+
 LEFT = [[-4.0, y, z] for y in np.arange(2.0, 40.0, 0.5) for z in (-1.0, 3.0, 8.0)]
 STREET = np.array(LEFT + [[4.0, y, z] for _, y, z in LEFT])  # two facades along y
 

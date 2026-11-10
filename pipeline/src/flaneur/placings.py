@@ -142,7 +142,7 @@ def followed(row: dict, now: dict[str, tuple[float, float, float]]) -> dict:
     if not row.get("panorama_at") or not row.get("registration"):
         return row
     panorama = registration_of(row).panorama
-    if panorama not in now or tuple(row["panorama_at"]) == tuple(now[panorama]):
+    if panorama not in now or poses.stands(row["panorama_at"], now[panorama]):
         return row
     (_, _, a0), (x1, y1, a1) = row["panorama_at"], now[panorama]
 

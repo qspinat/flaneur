@@ -217,6 +217,14 @@ def _standing(pictures: list[Picture]) -> dict[str, tuple[float, float, float]]:
     return {p.id: poses.at(p.point.x, p.point.y, p.azimuth or 0.0) for p in pictures}
 
 
+def _poised(spheres: Iterable[match.Panorama]) -> dict[str, tuple[float, ...]]:
+    """How these panoramas stand and lean, by id: where (see poses.at), then roll and pitch to
+    the hundredth (a copy carried is made in their levelled views)."""
+    return {
+        p.id: (*poses.at(p.x, p.y, p.azimuth), round(p.roll, 2), round(p.pitch, 2)) for p in spheres
+    }
+
+
 def _placing_answers(
     path: Path = PLACINGS, corrected: bool = True
 ) -> tuple[dict[str, dict], dict[str, dict], set[str]]:
@@ -249,7 +257,7 @@ def _on_image_now(placed: dict[str, dict]) -> dict[str, dict]:
 def _carried(placed: dict[str, dict], now: dict[str, tuple]) -> dict[str, dict]:
     """The copies carried to the neighbouring panoramas (`flaneur porter`) still made from
     the answer that holds (`placed`), with every panorama it was carried from or tried on
-    standing where it did (`now`: see placings.where, poses.stands)."""
+    standing and leaning as it did (`now`: see _poised, poses.stands)."""
     kept = json.loads(CARRIED.read_text()) if CARRIED.exists() else {}
     return {
         i: c
@@ -387,9 +395,7 @@ def _placed(pictures: list[Picture], corrected: bool = True) -> list[Picture]:
     if not corrected or poses.APPLIED == "none":
         return placed
     verdicts = poses.load(POSES)
-    where = {
-        p.id: poses.at(p.point.x, p.point.y, p.azimuth or 0.0) for p in placed if p.id in verdicts
-    }
+    where = _standing([p for p in placed if p.id in verdicts])
     return register.applied(placed, poses.to_apply(verdicts, where, poses.APPLIED))
 
 
@@ -2048,24 +2054,25 @@ def carry_placed() -> None:
     (data/pilot/carried.json) ; seules les photos répondues depuis la dernière fois sont
     refaites."""
     held = _on_image_now(_placing_answers()[1])  # those placed on another image: not exported
-    now = _standing_now()  # poses alone: nothing redone, no tilt needed
+    with closing(db.connect(DB_PATH)) as conn:
+        pictures = _lined_up(panoramas.load(conn))  # refused when tilts were measured otherwise
+    spheres = {p.id: p for p in _panoramas(pictures, lambda x, y: 0.0)}
+    now = _poised(spheres.values())
     carried = _carried(held, now)
     todo = [i for i in held if i not in carried]
     if todo:
-        with closing(db.connect(DB_PATH)) as conn:
-            pictures = _lined_up(panoramas.load(conn))
-        spheres = {p.id: p for p in _panoramas(pictures, lambda x, y: 0.0)}
         street = panoramas.links(pictures)  # the next ones along the street, every way
         views = _views(kept=8)
         for photo_id in todo:
             r = placings.registration_of(held[photo_id])
             home = spheres.get(r.panorama)
-            tried: set[str] = set()  # those carried to, or tried and not
-            copies = [] if home is None else _to_neighbours(r, home, spheres, street, views, tried)
+            copies, tried = (
+                ([], set()) if home is None else _to_neighbours(r, home, spheres, street, views)
+            )
             carried[photo_id] = {
                 "made": _answered_as(held[photo_id]),
                 "copies": copies,
-                "at": {p: now.get(p) and list(now[p]) for p in {r.panorama, *tried}},
+                "at": {p: now.get(p) for p in sorted({r.panorama, *tried})},
             }
             write_json(CARRIED, carried)  # kept photo after photo: a stop loses one at most
     write_json(CARRIED, carried)
@@ -2095,23 +2102,22 @@ def _to_neighbours(
     spheres: dict[str, match.Panorama],
     street: dict[str, list[tuple[str, float, float]]],
     views: match.Views,
-    tried: set[str] | None = None,
-) -> list[dict]:
+) -> tuple[list[dict], set[str]]:
     """A photo placed on `home`, carried outward along the street to the panoramas that see
     the same details (the home view's under the photo, matched in their views around its
-    direction, the nearest first)."""
+    direction, the nearest first), and the panoramas it was carried to or tried on."""
     n = proposing.around(r.view.heading)[1]  # the kept view it was placed in, or the nearest
     home_view = registration.ViewOf(heading=float(match.VIEW_HEADINGS[n]))
     seen = views.of(home)
     if not seen:
-        return []
+        return [], set()
     kept = seen[n]
     try:
         inverse = np.linalg.inv(registration.in_view(r, home_view, home.axes))
     except np.linalg.LinAlgError:
-        return []
+        return [], set()
     if not len(kept.keypoints):  # a view with no details (sky): nothing to carry it by
-        return []
+        return [], set()
     under = cv2.perspectiveTransform(
         (kept.keypoints / proposing.SIDE)[None].astype(float), inverse
     )[0]
@@ -2119,9 +2125,10 @@ def _to_neighbours(
     patch = match.Features(kept.keypoints[inside], kept.descriptors[inside], kept.size)
     left, nearest, right = proposing.around(home_view.heading)  # the nearest tried first
 
+    tried: set[str] = set()  # those carried to, or tried and not
+
     def carry(panorama: str) -> registration.Registration | None:
-        if tried is not None:
-            tried.add(panorama)
+        tried.add(panorama)
         sphere = spheres[panorama]
         theirs = views.of(sphere)
         for m in (nearest, left, right) if theirs else ():
@@ -2142,16 +2149,19 @@ def _to_neighbours(
         return None
 
     def links(panorama: str) -> list[tuple[str, float]]:
-        return [(q, metres) for q, _, metres in street.get(panorama, []) if q in spheres]
+        linked = street.get(panorama, [])
+        tried.update(q for q, _, _ in linked)  # those out of reach too: in reach later, redone
+        return [(q, metres) for q, _, metres in linked if q in spheres]
 
     def from_home(panorama: str) -> float:
         p = spheres[panorama]
         return float(np.hypot(p.x - home.x, p.y - home.y))
 
-    return [
+    copies = [
         {"registration": registration.to_json(copy), "strength": carrying.strength(from_home(q))}
         for q, copy in carrying.outward(home.id, links, from_home, carry)
     ]
+    return copies, tried
 
 
 def _page_closed(page: int) -> None:
@@ -2302,10 +2312,9 @@ def set_panoramas_right(
             typer.echo(f"{home.id[:8]} ({how}) : {said} — BD TOPO {found.bdtopo}")
     where = placings.where(spheres)
     standing = poses.to_apply(verdicts, where, "all")  # judged where COLMAP still puts them
-    judged = sum(  # by the rule of now, where COLMAP still puts them
-        v.rule == poses.RULE and i in where and poses.still(v, where[i])
-        for i, v in verdicts.items()
-    )
+    judged = len(
+        poses.still_standing(verdicts, where)
+    )  # by the rule of now, where COLMAP puts them
     typer.echo(
         f"{len(standing)} panorama(s) corrigé(s) sur {judged} jugés par la règle d'aujourd'hui"
     )
@@ -2584,7 +2593,8 @@ def write_scene() -> None:
     site = json.loads((WEB_DATA / "walk.json").read_text())
     marked = {p["id"] for p in site["photos"] if p["in_3d"]}  # by the export, on its images
     shown = {i: r for i, r in in_3d.items() if i in marked}
-    copies = {i: c["copies"] for i, c in _carried(shown, _standing(pictures)).items()}
+    now = _poised(_panoramas(pictures, lambda x, y: 0.0))
+    copies = {i: c["copies"] for i, c in _carried(shown, now).items()}
     built, holding = scene.build3d(
         [p for p in pictures if (PANORAMAS / f"{p.id}.jpg").exists()], shown, copies, walk
     )

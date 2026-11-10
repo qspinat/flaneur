@@ -621,7 +621,7 @@ def _read(row: dict, now: dict | None = None) -> tuple[list[Wall], list[Segment]
     then, stands = row.get("panorama_at"), (now or {}).get(row["panorama"])
 
     def end(point) -> tuple[float, float]:
-        if not then or stands is None or tuple(then) == tuple(stands):
+        if not then or stands is None or poses.stands(then, stands):
             return tuple(point)
         return tuple(float(v) for v in poses.carried(np.array([point], float), then, stands)[0])
 

@@ -120,11 +120,13 @@ def moved(points: np.ndarray, origin: np.ndarray, c: Correction) -> np.ndarray:
     return origin + turned + [c.east, c.north]
 
 
-def stands(then: list | tuple | None, now: tuple[float, float, float] | None) -> bool:
+def stands(then: list | tuple | None, now: tuple | None) -> bool:
     """Whether what was made from a panorama standing `then` (see at) holds with it standing
-    `now`: both known, and alike (made before poses were kept, or its panorama no longer at
-    hand: made again)."""
-    return then is not None and now is not None and tuple(then) == tuple(now)
+    `now`: alike, or neither known (made while it was not at hand, and still not). Made before
+    poses were kept, or its panorama no longer at hand: made again."""
+    return (then is None and now is None) or (
+        then is not None and now is not None and tuple(then) == tuple(now)
+    )
 
 
 def carried(
@@ -460,7 +462,14 @@ def _correction(row: list | None) -> Correction | None:
 def still(verdict: Verdict, placed: tuple[float, float, float]) -> bool:
     """Whether a verdict stands for a panorama `placed` so (east, north, heading): judged there,
     by the RULE of now."""
-    return verdict.placed == placed and verdict.rule == RULE
+    return stands(verdict.placed, placed) and verdict.rule == RULE
+
+
+def still_standing(
+    verdicts: dict[str, Verdict], placed: dict[str, tuple[float, float, float]]
+) -> dict[str, Verdict]:
+    """The verdicts that stand (see still) for the panoramas `placed` so, by id."""
+    return {i: v for i, v in verdicts.items() if i in placed and still(v, placed[i])}
 
 
 def at(x: float, y: float, heading: float) -> tuple[float, float, float]:
@@ -483,10 +492,8 @@ def to_apply(
     shifts = applied == "all"
     return {
         i: (c.east if shifts else 0.0, c.north if shifts else 0.0, -c.turn)
-        for i, c in corrections(verdicts).items()
-        if i in placed
-        and still(verdicts[i], placed[i])
-        and (shifts or abs(c.turn) >= LEAST_TURN_DEG)  # a turn alone: beyond the surveys' own
+        for i, c in corrections(still_standing(verdicts, placed)).items()
+        if shifts or abs(c.turn) >= LEAST_TURN_DEG  # a turn alone: beyond the surveys' own
     }
 
 
