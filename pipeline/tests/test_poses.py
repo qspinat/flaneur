@@ -5,7 +5,7 @@ import json
 import numpy as np
 import pytest
 
-from flaneur import poses
+from flaneur import match, poses
 
 ORIGIN = np.array([1000.0, 2000.0])
 # a crossroads: two facades along the street, one across it ahead, one behind (on the plan, metres)
@@ -393,3 +393,28 @@ def test_lidar_cells_without_data_are_unknown_and_a_wrong_answer_is_refused(tmp_
             3000.0, 2000.0, tmp_path, _Client(_Answer(b"<ServiceException/>", "text/xml"))
         )
     assert not (tmp_path / "mns_3000_2000.npy").exists()
+
+
+JUDGED = {"p": poses.Verdict(poses.Correction(2.0, -1.0, 4.0), None, 900, (1.0, 2.0, 30.0))}
+
+
+def test_corrections_apply_only_to_panoramas_where_they_were_judged():
+    assert poses.to_apply(JUDGED, {"p": (1.0, 2.0, 30.0)}, "all") == {"p": (2.0, -1.0, -4.0)}
+    assert poses.to_apply(JUDGED, {"p": (1.0, 2.5, 30.0)}, "all") == {}  # COLMAP moved it since
+
+
+def test_turns_only_drops_the_shift_and_none_applies_nothing():
+    assert poses.to_apply(JUDGED, {"p": (1.0, 2.0, 30.0)}, "turns") == {"p": (0.0, 0.0, -4.0)}
+    assert poses.to_apply(JUDGED, {"p": (1.0, 2.0, 30.0)}, "none") == {}
+
+
+def test_a_corrected_heading_turns_what_the_panorama_sees_as_the_correction_does():
+    turned = {"p": poses.Verdict(poses.Correction(0.0, 0.0, 10.0), None, 900, (1.0, 2.0, 30.0))}
+    _, _, heading = poses.to_apply(turned, {"p": (1.0, 2.0, 30.0)}, "all")["p"]
+
+    ahead = match.camera_axes(30.0 + heading)[1][:2]
+
+    expected = poses.moved(
+        match.camera_axes(30.0)[1][None, :2], np.zeros(2), turned["p"].correction
+    )
+    assert ahead == pytest.approx(expected[0], abs=1e-9)

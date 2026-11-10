@@ -76,6 +76,9 @@ MARGIN = 1.02  # the best counts this many times another answer at least: a tie,
 # (measured on 99 panoramas, 10/11: above it, LiDAR tells right from wrong better than a margin)
 # How verdicts are reached: "1", two surveys' fits agreeing (until 2026-11-10); "2", BD TOPO's
 # whole shape borne out by LiDAR, with what decides it. A verdict by another is judged again.
+# What of the corrections what reads panoramas' poses takes (cli._placed): "all", "turns" (their
+# turn only: no shift changes the distances to neighbours its depths come from) or "none".
+APPLIED = "none"
 RULE = "2:" + ",".join(
     str(v)
     for v in (MARGIN, FAR_M, ON_WALL_M, RIVAL_M, NEAR_M, LEAST_SHIFT_M, LEAST_TURN_DEG)
@@ -441,6 +444,24 @@ def still(verdict: Verdict, placed: tuple[float, float, float]) -> bool:
     """Whether a verdict stands for a panorama `placed` so (east, north, heading): judged there,
     by the RULE of now."""
     return verdict.placed == placed and verdict.rule == RULE
+
+
+def to_apply(
+    verdicts: dict[str, Verdict], placed: dict[str, tuple[float, float, float]], applied: str
+) -> dict[str, tuple[float, float, float]]:
+    """The fixes (east, north, change of heading: compass degrees, clockwise) that set panoramas
+    right, as register.applied takes them: the corrections by the RULE of now of those still
+    `placed` (east, north, heading, to the hundredth) where they were judged; `applied` (see
+    APPLIED) "turns": the turn only, "none": none. A correction turns counter-clockwise on the
+    plan: the heading by its opposite."""
+    if applied == "none":
+        return {}
+    shifts = applied == "all"
+    return {
+        i: (c.east if shifts else 0.0, c.north if shifts else 0.0, -c.turn)
+        for i, c in corrections(verdicts).items()
+        if i in placed and verdicts[i].placed == placed[i]
+    }
 
 
 def corrections(verdicts: dict[str, Verdict]) -> dict[str, Correction]:

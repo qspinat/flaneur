@@ -8,7 +8,7 @@ import pytest
 import typer
 from typer.testing import CliRunner
 
-from flaneur import cli, confirming, depth, facades, match, segment
+from flaneur import cli, confirming, depth, facades, match, poses, segment
 from flaneur.cli import app
 
 
@@ -108,6 +108,27 @@ def test_panoramas_fixed_by_colmap_are_told_apart():
     }
 
     assert cli._fixed_by_colmap([here, moved], fixes) == {"p1"}
+
+
+def test_panoramas_stand_corrected_except_for_recaler(tmp_path, monkeypatch):
+    from flaneur.panoramax import Picture
+
+    here = Picture("p1", 2.3466, 48.852, 40.0, True, "2024-01-01", "", "")
+    at = (round(here.point.x, 2), round(here.point.y, 2), 40.0)
+    verdicts = {"p1": poses.Verdict(poses.Correction(2.0, -1.0, 4.0), None, 900, at)}
+    poses.save(tmp_path / "poses.json", verdicts)
+    monkeypatch.setattr(cli, "POSES", tmp_path / "poses.json")
+    monkeypatch.setattr(cli, "FIXES", tmp_path / "fixes.json")  # none: as recorded
+    monkeypatch.setattr(poses, "APPLIED", "all")
+
+    (corrected,) = cli._placed([here])
+    (as_colmap,) = cli._placed([here], corrected=False)
+
+    assert (corrected.point.x - here.point.x, corrected.point.y - here.point.y) == pytest.approx(
+        (2.0, -1.0), abs=0.01
+    )
+    assert corrected.azimuth == pytest.approx(36.0)
+    assert as_colmap == here
 
 
 LEFT = [[-4.0, y, z] for y in np.arange(2.0, 40.0, 0.5) for z in (-1.0, 3.0, 8.0)]

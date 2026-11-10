@@ -331,34 +331,41 @@ def _panoramas(pictures: list[Picture], heights: scene.CameraHeights) -> list[ma
     ]
 
 
-def _lined_up(pictures: list[Picture]) -> list[Picture]:
+def _lined_up(pictures: list[Picture], corrected: bool = True) -> list[Picture]:
     """The panoramas where they were taken, and levelled (see _levelled), when their tilts
     were measured as tilts are now."""
     if not level.current(TILTS):
         raise typer.BadParameter(
             "les inclinaisons des panoramas ont été mesurées autrement : lancer `flaneur level`"
         )
-    return _levelled(pictures)
+    return _levelled(pictures, corrected)
 
 
-def _levelled(pictures: list[Picture]) -> list[Picture]:
+def _levelled(pictures: list[Picture], corrected: bool = True) -> list[Picture]:
     """The panoramas where they were taken (see _placed), and levelled: those not measured
     leaning as their run's neighbours, else taken as level (see level.borrowed)."""
-    placed = _placed(pictures)
+    placed = _placed(pictures, corrected)
     tilts = level.borrowed(level.kept(TILTS), placed)
     return [
         replace(p, roll=tilt[0], pitch=tilt[1]) if (tilt := tilts.get(p.id)) else p for p in placed
     ]
 
 
-def _placed(pictures: list[Picture]) -> list[Picture]:
+def _placed(pictures: list[Picture], corrected: bool = True) -> list[Picture]:
     """The panoramas where they were taken: placed with each other (reconstruct), else moved
     as their run's nearest panoramas so placed (reconstruct.borrowed), else as recorded (not
-    by their own roofs and corners: see register; nor yet by what `flaneur recaler` finds, see
-    poses)."""
+    by their own roofs and corners: see register); then, `corrected`, set right on the map as
+    `flaneur recaler` found (poses.APPLIED of it) — which judges them as COLMAP left them. A
+    panorama turned so has caches of its own (_levelled_name: its views are other pixels)."""
     fixes = register.load(FIXES)
     found = {i: tuple(fixes[i]["fix"]) for i in _fixed_by_colmap(pictures, fixes)}
-    return register.applied(pictures, reconstruct.borrowed(found, pictures))
+    placed = register.applied(pictures, reconstruct.borrowed(found, pictures))
+    if not corrected:
+        return placed
+    where = {
+        p.id: (round(p.point.x, 2), round(p.point.y, 2), round(p.azimuth or 0.0, 2)) for p in placed
+    }
+    return register.applied(placed, poses.to_apply(poses.load(POSES), where, poses.APPLIED))
 
 
 class _NotRead(Exception):
@@ -595,13 +602,15 @@ def _street_facades(features: list[dict]) -> Callable[[float, float], list[facad
     ]
 
 
-def _placing_world() -> tuple[list[match.Panorama], Callable[[float, float], list]]:
+def _placing_world(
+    corrected: bool = True,
+) -> tuple[list[match.Panorama], Callable[[float, float], list]]:
     """The panoramas where they were taken, levelled, at their camera's height over the street
     (parallax needs it on a slope), and BD TOPO's street facades near a spot."""
     with closing(db.connect(DB_PATH)) as conn:
         area = placements.area(conn, buildings.MARGIN_M)
         features = _buildings(area)
-        pictures = _lined_up(panoramas.load(conn))
+        pictures = _lined_up(panoramas.load(conn), corrected)
     return _panoramas(pictures, _heights(features, area)), _street_facades(features)
 
 
@@ -2147,8 +2156,11 @@ def set_panoramas_right(
     Les panoramas sont pris tels que COLMAP les a laissés ; chaque verdict est gardé au fur et à
     mesure (POSES), avec où était le panorama et la règle qui l'a donné : un panorama déjà jugé
     là, par la règle d'aujourd'hui, n'est pas rejugé (sauf --again). Un
-    panorama dont un voisin n'est pas segmenté est laissé (`flaneur segmenter` d'abord)."""
-    spheres, segments = _placing_world()
+    panorama dont un voisin n'est pas segmenté est laissé (`flaneur segmenter` d'abord). Les
+    panoramas sont jugés tels que COLMAP les a laissés ; le reste les lit corrigés (selon
+    poses.APPLIED) : appliquer des corrections périme les places de `match`, fait repasser son
+    contrôle, et les panoramas tournés refont leurs caches (segmentation : `flaneur segmenter`)."""
+    spheres, segments = _placing_world(corrected=False)  # as COLMAP left them
     by_id = {p.id: p for p in spheres}
     with closing(db.connect(DB_PATH)) as conn:
         fixed = _fixed_by_colmap(panoramas.load(conn), register.load(FIXES))
