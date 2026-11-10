@@ -72,6 +72,7 @@ def reading(streets, viewpoint=None, arrondissements=(1,)):
         "arrondissements": json.dumps(list(arrondissements)),
         "viewpoint": viewpoint,
         "year": None,
+        "title": None,
     }
 
 
@@ -378,22 +379,18 @@ def test_a_name_two_streets_bore_is_settled_by_the_other_street_the_caption_name
     assert (location.status, location.street.current_label) == ("street", "rue Berger")
 
 
-def test_a_title_is_not_read_across_its_punctuation():
-    paris = current("30", "rue de Paris", 1, 2.3400, 48.8590, 2.3402, 48.8592)
-    gazetteer = Gazetteer.from_records([*CURRENT, paris], OBSOLETE)
+@pytest.mark.parametrize(
+    ("label", "title"),
+    [
+        ("rue de Paris", "Peintre de rue, Paris"),  # never across punctuation
+        ("Grande Galerie", "Musée du Louvre, la Grande Galerie"),  # a room: its type is not first
+    ],
+)
+def test_a_title_names_no_street_in_what_only_looks_like_one(label, title):
+    lookalike = current("30", label, 1, 2.3400, 48.8590, 2.3402, 48.8592)
+    gazetteer = Gazetteer.from_records([*CURRENT, lookalike], OBSOLETE)
 
-    location = locate(reading([]) | {"title": "Peintre de rue, Paris"}, gazetteer)
-
-    assert location.status == "not_found"
-
-
-def test_a_room_or_a_garden_named_in_a_title_is_not_taken_for_a_street():
-    gallery = current("31", "Grande Galerie", 1, 2.3400, 48.8590, 2.3402, 48.8592)
-    gazetteer = Gazetteer.from_records([*CURRENT, gallery], OBSOLETE)
-
-    location = locate(reading([]) | {"title": "Musée du Louvre, la Grande Galerie"}, gazetteer)
-
-    assert location.status == "not_found"
+    assert locate(reading([]) | {"title": title}, gazetteer).status == "not_found"
 
 
 def test_a_street_named_in_a_title_lies_in_the_arrondissement_the_caption_gives(gazetteer):

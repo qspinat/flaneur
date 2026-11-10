@@ -88,17 +88,16 @@ PARTICLES = {"de", "du", "des", "la", "le", "les", "l", "d"}
 # capitalised word is part of the name and is never dropped.
 MAX_TRAILING_WORDS = 2
 # Where what a caption says of the place starts, after its name: "boulevard Malesherbes entre
-# l'église de la Madeleine", "quai X le 14 juillet 1888", "rue Y pendant la crue". Not "ou":
-# "rue Saint-Martin ou Saint-Denis" does not say which.
+# l'église de la Madeleine", "quai X le 14 juillet 1888", "rue Y pendant la crue". Cut here,
+# not by the reader: it applies to the readings kept and to the City's notes ("Actuellement
+# partie de la rue X entre les rues…"). Not "ou" ("rue Saint-Martin ou Saint-Denis" does not
+# say which), nor "du 4" ("rue du 4 Septembre" is a name).
 DESCRIBED = re.compile(
-    r"\s+(?:entre|depuis|pendant|lors|avec|devant|derrière|(?:le|la|les|en|du)\s+\d|\d{3,4}\b)",
+    r"\s+(?:entre|depuis|pendant|lors|avec|devant|derrière|(?:le|la|les)\s+\d|\d{3,4}\b)",
     re.IGNORECASE,
 )
-# The longest street name looked for in a title, in words (see Gazetteer.named_in); names
-# with these words are not looked for there: a title's "Grande Galerie", "cour", "jardin" or
-# "marché" is a room, a yard, a garden or a market far more often than a street of that name.
+# The longest street name looked for in a title, in words (see Gazetteer.named_in).
 MOST_WORDS = 7
-NOT_IN_TITLES = {"galerie", "cour", "jardin", "marche"}
 
 _TYPE = rf"(?i:{STREET_TYPES}|{ABBREVIATIONS})"
 # Where an obsolete name went, anywhere in the City's note: "Actuellement rue de Condé",
@@ -122,6 +121,10 @@ def key(label: str) -> str:
     return " ".join(ABBREVIATED.get(w, w) for w in words if w not in PARTICLES)
 
 
+# The first word of each street type, as keys write it ("rond-point" → "rond").
+TYPE_WORDS = {key(re.sub(r"\(.*?\)", "", t)).split()[0] for t in STREET_TYPES.split("|")}
+
+
 def _usable(k: str) -> bool:
     """A key names a street only with a word besides the type ("rue L" alone would match
     every caption reduced to "rue de …")."""
@@ -141,8 +144,9 @@ def lambert(lon, lat):
 
 def _variants(label: str) -> list[str]:
     """Forms of a caption's street name to try, most literal first: the name itself (the
-    part before " - "), "faubourg X" as "rue du Faubourg X", then the name without up to
-    MAX_TRAILING_WORDS trailing lowercase words."""
+    part before " - "), the name cut where what is said of the place starts (see DESCRIBED),
+    "faubourg X" as "rue du Faubourg X", then the name without up to MAX_TRAILING_WORDS
+    trailing lowercase words."""
     label = label.split(" - ")[0].strip()
     variants = [label]
     if (cut := DESCRIBED.split(label, maxsplit=1)[0].strip()) != label:
@@ -193,24 +197,26 @@ class Gazetteer:
         if _usable(k := key(street.label)):
             self.by_key[k].append(street)
 
-    def lookup(self, label: str, arrondissements: list[int] | None = None) -> list[Street]:
+    def lookup(
+        self, label: str, arrondissements: list[int] | None = None, strict: bool = False
+    ) -> list[Street]:
         """Streets that may carry this name; narrowed to the given arrondissements when that
-        leaves at least one."""
+        leaves at least one (`strict`: always)."""
         found = next((hit for k in keys(label) if (hit := self.by_key.get(k))), [])
         if arrondissements:
             inside = [s for s in found if set(s.arrondissements) & set(arrondissements)]
-            found = inside or found
+            found = inside if strict else inside or found
         return found
 
     def named_in(self, text: str) -> str | None:
-        """The longest street name of the gazetteer written in `text`, words whole (as its
-        key): "Le Pont-Neuf, 1er arrondissement" names the pont Neuf."""
-        parts = [key(part).split() for part in re.split(r"[^\w\s'’-]", text)]  # never across
+        """The longest street name of the gazetteer written in `text` (as its key, two words
+        or more, as every key): words whole, never across punctuation, its type first ("Le
+        Pont-Neuf, 1er arrondissement" names the pont Neuf; "la Grande Galerie" is a room)."""
+        parts = [key(part).split() for part in re.split(r"[^\w\s'’-]", text)]
         for n in range(MOST_WORDS, 1, -1):
             for words in parts:
                 for i in range(len(words) - n + 1):
-                    k = " ".join(words[i : i + n])
-                    if k in self.by_key and not NOT_IN_TITLES & set(words[i : i + n]):
+                    if words[i] in TYPE_WORDS and (k := " ".join(words[i : i + n])) in self.by_key:
                         return k
         return None
 

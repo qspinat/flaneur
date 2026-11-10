@@ -46,10 +46,12 @@ class Location:
     precision_m: float | None = None  # None when unknown
 
 
-def _first_found(labels: list[str], arrondissements: list[int], gazetteer: Gazetteer):
+def _first_found(
+    labels: list[str], arrondissements: list[int], gazetteer: Gazetteer, strict: bool = False
+):
     """The first named street the gazetteer knows, with its candidates."""
     for label in labels:
-        if found := gazetteer.lookup(label, arrondissements):
+        if found := gazetteer.lookup(label, arrondissements, strict):
             return label, found
     return None, []
 
@@ -77,18 +79,14 @@ def choose(found: list[Street]) -> Street | None:
 
 
 def _named_too(
-    found: list[Street],
-    labels: list[str],
-    label: str,
-    arrondissements: list[int],
-    gazetteer: Gazetteer,
+    found: list[Street], others: list[str], arrondissements: list[int], gazetteer: Gazetteer
 ) -> Street | None:
-    """Among the streets an old name designates, the one the caption names too: "rue des
-    Sept-Voies, actuelle rue Valette" (two streets bore the name; one is the rue Valette)."""
-    for other in labels:
-        if other != label and (named := choose(gazetteer.lookup(other, arrondissements))):
-            if same := [s for s in found if s.geometry is named.geometry]:
-                return same[0]
+    """Among the streets an old name designates, the one the caption names too (`others`):
+    "rue des Sept-Voies, actuelle rue Valette" (two streets bore the name, one the Valette)."""
+    for other in others:
+        if named := choose(gazetteer.lookup(other, arrondissements)):
+            if same := next((s for s in found if s.geometry is named.geometry), None):
+                return same
     return None
 
 
@@ -127,42 +125,38 @@ def locate(reading: dict, gazetteer: Gazetteer, addresses: Addresses = NO_DOORS)
     mentions = [StreetMention(**s) for s in json.loads(reading["streets"])]
     arrondissements = json.loads(reading["arrondissements"])
     door = _door(mentions, arrondissements, reading["year"], gazetteer, addresses)
-    by_street = _by_street(mentions, arrondissements, reading["viewpoint"], gazetteer)
-    title = dict(reading).get("title")
-    if by_street.status == "not_found" and door is None and title:
-        # the reading found no street the gazetteer knows: one written in the title
-        if named := gazetteer.named_in(title):
-            kind, name = named.split(" ", 1)
-            from_title = _by_street(
-                [StreetMention(kind, name)], arrondissements, reading["viewpoint"], gazetteer
-            )
-            # a shorter name inside another ("rue Saint-Simon" in "rue Saint-Simon-le-Franc"):
-            # kept only in an arrondissement the caption gives, when it gives one
-            street = from_title.street
-            if (
-                not arrondissements
-                or not street
-                or set(street.arrondissements) & set(arrondissements)
-            ):
-                by_street = from_title
+    labels = [m.label for m in mentions]
+    by_street = _by_street(labels, arrondissements, reading["viewpoint"], gazetteer)
+    if by_street.status == "not_found" and door is None and reading["title"]:
+        by_street = _by_title(reading, arrondissements, gazetteer) or by_street
     return min(filter(None, (by_street, door)), key=_rank)
 
 
+def _by_title(reading, arrondissements: list[int], gazetteer: Gazetteer) -> Location | None:
+    """Where a photo was taken by a street its title names, when its reading found none the
+    gazetteer knows ("Le Pont-Neuf": the type inside the name); in an arrondissement the
+    caption gives, when it gives one (not "rue Saint-Simon" for "rue Saint-Simon-le-Franc")."""
+    if not (named := gazetteer.named_in(reading["title"])):
+        return None
+    return _by_street([named], arrondissements, reading["viewpoint"], gazetteer, strict=True)
+
+
 def _by_street(
-    mentions: list[StreetMention],
+    streets: list[str],
     arrondissements: list[int],
     viewpoint: str | None,
     gazetteer: Gazetteer,
+    strict: bool = False,
 ) -> Location:
-    """Where a photo was taken by its streets alone: their corner, the viewpoint's street, or
-    somewhere along its own."""
-    streets = [m.label for m in mentions]
-    label, found = _first_found(streets, arrondissements, gazetteer)
+    """Where a photo was taken by its streets alone (their names): their corner, the
+    viewpoint's street, or somewhere along its own (`strict`: see Gazetteer.lookup)."""
+    label, found = _first_found(streets, arrondissements, gazetteer, strict)
     if not found:
         return Location("not_found")
     if all(s.geometry is None for s in found):
         return Location("removed", label, found[0])
-    street = choose(found) or _named_too(found, streets, label, arrondissements, gazetteer)
+    others = [s for s in streets if s != label]
+    street = choose(found) or _named_too(found, others, arrondissements, gazetteer)
     if street is None:
         return Location("ambiguous", label)
     if viewpoint:
