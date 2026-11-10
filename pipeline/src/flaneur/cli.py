@@ -212,6 +212,8 @@ def _placing_answers(
     the answers placing a photo in its panorama (on the image it had then), and the photos no
     panorama sees."""
     held = placings.holding(path)
+    if any(r.get("panorama_at") for r in held.values()):  # each following its panorama
+        held = placings.holding(path, {p.id: (p.x, p.y, p.azimuth) for p in _spheres()})
     places = {
         i: {k: r[k] for k in ("lon", "lat", "heading", "at", "flipped")} for i, r in held.items()
     }

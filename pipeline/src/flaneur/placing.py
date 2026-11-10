@@ -573,11 +573,17 @@ def carried(sources: Sources) -> dict[str, dict]:
         return {}
 
 
+def standing_now(sources: Sources) -> dict[str, tuple[float, float, float]]:
+    """Where the page's panoramas stand (east, north, heading): answers follow them (see
+    placings.followed)."""
+    return {p.id: (p.x, p.y, p.azimuth) for p in sources.spheres}
+
+
 def next_photo(sources: Sources, nearest: dict[str, float], where: dict) -> dict:
     """The next photo to place, in the order of queueing.order (`nearest`: metres to the
     nearest panorama, `where`: x, y, by photo), how many are left, and the photos placed (to
     reopen from the map)."""
-    held, skipped, answers = placings.state(sources.placings)
+    held, skipped, answers = placings.state(sources.placings, standing_now(sources))
     # placed on an image the photo no longer has (cropped again): to see again, first
     stale = {
         i
@@ -618,7 +624,7 @@ def next_photo(sources: Sources, nearest: dict[str, float], where: dict) -> dict
 
 def reopened(sources: Sources, photo_id: str) -> dict:
     """A photo answered, as the page shows it again: its answer's place and registration."""
-    row = placings.holding(sources.placings)[photo_id]
+    row = placings.holding(sources.placings, standing_now(sources))[photo_id]
     same_image = row["inputs"] == sources.photos[photo_id].get("inputs", "")
     return {
         "id": photo_id,
@@ -927,7 +933,7 @@ def serve(sources: Sources, port: int) -> HTTPServer:
                             raise ValueError("une réponse en parallaxe garde ses paires")
                         standing = answered_in_parallax(body, photo_id, kept)
                     saved = None if pairs is None else kept_pairs(pairs, kept, spheres)
-                    held = placings.holding(sources.placings).get(photo_id)
+                    held = placings.holding(sources.placings, standing_now(sources)).get(photo_id)
                     if (  # saved again on the same fit (reopened, its cone turned): kept
                         saved is None
                         and body.get("answer") == "points"
@@ -951,6 +957,7 @@ def serve(sources: Sources, port: int) -> HTTPServer:
                             inputs=sources.photos[photo_id].get("inputs", ""),
                             pairs=saved,
                             standing=standing,
+                            panorama_at=kept and (kept.x, kept.y, kept.azimuth),
                         )
                     )
                 elif self.path == "/api/fit":

@@ -8,6 +8,10 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Any, NamedTuple
 
+import numpy as np
+from shapely.geometry import Point
+
+from flaneur.gazetteer import to_degrees, to_metres
 from flaneur.registration import (
     LEAST_STANDING,
     Registration,
@@ -39,6 +43,7 @@ def record(
     inputs: str = "",
     pairs: dict | None = None,
     standing: dict | None = None,
+    panorama_at: tuple[float, float, float] | None = None,
 ) -> dict:
     """Append the user's answer on a photo, with the seconds it took; but for a skip, the spot
     and direction set on the map; placed in its panorama ("fits": its proposal accepted,
@@ -47,7 +52,9 @@ def record(
     as directions in its own picture, `own`; the `view` and `side` they were clicked in); kept
     in parallax, its `standing` camera (`camera`, and for each pair the depth it was given,
     `metres`, and the neighbouring panoramas it came `from`, None without). A row by points says
-    which fit the user kept (`fit`: "flat" or "parallax"); its `registration` is always flat."""
+    which fit the user kept (`fit`: "flat" or "parallax"); its `registration` is always flat.
+    Where its panorama stood then (`panorama_at`: east, north, heading), for the answer to
+    follow it if it is set right since (see followed)."""
     if answer not in ANSWERS:
         raise ValueError(f"une réponse est l'une de {ANSWERS}")
     if answer == "skip":
@@ -85,6 +92,7 @@ def record(
             "pairs": pairs,
             "fit": None if pairs is None else "parallax" if standing else "flat",
             "standing": standing,
+            "panorama_at": None if panorama_at is None else [float(v) for v in panorama_at],
         },
     )
 
@@ -95,17 +103,48 @@ class State(NamedTuple):
     answers: list[str]  # the photos answered, one per answer given (not skips), in order
 
 
-def state(path: Path) -> State:
-    """The answers given so far, in one reading."""
+def state(path: Path, now: dict[str, tuple[float, float, float]] | None = None) -> State:
+    """The answers given so far, in one reading; with where the panoramas stand `now` (east,
+    north, heading, by id), each following its panorama (see followed)."""
     written = rows(path)
-    held = {row["photo_id"]: row for row in written if row["answer"] != "skip"}
+    held = {
+        row["photo_id"]: followed(row, now) if now else row
+        for row in written
+        if row["answer"] != "skip"
+    }
     answers = [row["photo_id"] for row in written if row["answer"] != "skip"]
     return State(held, {row["photo_id"] for row in written} - held.keys(), answers)
 
 
-def holding(path: Path) -> dict[str, dict]:
+def holding(
+    path: Path, now: dict[str, tuple[float, float, float]] | None = None
+) -> dict[str, dict]:
     """The answer that holds on each photo answered (see state)."""
-    return state(path).held
+    return state(path, now).held
+
+
+def followed(row: dict, now: dict[str, tuple[float, float, float]]) -> dict:
+    """An answer as it stands now that its panorama stands `now` (east, north, heading, by id):
+    its place and heading on the plan moved and turned as its panorama was since the answer,
+    about it (its registration, in the panorama's own picture, holds). Left as it is without
+    where its panorama stood then, or its panorama unknown."""
+    reg = registration_of(row) if row.get("registration") else None
+    if not row.get("panorama_at") or reg is None or reg.panorama not in now:
+        return row
+    (x0, y0, a0), (x1, y1, a1) = row["panorama_at"], now[reg.panorama]
+    if (x0, y0, a0) == (x1, y1, a1):
+        return row
+    turn = np.radians(a1 - a0)  # compass: clockwise
+    spot = to_metres(Point(row["lon"], row["lat"]))
+    east, north = spot.x - x0, spot.y - y0
+    there = to_degrees(
+        Point(
+            x1 + east * np.cos(turn) + north * np.sin(turn),
+            y1 - east * np.sin(turn) + north * np.cos(turn),
+        )
+    )
+    heading = None if row.get("heading") is None else (row["heading"] + a1 - a0) % 360
+    return {**row, "lon": there.x, "lat": there.y, "heading": heading, "panorama_at": [x1, y1, a1]}
 
 
 def registration_of(row: dict) -> Registration | None:

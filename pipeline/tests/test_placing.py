@@ -89,6 +89,11 @@ def test_a_photo_accepted_is_recorded_with_its_registration(page, one):
 
     assert status == 200
     assert placings.registration_of(placings.holding(sources.placings)["pm:1"]) == proposal
+    assert placings.holding(sources.placings)["pm:1"]["panorama_at"] == [
+        652_058.0,
+        6_861_530.0,
+        198.0,
+    ]
 
 
 def test_a_fit_without_a_registration_is_refused_with_the_reason(page, one):

@@ -1,8 +1,10 @@
 """The user's answers on the placing page, kept with the other overrides."""
 
 import pytest
+from shapely.geometry import Point
 
 from flaneur import placings
+from flaneur.gazetteer import to_metres
 from flaneur.registration import Registration, Standing, ViewOf, standing_to_json
 
 R = Registration("p1", (1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0), ViewOf(heading=40.0))
@@ -405,3 +407,42 @@ def test_second_clicks_are_kept_with_their_pairs(tmp_path):
     )
 
     assert row["pairs"]["second_clicks"][6]["neighbour"] == "p2"
+
+
+def _panorama_south_of_the_spot(metres: float) -> tuple[float, float, float]:
+    spot = to_metres(Point(SPOT["lon"], SPOT["lat"]))
+    return (spot.x, spot.y - metres, 0.0)
+
+
+def test_an_answer_keeps_where_its_panorama_stood(tmp_path):
+    at = _panorama_south_of_the_spot(10.0)
+
+    row = placings.record(
+        tmp_path / "p.jsonl", "pm:1", "fits", 5.0, **SPOT, registration=R, panorama_at=at
+    )
+
+    assert row["panorama_at"] == list(at)
+
+
+def test_an_answer_follows_its_panorama_set_right_since():
+    x, y, _ = _panorama_south_of_the_spot(10.0)  # the photo 10 m north of its panorama
+    row = {**SPOT, "registration": placings.to_json(R), "panorama_at": [x, y, 0.0]}
+
+    moved = placings.followed(row, {"p1": (x + 2.0, y, 90.0)})  # 2 m east, turned a quarter right
+
+    there = to_metres(Point(moved["lon"], moved["lat"]))
+    assert (there.x, there.y) == pytest.approx((x + 12.0, y), abs=0.01)  # now 10 m east of it
+    assert moved["heading"] == pytest.approx(130.0)
+    assert moved["panorama_at"] == [x + 2.0, y, 90.0]
+
+
+def test_an_answer_whose_panorama_stands_as_it_did_or_unknown_is_left():
+    x, y, _ = _panorama_south_of_the_spot(10.0)
+    row = {**SPOT, "registration": placings.to_json(R), "panorama_at": [x, y, 0.0]}
+
+    assert placings.followed(row, {"p1": (x, y, 0.0)}) == row
+    assert (
+        placings.followed({**row, "panorama_at": None}, {"p1": (x + 2.0, y, 90.0)})["lon"]
+        == SPOT["lon"]
+    )
+    assert placings.followed(row, {}) == row
