@@ -76,6 +76,22 @@ def choose(found: list[Street]) -> Street | None:
     return candidates[0] if len({id(s.geometry) for s in candidates}) == 1 else None
 
 
+def _named_too(
+    found: list[Street],
+    labels: list[str],
+    label: str,
+    arrondissements: list[int],
+    gazetteer: Gazetteer,
+) -> Street | None:
+    """Among the streets an old name designates, the one the caption names too: "rue des
+    Sept-Voies, actuelle rue Valette" (two streets bore the name; one is the rue Valette)."""
+    for other in labels:
+        if other != label and (named := choose(gazetteer.lookup(other, arrondissements))):
+            if same := [s for s in found if s.geometry is named.geometry]:
+                return same[0]
+    return None
+
+
 NO_DOORS = Addresses()
 
 
@@ -112,6 +128,23 @@ def locate(reading: dict, gazetteer: Gazetteer, addresses: Addresses = NO_DOORS)
     arrondissements = json.loads(reading["arrondissements"])
     door = _door(mentions, arrondissements, reading["year"], gazetteer, addresses)
     by_street = _by_street(mentions, arrondissements, reading["viewpoint"], gazetteer)
+    title = dict(reading).get("title")
+    if by_street.status == "not_found" and door is None and title:
+        # the reading found no street the gazetteer knows: one written in the title
+        if named := gazetteer.named_in(title):
+            kind, name = named.split(" ", 1)
+            from_title = _by_street(
+                [StreetMention(kind, name)], arrondissements, reading["viewpoint"], gazetteer
+            )
+            # a shorter name inside another ("rue Saint-Simon" in "rue Saint-Simon-le-Franc"):
+            # kept only in an arrondissement the caption gives, when it gives one
+            street = from_title.street
+            if (
+                not arrondissements
+                or not street
+                or set(street.arrondissements) & set(arrondissements)
+            ):
+                by_street = from_title
     return min(filter(None, (by_street, door)), key=_rank)
 
 
@@ -129,7 +162,7 @@ def _by_street(
         return Location("not_found")
     if all(s.geometry is None for s in found):
         return Location("removed", label, found[0])
-    street = choose(found)
+    street = choose(found) or _named_too(found, streets, label, arrondissements, gazetteer)
     if street is None:
         return Location("ambiguous", label)
     if viewpoint:
@@ -202,7 +235,8 @@ def _street_row(street: Street) -> dict:
 
 # each reading with its photo's first year (which house numbers to look in first)
 _READINGS = (
-    "SELECT r.*, p.year_start AS year FROM readings r LEFT JOIN photos p ON p.id = r.photo_id"
+    "SELECT r.*, p.year_start AS year, p.title FROM readings r "
+    "LEFT JOIN photos p ON p.id = r.photo_id"
 )
 
 

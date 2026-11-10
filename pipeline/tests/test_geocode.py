@@ -330,3 +330,76 @@ def test_a_door_too_far_from_its_street_gives_way_to_the_next_source_s(gazetteer
     location = locate({**reading([("rue", "Berger", "7")]), "year": 1925}, gazetteer, doors)
 
     assert location.status == "address" and location.label == "7 rue Berger (atlas_municipal_1888)"
+
+
+def test_a_name_is_cut_where_what_it_says_of_the_place_starts(gazetteer):
+    assert gazetteer.lookup("rue Berger entre la rue de la Lingerie et les Halles")[0].label == (
+        "rue Berger"
+    )
+    assert gazetteer.lookup("quai de la Mégisserie le 14 juillet 1888")[0].label == (
+        "quai de la Mégisserie"
+    )
+
+
+def test_two_streets_given_as_either_are_not_guessed(gazetteer):
+    assert gazetteer.lookup("rue Berger ou rue de la Lingerie") == []
+
+
+@pytest.fixture
+def with_a_bridge():
+    bridge = current("8", "pont Neuf", 1, 2.3400, 48.8570, 2.3420, 48.8580)
+    return Gazetteer.from_records([*CURRENT, bridge], OBSOLETE)
+
+
+def test_a_street_named_in_the_title_places_a_photo_its_reading_did_not(with_a_bridge):
+    title = "Inondations de 1910. Le Pont-Neuf, 1er arrondissement, Paris."
+
+    location = locate(reading([]) | {"title": title}, with_a_bridge)
+
+    assert (location.status, location.street.label) == ("street", "pont Neuf")
+
+
+def test_the_streets_read_come_before_the_title(with_a_bridge):
+    location = locate(reading([("rue", "Berger")]) | {"title": "Le Pont-Neuf"}, with_a_bridge)
+
+    assert location.street.label == "rue Berger"
+
+
+def test_a_name_two_streets_bore_is_settled_by_the_other_street_the_caption_names():
+    twice = [
+        obsolete("20", "rue des Sept Voies", "Dénommée rue Berger par arrêté du 16 août 1879."),
+        obsolete("21", "rue des Sept Voies", "Actuellement partie de la rue de la Lingerie."),
+    ]
+    gazetteer = Gazetteer.from_records(CURRENT, OBSOLETE + twice)
+    assert locate(reading([("rue", "des Sept Voies")]), gazetteer).status == "ambiguous"
+
+    location = locate(reading([("rue", "des Sept Voies"), ("rue", "Berger")]), gazetteer)
+
+    assert (location.status, location.street.current_label) == ("street", "rue Berger")
+
+
+def test_a_title_is_not_read_across_its_punctuation():
+    paris = current("30", "rue de Paris", 1, 2.3400, 48.8590, 2.3402, 48.8592)
+    gazetteer = Gazetteer.from_records([*CURRENT, paris], OBSOLETE)
+
+    location = locate(reading([]) | {"title": "Peintre de rue, Paris"}, gazetteer)
+
+    assert location.status == "not_found"
+
+
+def test_a_room_or_a_garden_named_in_a_title_is_not_taken_for_a_street():
+    gallery = current("31", "Grande Galerie", 1, 2.3400, 48.8590, 2.3402, 48.8592)
+    gazetteer = Gazetteer.from_records([*CURRENT, gallery], OBSOLETE)
+
+    location = locate(reading([]) | {"title": "Musée du Louvre, la Grande Galerie"}, gazetteer)
+
+    assert location.status == "not_found"
+
+
+def test_a_street_named_in_a_title_lies_in_the_arrondissement_the_caption_gives(gazetteer):
+    title = "Angle de la rue Berger-le-Franc"  # another street, whose name starts the same
+
+    elsewhere = locate(reading([], arrondissements=(4,)) | {"title": title}, gazetteer)
+    there = locate(reading([], arrondissements=(1,)) | {"title": title}, gazetteer)
+
+    assert (elsewhere.status, there.status) == ("not_found", "street")

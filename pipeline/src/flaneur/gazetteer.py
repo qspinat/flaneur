@@ -87,6 +87,18 @@ PARTICLES = {"de", "du", "des", "la", "le", "les", "l", "d"}
 # Lowercase words a caption may add after the name ("jardin du Luxembourg enneigé"); a
 # capitalised word is part of the name and is never dropped.
 MAX_TRAILING_WORDS = 2
+# Where what a caption says of the place starts, after its name: "boulevard Malesherbes entre
+# l'église de la Madeleine", "quai X le 14 juillet 1888", "rue Y pendant la crue". Not "ou":
+# "rue Saint-Martin ou Saint-Denis" does not say which.
+DESCRIBED = re.compile(
+    r"\s+(?:entre|depuis|pendant|lors|avec|devant|derrière|(?:le|la|les|en|du)\s+\d|\d{3,4}\b)",
+    re.IGNORECASE,
+)
+# The longest street name looked for in a title, in words (see Gazetteer.named_in); names
+# with these words are not looked for there: a title's "Grande Galerie", "cour", "jardin" or
+# "marché" is a room, a yard, a garden or a market far more often than a street of that name.
+MOST_WORDS = 7
+NOT_IN_TITLES = {"galerie", "cour", "jardin", "marche"}
 
 _TYPE = rf"(?i:{STREET_TYPES}|{ABBREVIATIONS})"
 # Where an obsolete name went, anywhere in the City's note: "Actuellement rue de Condé",
@@ -133,6 +145,9 @@ def _variants(label: str) -> list[str]:
     MAX_TRAILING_WORDS trailing lowercase words."""
     label = label.split(" - ")[0].strip()
     variants = [label]
+    if (cut := DESCRIBED.split(label, maxsplit=1)[0].strip()) != label:
+        variants.append(cut)
+        label = cut
     if label.lower().startswith("faubourg "):
         variants.append(f"rue du {label}")
     words = label.split()
@@ -186,6 +201,18 @@ class Gazetteer:
             inside = [s for s in found if set(s.arrondissements) & set(arrondissements)]
             found = inside or found
         return found
+
+    def named_in(self, text: str) -> str | None:
+        """The longest street name of the gazetteer written in `text`, words whole (as its
+        key): "Le Pont-Neuf, 1er arrondissement" names the pont Neuf."""
+        parts = [key(part).split() for part in re.split(r"[^\w\s'’-]", text)]  # never across
+        for n in range(MOST_WORDS, 1, -1):
+            for words in parts:
+                for i in range(len(words) - n + 1):
+                    k = " ".join(words[i : i + n])
+                    if k in self.by_key and not NOT_IN_TITLES & set(words[i : i + n]):
+                        return k
+        return None
 
     @classmethod
     def from_records(cls, current: list[dict], obsolete: list[dict]) -> "Gazetteer":
