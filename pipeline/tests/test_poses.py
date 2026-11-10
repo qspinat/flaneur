@@ -448,3 +448,4 @@ def test_a_pose_stands_only_where_it_was_recorded():
     assert not poses.stands([1.0, 2.0, 30.0], (1.0, 2.0, 33.0))
     assert not poses.stands(None, (1.0, 2.0, 30.0))  # made before poses were kept
     assert not poses.stands([1.0, 2.0, 30.0], None)  # its panorama no longer at hand
+    assert poses.stands(None, None)  # made while it was not at hand, and still not
