@@ -1003,6 +1003,68 @@ def _to_width(image: np.ndarray, width: int) -> np.ndarray:
     )
 
 
+class _Run(NamedTuple):
+    """What one `match` run reads (the panoramas' setup, where they stand, the buildings) and
+    keeps (each photo's match, the matchers it was tried with, traces, those placed)."""
+
+    setup: str
+    near_by: list[match.Panorama]
+    then: Callable[[int], Then]
+    heights: scene.CameraHeights
+    blocks: Blocks
+    found: dict
+    tried: dict[str, list[str]]
+    traces: dict
+    run: dict
+    placed: set[str]
+
+
+def _match_with(matcher: str, photos: list[export.WalkPhoto], at: _Run) -> None:
+    """Matches `photos` with one matcher (its own features, observations and points), writing
+    each one's match as it goes."""
+    views = _views(matcher=matcher)
+    store = chain.Store(MATCHERS[matcher].photos, views.matcher)
+    for me in photos:
+        inputs = _inputs(me.id, at.setup)
+        here = _place_of(me)
+        near = _nearest(at.near_by, *here, MATCH_RADIUS_M)[:MATCH_PANORAMAS]
+        image = cv2.imread(str(_exported(me.id)))
+        now = at.then(_then_year(me))
+        where = _where(me, at.heights, now)
+        trace = match.Trace()
+        mine = store.features(me.id, _image(me.id), lambda image=image: match.shrunk(image))
+        observed = match.observe(
+            image, near, at.blocks, views, where, trace, mine, at.heights.origin_z
+        )
+        store.save_observed(me.id, inputs, observed)
+        camera, walls, points = match.place(observed, where, trace)
+        at.traces[me.id] = at.run[me.id] = {**_traced(trace), "place": list(here)}  # caption's
+        at.tried[me.id] = [m for m in MATCHERS if m in at.tried[me.id] or m == matcher]
+        if camera is None:  # kept, with what it was tried from: not tried again for nothing
+            at.found[me.id] = {"inputs": inputs, "tried": at.tried[me.id]}
+            typer.echo(f"{me.id} : rien de sûr ({MATCHERS[matcher].label})")
+        else:
+            moved = float(np.hypot(camera.x - here[0], camera.y - here[1]))
+            outline = outlines.contrast(_grey(image), camera, now.blocks)
+            situated = match.Situated.of(
+                camera,
+                street=at.heights.street(camera.x, camera.y),
+                walls=walls,
+                moved_m=moved,
+                inputs=_placed_inputs(inputs, matcher),
+                outline=outline,
+            )
+            at.found[me.id] = {**asdict(situated), "matcher": matcher, "tried": at.tried[me.id]}
+            at.placed.add(me.id)
+            store.save_points(me.id, inputs, points)
+            typer.echo(
+                f"{me.id} : situé par {MATCHERS[matcher].label} ({camera.agree} points, "
+                f"{camera.panoramas} panoramas, déplacé de {moved:.1f} m, "
+                f"contours {outline:.2f})"
+            )
+        write_json(MATCHES, at.found)
+
+
 @app.command("match")
 def match_photos(
     photo: Annotated[list[str] | None, typer.Option(help="seulement ces photos")] = None,
@@ -1041,61 +1103,28 @@ def match_photos(
             turned_down = (me.id, (kept or {}).get("inputs")) in refused
             tried[me.id] = _tried(kept, inputs)
             to_try[me.id] = _left_to_try(kept, inputs, turned_down)
-    traces, run, placed = register.load(MATCH_TRACE), {}, set()  # placed: by this run
-
-    def match_with(matcher: str, photos: list) -> None:
-        """Matches `photos` with one matcher (its own features, observations and points)."""
-        views = _views(matcher=matcher)
-        store = chain.Store(MATCHERS[matcher].photos, views.matcher)
-        for me in photos:
-            inputs = _inputs(me.id, setup)
-            here = _place_of(me)
-            near = _nearest(near_by, *here, MATCH_RADIUS_M)[:MATCH_PANORAMAS]
-            image = cv2.imread(str(_exported(me.id)))
-            now = then(_then_year(me))
-            where = _where(me, heights, now)
-            trace = match.Trace()
-            mine = store.features(me.id, _image(me.id), lambda image=image: match.shrunk(image))
-            observed = match.observe(
-                image, near, blocks, views, where, trace, mine, heights.origin_z
-            )
-            store.save_observed(me.id, inputs, observed)
-            camera, walls, points = match.place(observed, where, trace)
-            traces[me.id] = run[me.id] = {**_traced(trace), "place": list(here)}  # caption's
-            tried[me.id] = [m for m in MATCHERS if m in tried[me.id] or m == matcher]
-            if camera is None:  # kept, with what it was tried from: not tried again for nothing
-                found[me.id] = {"inputs": inputs, "tried": tried[me.id]}
-                typer.echo(f"{me.id} : rien de sûr ({MATCHERS[matcher].label})")
-            else:
-                moved = float(np.hypot(camera.x - here[0], camera.y - here[1]))
-                outline = outlines.contrast(_grey(image), camera, now.blocks)
-                situated = match.Situated.of(
-                    camera,
-                    street=heights.street(camera.x, camera.y),
-                    walls=walls,
-                    moved_m=moved,
-                    inputs=_placed_inputs(inputs, matcher),
-                    outline=outline,
-                )
-                found[me.id] = {**asdict(situated), "matcher": matcher, "tried": tried[me.id]}
-                placed.add(me.id)
-                store.save_points(me.id, inputs, points)
-                typer.echo(
-                    f"{me.id} : situé par {MATCHERS[matcher].label} ({camera.agree} points, "
-                    f"{camera.panoramas} panoramas, déplacé de {moved:.1f} m, "
-                    f"contours {outline:.2f})"
-                )
-            write_json(MATCHES, found)
+    at = _Run(
+        setup=setup,
+        near_by=near_by,
+        then=then,
+        heights=heights,
+        blocks=blocks,
+        found=found,
+        tried=tried,
+        traces=register.load(MATCH_TRACE),
+        run={},
+        placed=set(),
+    )
 
     chosen = sorted((me for me in chosen if to_try[me.id]), key=_visit)
     for matcher in checked:  # one model at a time: each let go before the next
-        if photos := [me for me in chosen if matcher in to_try[me.id] and me.id not in placed]:
-            match_with(matcher, photos)
+        if photos := [me for me in chosen if matcher in to_try[me.id] and me.id not in at.placed]:
+            _match_with(matcher, photos, at)
             from flaneur import lomag
 
             lomag.released()  # the views' cache holds the matcher in a cycle: only gc frees it
-    write_json(MATCH_TRACE, traces)  # kept for every photo: its last run
-    typer.echo(f"où ces photos s'arrêtent : {_funnel(run.values())}")
+    write_json(MATCH_TRACE, at.traces)  # kept for every photo: its last run
+    typer.echo(f"où ces photos s'arrêtent : {_funnel(at.run.values())}")
     ids = {me.id for me in walk}
     typer.echo(
         f"{sum(1 for k in _situated() if k in ids)} photos situées sur {len(walk)} ; "

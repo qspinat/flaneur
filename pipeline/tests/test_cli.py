@@ -1,5 +1,6 @@
 import json
 import threading
+from types import SimpleNamespace
 
 import cv2
 import numpy as np
@@ -442,26 +443,11 @@ def test_no_view_of_today_is_shown_from_a_panorama_too_far_from_the_camera(tmp_p
 def test_match_tries_lomag_then_disk_on_the_photos_left_and_keeps_what_each_did(
     tmp_path, monkeypatch
 ):
-    from types import SimpleNamespace
-
     photos = [SimpleNamespace(id="pm:1"), SimpleNamespace(id="pm:2")]
     exported = tmp_path / "old.jpg"
     cv2.imwrite(str(exported), np.zeros((8, 8, 3), np.uint8))
     heights = SimpleNamespace(street=lambda x, y: 0.0, origin_z=0.0)
     camera = match.Camera(1.0, 2.0, 1.5, 90.0, 0.5, 60.0, agree=30, panoramas=2)
-
-    class Store:
-        def __init__(self, folder, matcher):
-            pass
-
-        def features(self, *args):
-            return None
-
-        def save_observed(self, *args):
-            pass
-
-        def save_points(self, *args):
-            pass
 
     for name, value in {
         "MATCHES": tmp_path / "matches.json",
@@ -485,7 +471,9 @@ def test_match_tries_lomag_then_disk_on_the_photos_left_and_keeps_what_each_did(
         monkeypatch.setattr(cli, name, value)
     monkeypatch.setattr(cli.db, "connect", lambda path: SimpleNamespace(close=lambda: None))
     monkeypatch.setattr(cli.export, "photos", lambda *args: photos)
-    monkeypatch.setattr(cli.chain, "Store", Store)
+    nothing = lambda *a: None  # noqa: E731
+    no_store = SimpleNamespace(features=nothing, save_observed=nothing, save_points=nothing)
+    monkeypatch.setattr(cli.chain, "Store", lambda folder, matcher: no_store)
     monkeypatch.setattr(cli.outlines, "contrast", lambda *args: 0.1)
     monkeypatch.setattr(
         cli.match, "observe", lambda image, near, blocks, views, *rest: views.matcher
