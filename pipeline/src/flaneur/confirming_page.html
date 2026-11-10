@@ -5,17 +5,16 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Photos situées</title>
 <style>
-  :root { --ink: #1d1a16; --paper: #f3eee4; --line: #c8bfae; --quiet: #6b6255; --no: #b3261e; --yes: #2e7d32; --wipe: 50%; }
+  :root { --ink: #1d1a16; --paper: #f3eee4; --line: #c8bfae; --quiet: #6b6255; --no: #b3261e; --yes: #2e7d32; }
   * { box-sizing: border-box; }
   body { margin: 0; font: 15px/1.4 Georgia, serif; color: var(--ink); background: var(--paper); }
   header { display: flex; gap: 16px; align-items: baseline; padding: 10px 16px; border-bottom: 1px solid var(--line); flex-wrap: wrap; }
   header h1 { font-size: 18px; margin: 0; }
   main { padding: 16px; }
   /* the frame takes the picture's size, within the page's width and most of the screen's height */
-  #frame { position: relative; display: inline-block; max-width: 100%; border: 1px solid var(--line); background: #ddd; touch-action: none; user-select: none; cursor: ew-resize; vertical-align: top; }
+  #frame { position: relative; display: inline-block; max-width: 100%; border: 1px solid var(--line); background: #ddd; touch-action: none; user-select: none; cursor: ew-resize; vertical-align: top; --wipe: 50%; }
   #frame img { display: block; max-width: 100%; max-height: 72vh; width: auto; height: auto; pointer-events: none; }
-  #old { width: 100%; height: 100%; }
-  #old { position: absolute; inset: 0; clip-path: inset(0 calc(100% - var(--wipe)) 0 0); }
+  #old { position: absolute; inset: 0; width: 100%; height: 100%; clip-path: inset(0 calc(100% - var(--wipe)) 0 0); }
   #seam { position: absolute; top: 0; bottom: 0; left: var(--wipe); width: 2px; margin-left: -1px; background: #fff; box-shadow: 0 0 0 1px rgb(0 0 0 / 0.35); pointer-events: none; }
   #frame.today #old, #frame.today #seam { visibility: hidden; }
   #frame.loading { opacity: 0.3; }
@@ -76,12 +75,7 @@
   </div>
   <div id="reasons" role="group" aria-label="Pourquoi non">
     <p>Pourquoi non ?</p>
-    <div class="actions">
-      <button data-reason="reproduction">Une reproduction dans la rue (1)</button>
-      <button data-reason="other_street">Une autre rue (2)</button>
-      <button data-reason="not_street">Pas une vue de rue (3)</button>
-      <button data-reason="mirrored">Image inversée (4)</button>
-      <button data-reason="other">Autre (5)</button>
+    <div class="actions" id="reason-buttons">
       <button id="no-plain">Non, sans raison (X)</button>
     </div>
   </div>
@@ -91,17 +85,30 @@
   </section>
 </main>
 <script>
-let photos = [], at = 0, shownAt = 0, saving = false, outlines = false;
+let photos = [], at = 0, shownAt = 0, saving = false, outlines = false, prefetched = null;
 const $ = (id) => document.getElementById(id);
 const frameOf = (p, part) => `/frame/${encodeURIComponent(p.id)}/${part}`;
 const LABEL = { yes: 'oui', near: 'bons bâtiments, caméra à corriger', no: 'non' };
-const REASON = { reproduction: 'une reproduction dans la rue', other_street: 'une autre rue', not_street: 'pas une vue de rue', mirrored: 'image inversée', other: 'autre' };
+// why a placement is wrong, as the server keeps it (confirming.REASONS), its key its rank
+const REASONS = [
+  ['reproduction', 'Une reproduction dans la rue'],
+  ['other_street', 'Une autre rue'],
+  ['not_street', 'Pas une vue de rue'],
+  ['mirrored', 'Image inversée'],
+  ['other', 'Autre'],
+];
+REASONS.forEach(([reason, label], n) => {
+  const b = Object.assign(document.createElement('button'), { textContent: `${label} (${n + 1})` });
+  b.addEventListener('click', () => judge('no', reason));
+  $('reason-buttons').insertBefore(b, $('no-plain'));
+});
+const labelOf = (reason) => REASONS.find(([r]) => r === reason)?.[1].toLowerCase();
 
-// the two pictures take seconds to draw: the frame fades until both are there, and the next
-// photo's are asked for meanwhile, so that they are there when its turn comes
-let waiting = 0;
+// the two pictures take seconds to draw: the frame fades until both are there, then the next
+// photo's are asked for, so that they are there when its turn comes
+const shown = () => [$('old'), $('today')].every((img) => img.complete && img.naturalWidth);
 for (const img of [$('old'), $('today')]) {
-  img.addEventListener('load', () => { if (--waiting <= 0) ready(); });
+  img.addEventListener('load', () => { if (shown()) ready(); });
   img.addEventListener('error', () => { $('loading').textContent = 'Les images n\'ont pas pu être dessinées.'; });
 }
 function ready() {
@@ -109,24 +116,23 @@ function ready() {
   $('frame').classList.remove('loading');
   $('loading').textContent = '';
   const next = photos[at + 1];
-  if (next) for (const part of ['old', 'today']) new Image().src = frameOf(next, part);
+  if (next && prefetched !== next.id) {
+    prefetched = next.id;
+    for (const part of ['old', 'today']) new Image().src = frameOf(next, part);
+  }
 }
 function wipe(percent) {
   const v = Math.max(0, Math.min(100, percent));
-  document.documentElement.style.setProperty('--wipe', `${v}%`);
+  $('frame').style.setProperty('--wipe', `${v}%`);
   $('wipe').value = v;
 }
 $('wipe').addEventListener('input', (e) => wipe(Number(e.target.value)));
-$('frame').addEventListener('pointerdown', (e) => {
-  $('frame').setPointerCapture(e.pointerId);
+function drag(e) {
   const r = $('frame').getBoundingClientRect();
   wipe(((e.clientX - r.left) / r.width) * 100);
-});
-$('frame').addEventListener('pointermove', (e) => {
-  if (!$('frame').hasPointerCapture(e.pointerId)) return;
-  const r = $('frame').getBoundingClientRect();
-  wipe(((e.clientX - r.left) / r.width) * 100);
-});
+}
+$('frame').addEventListener('pointerdown', (e) => { $('frame').setPointerCapture(e.pointerId); drag(e); });
+$('frame').addEventListener('pointermove', (e) => { if ($('frame').hasPointerCapture(e.pointerId)) drag(e); });
 function showOutlines(on) {
   outlines = on;
   $('outlines').setAttribute('aria-pressed', String(on));
@@ -150,26 +156,22 @@ function open(n) {
   progress();
   closeReasons();
   if (!p) { $('meta').textContent = 'Aucune photo située.'; $('frame').classList.remove('loading'); return; }
-  const today = frameOf(p, outlines ? 'outlines' : 'today');
   if (!$('old').src.endsWith(frameOf(p, 'old'))) {
-    waiting = 2;
     $('frame').classList.add('loading');
     $('loading').textContent = 'Images en cours de dessin…';
     $('old').src = frameOf(p, 'old');
-    $('today').src = today;
+    $('today').src = frameOf(p, outlines ? 'outlines' : 'today');
   }
   const from = p.round === 0 ? 'contre les panoramas d\'aujourd\'hui' : `au tour ${p.round}, depuis ${p.from.join(', ')}`;
   const by = p.by ? ` par ${p.by}` + (p.check ? ` (${p.check} : à vérifier de près)` : '') : '';
   $('meta').textContent = `${at + 1} / ${photos.length} · ${p.id} · ${p.title || ''}`;
   $('why').textContent = `Située ${from}${by} : ${p.agree} points d'accord, à ${p.moved_m} m de sa légende.`
+    + (p.away_m != null ? ` Vue d'aujourd'hui prise d'un panorama à ${p.away_m} m de la caméra.` : '')
     + (p.doubt ? ` En désaccord avec les autres photos : ${p.doubt}.` : '');
-  fetch(`/api/frame/${encodeURIComponent(p.id)}`).then((r) => r.json()).then((f) => {
-    if (f && photos[at] === p) $('why').textContent += ` Vue d'aujourd'hui prise d'un panorama à ${f.away_m} m de la caméra.`;
-  });
-  $('state').textContent = p.verdict ? `Déjà jugée : ${LABEL[p.verdict]}${p.reason ? ` (${REASON[p.reason]})` : ''}` : '';
+  $('state').textContent = p.verdict ? `Déjà jugée : ${LABEL[p.verdict]}${p.reason ? ` (${labelOf(p.reason)})` : ''}` : '';
   shownAt = performance.now();
 }
-function openReasons() { $('reasons').classList.add('open'); $('reasons').querySelector('button').focus(); }
+function openReasons() { $('reasons').classList.add('open'); $('reason-buttons').querySelector('button').focus(); }
 function closeReasons() { $('reasons').classList.remove('open'); }
 const reasonsOpen = () => $('reasons').classList.contains('open');
 
@@ -194,21 +196,24 @@ $('yes').addEventListener('click', () => judge('yes'));
 $('near').addEventListener('click', () => judge('near'));
 $('no').addEventListener('click', openReasons);
 $('no-plain').addEventListener('click', () => judge('no'));
-for (const b of document.querySelectorAll('[data-reason]')) b.addEventListener('click', () => judge('no', b.dataset.reason));
 $('skip').addEventListener('click', () => open(at + 1));  // nothing written: a verdict given stays
-const REASON_KEYS = ['reproduction', 'other_street', 'not_street', 'mirrored', 'other'];
+const KEYS = {
+  Enter: () => judge('yes'), p: () => judge('near'), x: openReasons, s: () => open(at + 1),
+  o: () => showOutlines(!outlines), ArrowRight: () => open(at + 1), ArrowLeft: () => open(at - 1),
+};
 document.addEventListener('keydown', (e) => {
   if (e.target instanceof HTMLInputElement) return;  // the slider keeps its own keys
-  if (e.key === ' ') { document.activeElement?.blur(); $('frame').classList.add('today'); }
-  else if (reasonsOpen() && REASON_KEYS[Number(e.key) - 1]) judge('no', REASON_KEYS[Number(e.key) - 1]);
-  else if (e.key === 'x' || e.key === 'X') { if (reasonsOpen()) judge('no'); else openReasons(); }
-  else if (e.key === 'Escape') closeReasons();
-  else if (e.key === 'Enter' && !reasonsOpen()) judge('yes');
-  else if (e.key === 'p' || e.key === 'P') judge('near');
-  else if (e.key === 's' || e.key === 'S') open(at + 1);
-  else if (e.key === 'o' || e.key === 'O') showOutlines(!outlines);
-  else if (e.key === 'ArrowRight') open(at + 1);
-  else if (e.key === 'ArrowLeft') open(at - 1);
+  const key = e.key.length === 1 ? e.key.toLowerCase() : e.key;
+  if (key === ' ') {  // today alone while held; no button pressed by it
+    document.activeElement?.blur();
+    $('frame').classList.add('today');
+  } else if (reasonsOpen()) {  // the reasons first: 1–5 one of them, X none, Escape back
+    const reason = REASONS[Number(key) - 1]?.[0];
+    if (reason) judge('no', reason);
+    else if (key === 'x') judge('no');
+    else if (key === 'Escape') closeReasons();
+    else return;  // Enter presses the button in focus
+  } else if (KEYS[key]) KEYS[key]();
   else return;
   e.preventDefault();
 });

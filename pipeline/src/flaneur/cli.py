@@ -1012,6 +1012,7 @@ def _nearest(
 
 
 SHEET_COLUMN = 300  # pixels per picture on the check sheets
+CONFIRM_WIDTH = 960  # pixels: the photo and today's view on the confirmation page
 SHEET_PANORAMAS = 3  # today's view from the nearest of these whose picture is at hand
 SHEET_MOST_M = 30  # and no further from the camera: a view from further shows another street
 OUTLINE_COLOUR = (0, 200, 255)  # BGR amber (a golden yellow): the photo's outlines over today
@@ -1764,6 +1765,23 @@ def _cut_view(panorama: match.Panorama, heading: float) -> np.ndarray:
     return match.perspective(picture, panorama.axes, heading, fov=CHECK_FOV, side=800, pitch=0)
 
 
+class Framed(NamedTuple):
+    """A photo situated (as exported; and `old`, at a width) and today's true view framed as
+    its camera (`today`, of the same size), from a panorama `away_m` from the camera."""
+
+    photo: np.ndarray
+    old: np.ndarray
+    today: np.ndarray
+    away_m: float
+
+
+def _away(near_by: list[match.Panorama], m: match.Situated) -> float | None:
+    """How far from a photo's camera stands the panorama its view of today comes from."""
+    if not (near := _nearest(near_by, m.x, m.y, SHEET_MOST_M)):
+        return None
+    return round(float(np.hypot(near[0].x - m.x, near[0].y - m.y)), 1)
+
+
 def _framed(
     photo_id: str,
     m: match.Situated,
@@ -1771,10 +1789,9 @@ def _framed(
     near_by: list[match.Panorama],
     read: Callable[[Path], np.ndarray | None],
     width: int,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, float] | None:
-    """A photo situated (as exported, and `width` wide) and today's true view from the
-    nearest panorama at hand framed as the camera found, of the same size, with how far that
-    panorama stands from the camera; none without the photo or a panorama near enough."""
+) -> Framed | None:
+    """A photo situated, `width` wide, and today's true view from the nearest panorama at hand
+    framed as the camera found; none without the photo or a panorama near enough."""
     photo = cv2.imread(str(_exported(photo_id)))
     if photo is None:
         return None
@@ -1787,7 +1804,7 @@ def _framed(
     else:
         return None
     real = match.real_view(m.view(heights.street(m.x, m.y)), old.shape[:2], panorama, picture)
-    return photo, old, real, float(np.hypot(panorama.x - m.x, panorama.y - m.y))
+    return Framed(photo, old, real, float(np.hypot(panorama.x - m.x, panorama.y - m.y)))
 
 
 def _sheet_row(
@@ -1864,9 +1881,6 @@ def _with_chained(
     return placed, rounds
 
 
-CONFIRM_WIDTH = 960  # pixels: the photo and today's view on the confirmation page
-
-
 @app.command("confirmer")
 def confirm_placed(port: int = 8768, open_browser: bool = True) -> None:
     """Ouvre la page de confirmation (locale) : oui ou non à chaque photo située, contre les
@@ -1894,6 +1908,7 @@ def confirm_placed(port: int = 8768, open_browser: bool = True) -> None:
             "camera": {"x": round(m.x, 2), "y": round(m.y, 2), "heading": round(m.heading, 2)},
             "agree": m.agree,
             "moved_m": m.moved_m,
+            "away_m": _away(near_by, m),
             **rounds[k],
         }
         for k, m in situated.items()
@@ -1901,17 +1916,17 @@ def confirm_placed(port: int = 8768, open_browser: bool = True) -> None:
     read = functools.lru_cache(maxsize=16)(lambda path: cv2.imread(str(path)))
 
     @functools.lru_cache(maxsize=64)
-    def frames(photo_id: str) -> dict | None:
-        framed = _framed(photo_id, situated[photo_id], heights, near_by, read, CONFIRM_WIDTH)
-        if framed is None:
+    def framed(photo_id: str) -> Framed | None:  # the heavy part: once a photo
+        return _framed(photo_id, situated[photo_id], heights, near_by, read, CONFIRM_WIDTH)
+
+    def frame(photo_id: str, part: str) -> bytes | None:
+        if (f := framed(photo_id)) is None:
             return None
-        photo, old, today, away = framed
-        drawn = {"old": old, "today": today, "outlines": _outlines(photo, today)}
-        jpeg = {k: cv2.imencode(".jpg", v, SHEET_JPEG)[1].tobytes() for k, v in drawn.items()}
-        return {**jpeg, "away_m": round(away, 1)}
+        picture = _outlines(f.photo, f.today) if part == "outlines" else getattr(f, part)
+        return cv2.imencode(".jpg", picture, SHEET_JPEG)[1].tobytes()
 
     _serve_page(
-        lambda: confirming.serve(placed, ANCHORS, _verdicts, frames, port),
+        lambda: confirming.serve(placed, ANCHORS, _verdicts, frame, port),
         f"photos situées ({len(placed)})",
         port,
         open_browser,

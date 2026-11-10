@@ -579,8 +579,7 @@ def test_a_photo_and_today_s_view_are_framed_alike(tmp_path, monkeypatch):
         "pm:1", m, heights, [near], lambda path: np.zeros((512, 1024, 3), np.uint8), 30
     )
 
-    _, old, today, away = framed
-    assert old.shape == today.shape == (40, 30, 3) and away == 1.0
+    assert framed.old.shape == framed.today.shape == (40, 30, 3) and framed.away_m == 1.0
 
 
 def _match_world(tmp_path, monkeypatch, previous: dict, places) -> None:

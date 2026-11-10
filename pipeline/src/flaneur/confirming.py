@@ -77,13 +77,12 @@ def serve(
     placed: list[dict],
     path: Path,
     verdicts: Callable[[], dict[str, dict]],
-    frames: Callable[[str], dict | None],
+    frame: Callable[[str, str], bytes | None],
     port: int,
 ) -> HTTPServer:
-    """`frames(photo_id)`: its pictures (JPEG), all of one size: the photo ("old"), today's
-    real view framed as its camera ("today"), the photo's outlines on that view
-    ("outlines"); and how far from the camera the panorama that view comes from stands
-    ("away_m"). None when they cannot be drawn."""
+    """`frame(photo_id, part)`: one of its pictures (JPEG), all of one size: the photo
+    ("old"), today's real view framed as its camera ("today"), the photo's outlines on that
+    view ("outlines"); None when they cannot be drawn."""
     by_id = {photo["id"]: photo for photo in placed}
 
     class Handler(localpage.Handler):
@@ -94,15 +93,14 @@ def serve(
                 self._send(200, PAGE.read_bytes(), "text/html; charset=utf-8")
             elif route == "/api/queue":
                 self._json(queue(placed, verdicts()))
-            elif parts[0] == "frame" and len(parts) == 3:
-                _, photo_id, part = parts
-                if photo_id in by_id and part in FRAMES and (drawn := frames(photo_id)):
-                    self._send(200, drawn[part], "image/jpeg")
-                else:
-                    self._send(404, b"not found", "text/plain")
-            elif parts[:2] == ["api", "frame"] and len(parts) == 3 and parts[2] in by_id:
-                drawn = frames(parts[2])
-                self._json({"away_m": drawn["away_m"]} if drawn else None)
+            elif (
+                parts[0] == "frame"
+                and len(parts) == 3
+                and parts[1] in by_id
+                and parts[2] in FRAMES
+                and (jpeg := frame(parts[1], parts[2]))
+            ):
+                self._send(200, jpeg, "image/jpeg")
             else:
                 self._send(404, b"not found", "text/plain")
 
