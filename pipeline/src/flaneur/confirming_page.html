@@ -12,7 +12,7 @@
   header h1 { font-size: 18px; margin: 0; }
   main { padding: 16px; }
   /* the frame takes the picture's size, within the page's width and most of the screen's height */
-  #frame { position: relative; display: inline-block; max-width: 100%; border: 1px solid var(--line); background: #ddd; touch-action: none; user-select: none; cursor: ew-resize; vertical-align: top; --wipe: 50%; }
+  #frame { position: relative; display: inline-block; max-width: 100%; border: 1px solid var(--line); background: #ddd; touch-action: pan-y; user-select: none; cursor: ew-resize; vertical-align: top; --wipe: 50%; }
   #frame img { display: block; max-width: 100%; max-height: 72vh; width: auto; height: auto; pointer-events: none; }
   #old { position: absolute; inset: 0; width: 100%; height: 100%; clip-path: inset(0 calc(100% - var(--wipe)) 0 0); }
   #seam { position: absolute; top: 0; bottom: 0; left: var(--wipe); width: 2px; margin-left: -1px; background: #fff; box-shadow: 0 0 0 1px rgb(0 0 0 / 0.35); pointer-events: none; }
@@ -89,20 +89,22 @@ let photos = [], at = 0, shownAt = 0, saving = false, outlines = false, prefetch
 const $ = (id) => document.getElementById(id);
 const frameOf = (p, part) => `/frame/${encodeURIComponent(p.id)}/${part}`;
 const LABEL = { yes: 'oui', near: 'bons bâtiments, caméra à corriger', no: 'non' };
-// why a placement is wrong, as the server keeps it (confirming.REASONS), its key its rank
-const REASONS = [
-  ['reproduction', 'Une reproduction dans la rue'],
-  ['other_street', 'Une autre rue'],
-  ['not_street', 'Pas une vue de rue'],
-  ['mirrored', 'Image inversée'],
-  ['other', 'Autre'],
-];
-REASONS.forEach(([reason, label], n) => {
-  const b = Object.assign(document.createElement('button'), { textContent: `${label} (${n + 1})` });
-  b.addEventListener('click', () => judge('no', reason));
-  $('reason-buttons').insertBefore(b, $('no-plain'));
-});
-const labelOf = (reason) => REASONS.find(([r]) => r === reason)?.[1].toLowerCase();
+// why a placement is wrong: the server's reasons (/api/reasons), in its order (their keys),
+// each said here
+const SAID = {
+  reproduction: 'Une reproduction dans la rue', other_street: 'Une autre rue',
+  not_street: 'Pas une vue de rue', mirrored: 'Image inversée', other: 'Autre',
+};
+let REASONS = [];
+const labelOf = (reason) => (SAID[reason] ?? reason).toLowerCase();
+function showReasons(reasons) {
+  REASONS = reasons;
+  reasons.forEach((reason, n) => {
+    const b = Object.assign(document.createElement('button'), { textContent: `${SAID[reason] ?? reason} (${n + 1})` });
+    b.addEventListener('click', () => judge('no', reason));
+    $('reason-buttons').insertBefore(b, $('no-plain'));
+  });
+}
 
 // the two pictures take seconds to draw: the frame fades until both are there, then the next
 // photo's are asked for, so that they are there when its turn comes
@@ -111,14 +113,15 @@ for (const img of [$('old'), $('today')]) {
   img.addEventListener('load', () => { if (shown()) ready(); });
   img.addEventListener('error', () => { $('loading').textContent = 'Les images n\'ont pas pu être dessinées.'; });
 }
+// the slider and its labels as wide as the picture, whatever the screen does
+new ResizeObserver(() => { $('under').style.width = `${$('frame').getBoundingClientRect().width}px`; }).observe($('frame'));
 function ready() {
-  $('under').style.width = `${$('frame').getBoundingClientRect().width}px`;
   $('frame').classList.remove('loading');
   $('loading').textContent = '';
   const next = photos[at + 1];
   if (next && prefetched !== next.id) {
     prefetched = next.id;
-    for (const part of ['old', 'today']) new Image().src = frameOf(next, part);
+    for (const part of ['old', outlines ? 'outlines' : 'today']) new Image().src = frameOf(next, part);
   }
 }
 function wipe(percent) {
@@ -143,6 +146,7 @@ function showOutlines(on) {
 $('outlines').addEventListener('click', () => showOutlines(!outlines));
 
 async function load() {
+  showReasons(await (await fetch('/api/reasons')).json());
   photos = await (await fetch('/api/queue')).json();
   open(0);
 }
@@ -201,14 +205,16 @@ const KEYS = {
   Enter: () => judge('yes'), p: () => judge('near'), x: openReasons, s: () => open(at + 1),
   o: () => showOutlines(!outlines), ArrowRight: () => open(at + 1), ArrowLeft: () => open(at - 1),
 };
+const SLIDER_KEYS = ['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End', 'PageUp', 'PageDown'];
 document.addEventListener('keydown', (e) => {
-  if (e.target instanceof HTMLInputElement) return;  // the slider keeps its own keys
+  if (e.ctrlKey || e.metaKey || e.altKey) return;  // the browser's own (Cmd+2: another tab)
+  if (e.target === $('wipe') && SLIDER_KEYS.includes(e.key)) return;  // the slider keeps its own
   const key = e.key.length === 1 ? e.key.toLowerCase() : e.key;
   if (key === ' ') {  // today alone while held; no button pressed by it
     document.activeElement?.blur();
     $('frame').classList.add('today');
   } else if (reasonsOpen()) {  // the reasons first: 1–5 one of them, X none, Escape back
-    const reason = REASONS[Number(key) - 1]?.[0];
+    const reason = REASONS[Number(key) - 1];
     if (reason) judge('no', reason);
     else if (key === 'x') judge('no');
     else if (key === 'Escape') closeReasons();

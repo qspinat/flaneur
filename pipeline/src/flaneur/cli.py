@@ -1776,10 +1776,10 @@ class Framed(NamedTuple):
 
 
 def _away(near_by: list[match.Panorama], m: match.Situated) -> float | None:
-    """How far from a photo's camera stands the panorama its view of today comes from."""
-    if not (near := _nearest(near_by, m.x, m.y, SHEET_MOST_M)):
-        return None
-    return round(float(np.hypot(near[0].x - m.x, near[0].y - m.y)), 1)
+    """How far from a photo's camera stands the panorama its view of today comes from: the
+    nearest whose picture is at hand (as _framed takes it)."""
+    near = [p for p in _nearest(near_by, m.x, m.y, SHEET_MOST_M) if p.path.exists()]
+    return round(float(np.hypot(near[0].x - m.x, near[0].y - m.y)), 1) if near else None
 
 
 def _framed(
@@ -1915,10 +1915,11 @@ def confirm_placed(port: int = 8768, open_browser: bool = True) -> None:
     ]
     read = functools.lru_cache(maxsize=16)(lambda path: cv2.imread(str(path)))
 
-    @functools.lru_cache(maxsize=64)
-    def framed(photo_id: str) -> Framed | None:  # the heavy part: once a photo
+    @functools.lru_cache(maxsize=2)  # the heavy part, in arrays: the photo shown and the next
+    def framed(photo_id: str) -> Framed | None:
         return _framed(photo_id, situated[photo_id], heights, near_by, read, CONFIRM_WIDTH)
 
+    @functools.lru_cache(maxsize=192)  # the pictures as sent, a few hundred kB a photo
     def frame(photo_id: str, part: str) -> bytes | None:
         if (f := framed(photo_id)) is None:
             return None

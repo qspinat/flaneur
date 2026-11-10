@@ -61,8 +61,8 @@ def queue(placed: list[dict], verdicts: dict[str, dict]) -> list[dict]:
     items = []
     for photo in placed:
         last = verdicts.get(photo["id"])
-        verdict = last["verdict"] if last and last["inputs"] == photo["inputs"] else None
-        items.append({**photo, "verdict": verdict})
+        now = last if last and last["inputs"] == photo["inputs"] else {}
+        items.append({**photo, "verdict": now.get("verdict"), "reason": now.get("reason")})
     return sorted(
         items,
         key=lambda item: (
@@ -88,11 +88,15 @@ def serve(
     class Handler(localpage.Handler):
         def do_GET(self) -> None:  # noqa: N802 (http.server's naming)
             route = unquote(self.path.split("?")[0])
-            parts = route.strip("/").split("/")
+            parts = [
+                unquote(p) for p in self.path.split("?")[0].strip("/").split("/")
+            ]  # ids may hold "/"
             if route == "/":
                 self._send(200, PAGE.read_bytes(), "text/html; charset=utf-8")
             elif route == "/api/queue":
                 self._json(queue(placed, verdicts()))
+            elif route == "/api/reasons":
+                self._json(list(REASONS))
             elif (
                 parts[0] == "frame"
                 and len(parts) == 3

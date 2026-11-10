@@ -75,3 +75,15 @@ def test_a_no_keeps_the_reason_it_was_given(tmp_path):
 def test_a_reason_goes_only_with_a_no_and_is_one_of_the_page_s(tmp_path, verdict, reason):
     with pytest.raises(ValueError):
         confirming.record(tmp_path / "anchors.jsonl", "pm:1", verdict, "abc", 1, reason=reason)
+
+
+def test_a_no_comes_back_with_its_reason():
+    placed = [{"id": "a", "round": 0, "inputs": "1"}, {"id": "b", "round": 0, "inputs": "1"}]
+    verdicts = {
+        "a": {"verdict": "no", "inputs": "1", "reason": "mirrored"},
+        "b": {"verdict": "no", "inputs": "2", "reason": "mirrored"},  # on another placement
+    }
+
+    queue = {p["id"]: p for p in confirming.queue(placed, verdicts)}
+
+    assert (queue["a"]["reason"], queue["b"]["reason"]) == ("mirrored", None)
