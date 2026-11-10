@@ -76,7 +76,9 @@ def test_verdicts_kept_with_a_lidar_fit_of_their_own_still_read(tmp_path):
     row = {"correction": None, "bdtopo": [0.1, 0.0, 0.2], "lidar": [0.3, 0.1, 0.0], "details": 40}
     path.write_text(json.dumps({"p1": row}))
 
-    assert poses.load(path) == {"p1": poses.Verdict(None, poses.Correction(0.1, 0.0, 0.2), 40)}
+    found = poses.load(path)["p1"]
+
+    assert (found.bdtopo, found.details, found.rule) == (poses.Correction(0.1, 0.0, 0.2), 40, 1)
 
 
 def test_a_panorama_both_surveys_place_off_alike_is_corrected():
@@ -185,6 +187,50 @@ def test_a_correction_found_on_bd_topo_is_kept_when_the_lidar_bears_it_out_thoug
 
     back = poses.moved(seen, ORIGIN, found.correction)
     assert np.median(np.linalg.norm(back - true, axis=1)) < 0.1
+
+
+def test_a_lidar_with_nothing_near_the_details_bears_nothing_out():
+    seen = poses.moved(_details(), ORIGIN, poses.Correction(-6.0, 5.0, -12.0))
+
+    found = poses.judged(
+        seen,
+        ORIGIN,
+        lambda p: poses.segment_distance(p, FACADES),
+        lambda p: np.full(len(p), 50.0),  # all street, no outline about
+    )
+
+    assert found.correction is None and found.bdtopo is not None
+
+
+def test_a_panorama_turned_further_than_the_search_reaches_is_not_set():
+    seen = poses.moved(_details(), ORIGIN, poses.Correction(0.0, 0.0, 25.0))
+
+    assert poses.fitted(seen, ORIGIN, lambda p: poses.segment_distance(p, FACADES)) is None
+
+
+def test_two_places_alike_are_told_apart_however_rough_the_details():
+    corner = np.array([[[1004.0, 2004.0], [1004.0, 2016.0]], [[1004.0, 2004.0], [1016.0, 2004.0]]])
+    twins = np.concatenate([corner, corner + [-10.0, 0.0]])
+    rng = np.random.default_rng(1)
+    k = rng.integers(2, size=4000)
+    t = rng.uniform(0, 1, 4000)[:, None]
+    rough = corner[k, 0] + t * (corner[k, 1] - corner[k, 0]) + rng.normal(0, 0.4, (4000, 2))
+
+    assert (
+        poses.fitted(rough + [-5.0, 0.0], ORIGIN, lambda p: poses.segment_distance(p, twins))
+        is None
+    )
+
+
+def test_verdicts_judged_by_an_earlier_rule_are_judged_again(tmp_path):
+    path = tmp_path / "poses.json"
+    row = {"correction": None, "bdtopo": None, "details": 40, "placed": [1.0, 2.0, 3.0]}
+    path.write_text(json.dumps({"p1": row}))
+    placed = (1.0, 2.0, 3.0)
+
+    assert not poses.still(poses.load(path)["p1"], placed)
+    assert poses.still(poses.Verdict(None, None, 40, placed), placed)
+    assert not poses.still(poses.Verdict(None, None, 40, placed), (1.0, 2.0, 4.0))
 
 
 def test_a_correction_the_lidar_does_not_bear_out_is_refused():

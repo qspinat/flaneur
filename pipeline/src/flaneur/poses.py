@@ -64,15 +64,16 @@ PINNED = 0.1  # a shift's weaker direction this much of its stronger at least, e
 # far from where the best does, of the RIVALS highest) counts nearly as many.
 SEARCH_TURN_DEG = 20.0
 SEARCH_STEP_DEG = 0.5
-SEARCH_SHIFT_M = 15.0  # LiDAR patches reach HALF_M: details (REACH_M) shifted this, still in
+SEARCH_SHIFT_M = 15.0  # details (REACH_M) shifted this stay within LiDAR's patch (HALF_M)
 SEARCH_CELL_M = 0.25
 ON_WALL_M = 0.75
 RIVAL_M = 3.0
-RIVALS = 50
 TURNS = np.arange(-SEARCH_TURN_DEG, SEARCH_TURN_DEG + 1e-9, SEARCH_STEP_DEG)
 _K = round(SEARCH_SHIFT_M / SEARCH_CELL_M)
 OFFSETS = (np.arange(2 * _K + 1) - _K) * SEARCH_CELL_M  # the shifts tried, either way
 MARGIN = 1.02  # the best counts this many times another answer at least: a tie, refused
+RULE = 2  # how verdicts are reached: 1, two surveys' fits agreeing; 2, BD TOPO's whole shape,
+# borne out by LiDAR (2026-11-10). A verdict by another is judged again.
 # (measured on 99 panoramas, 10/11: above it, LiDAR tells right from wrong better than a margin)
 
 
@@ -96,6 +97,7 @@ class Verdict:
     bdtopo: Correction | None
     details: int
     placed: tuple[float, float, float] | None = None
+    rule: int = RULE
 
 
 def moved(points: np.ndarray, origin: np.ndarray, c: Correction) -> np.ndarray:
@@ -171,13 +173,20 @@ def fitted(
     """The correction laying a panorama's details (plan points) on what `distance` measures to,
     from where their whole shape best meets it (see _searched), refined there; along a direction
     they do not pin a shift along (see _refined), it does not move. None with fewer than
-    LEAST_DETAILS near it, or when another answer meets it nearly as well (see _margin)."""
+    LEAST_DETAILS near it, at the edge of what is searched, or when another answer meets it
+    nearly as well (see _margin)."""
     searched = _searched(points, origin, distance)
     if searched is None:
         return None
     counts, best = searched
+    if any(i in (0, n - 1) for i, n in zip(best, counts.shape, strict=True)):
+        return None  # at the edge of what is tried: the answer may lie beyond
     found = _refined(points, origin, distance, _at(best))
-    if found is None or _margin(points, origin, counts, best, found[1]) < MARGIN:
+    if (
+        found is None
+        or np.hypot(found[0].east, found[0].north) > SEARCH_SHIFT_M
+        or _margin(points, origin, counts, best, found[1]) < MARGIN
+    ):
         return None
     return found[0]
 
@@ -219,6 +228,9 @@ def _searched(
     within ON_WALL_M of it, counted at once for all shifts by correlating them with the walls
     (FFT); of answers counting alike, the least move. Their counts (turn × north row, from the
     north, × east column) and the best's index (see _at); None with no wall about."""
+    near = points[np.linalg.norm(points - origin, axis=1) < REACH_M]
+    if len(near) < LEAST_DETAILS:
+        return None
     half = REACH_M + SEARCH_SHIFT_M
     n = round(2 * half / SEARCH_CELL_M)
     x0, y1 = origin[0] - half, origin[1] + half
@@ -227,7 +239,6 @@ def _searched(
     walls = (distance(np.column_stack([east.ravel(), south.ravel()])) < ON_WALL_M).reshape(n, n)
     if not walls.any():
         return None
-    near = points[np.linalg.norm(points - origin, axis=1) < REACH_M]
     size = fft.next_fast_len(n + _K)  # no shift tried wraps round onto another
     on_walls = fft.rfft2(walls.astype(np.float32), s=(size, size), workers=-1)
     kept = np.r_[size - _K : size, 0 : _K + 1]  # the shifts tried, from -_K
@@ -243,9 +254,9 @@ def _searched(
             s=(size, size),
             workers=-1,
         )
-        counts[t] = met[np.ix_(kept, kept)]
+        counts[t] = np.rint(met[np.ix_(kept, kept)])  # whole details: FFT noise rounded off
     moves = np.abs(TURNS)[:, None, None] + np.hypot(OFFSETS[:, None], OFFSETS[None, :])[None]
-    best = np.unravel_index(np.argmax(np.round(counts) - 1e-3 * moves), counts.shape)
+    best = np.unravel_index(np.argmax(counts - 1e-3 * moves), counts.shape)
 
     return counts, tuple(int(i) for i in best)
 
@@ -273,14 +284,16 @@ def _margin(
     free: np.ndarray | None,
 ) -> float:
     """How many times as many details on the walls the best answer of _searched counts as any
-    other (infinite: none): another of the RIVALS highest peaks of the counts that puts the
-    details RIVAL_M from where the best does (see _apart; along a `free` direction, where the
-    walls cannot tell, not counted)."""
-    peaks = (counts == ndimage.maximum_filter(counts, size=(3, 5, 5))) & (counts > 0)
-    ranked = sorted(zip(*np.nonzero(peaks), strict=True), key=lambda i: -counts[i])[:RIVALS]
+    other (infinite: none): the highest other peak of the counts that puts the details RIVAL_M
+    from where the best does (see _apart; along a `free` direction, where the walls cannot tell,
+    not counted)."""
+    peaks = np.flatnonzero(
+        (counts == ndimage.maximum_filter(counts, size=(3, 5, 5))) & (counts > 0)
+    )
     sample = points[:: max(1, len(points) // 2000)]
     there = moved(sample, origin, _at(best))
-    for i in ranked:
+    for flat in peaks[np.argsort(-counts.ravel()[peaks], kind="stable")]:
+        i = tuple(int(v) for v in np.unravel_index(flat, counts.shape))
         if _apart(moved(sample, origin, _at(i)), there, free) >= RIVAL_M:
             return float(counts[best] / counts[i])
     return float("inf")
@@ -319,9 +332,9 @@ def _borne_out(
 ) -> bool:
     """Whether LiDAR bears a correction out: the details it `sees` (plan points and the
     panorama: which have a clear sight line, see clear_of) from where the correction puts the
-    panorama (LEAST_DETAILS at least) lie, in median, no further from its outlines than those it
-    sees from where the panorama stands (FAR_M if too few). A panorama placed off sees its
-    details inside the buildings, behind their outlines."""
+    panorama (LEAST_DETAILS at least) lie, in median, nearer than FAR_M to its outlines, and no
+    further from them than those it sees from where the panorama stands (if as many). A
+    panorama placed off sees its details inside the buildings, behind their outlines."""
 
     def off(c: Correction) -> float | None:
         q, at = moved(points, origin, c), origin + [c.east, c.north]
@@ -332,7 +345,7 @@ def _borne_out(
 
     there = off(c)
     here = off(Correction(0.0, 0.0, 0.0))
-    return there is not None and there <= (FAR_M if here is None else here)
+    return there is not None and there < FAR_M and (here is None or there <= here)
 
 
 def judge(
@@ -402,6 +415,7 @@ def load(path: Path) -> dict[str, Verdict]:
             *(_correction(r[k]) for k in ("correction", "bdtopo")),
             r["details"],
             tuple(r["placed"]) if r.get("placed") else None,
+            r.get("rule", 1),
         )
         for i, r in rows.items()
     }
@@ -409,6 +423,12 @@ def load(path: Path) -> dict[str, Verdict]:
 
 def _correction(row: list | None) -> Correction | None:
     return Correction(*row) if row else None
+
+
+def still(verdict: Verdict, placed: tuple[float, float, float]) -> bool:
+    """Whether a verdict stands for a panorama `placed` so (east, north, heading): judged there,
+    by the RULE of now."""
+    return verdict.placed == placed and verdict.rule == RULE
 
 
 def corrections(verdicts: dict[str, Verdict]) -> dict[str, Correction]:

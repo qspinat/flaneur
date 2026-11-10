@@ -2150,7 +2150,7 @@ def set_panoramas_right(
     with httpx.Client() as client:
         for home in homes:
             placed = (round(home.x, 2), round(home.y, 2), round(home.azimuth, 2))
-            if not again and (kept := verdicts.get(home.id)) and kept.placed == placed:
+            if not again and (kept := verdicts.get(home.id)) and poses.still(kept, placed):
                 continue  # judged as it stands
             neighbours = depth.candidates(home, spheres, fixed)
             if not all(masks.kept(p) for p in [home, *neighbours]):
