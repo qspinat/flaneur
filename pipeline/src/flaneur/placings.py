@@ -5,12 +5,15 @@ clicking pairs of points), "far" (no panorama sees it: no 3D view), "skip" (come
 The last answer on a photo holds, a skip leaving the one before it; the rows before stay."""
 
 from collections import defaultdict
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Any, NamedTuple
 
 import numpy as np
+from scipy.spatial.transform import Rotation
 from shapely.geometry import Point
 
+from flaneur import poses
 from flaneur.gazetteer import to_degrees, to_metres
 from flaneur.registration import (
     LEAST_STANDING,
@@ -123,28 +126,47 @@ def holding(
     return state(path, now).held
 
 
+def where(spheres: Iterable[Any]) -> dict[str, tuple[float, float, float]]:
+    """Where panoramas stand (east, north, heading, as poses.at keeps it), by id: answers follow
+    them (see followed)."""
+    return {p.id: poses.at(p.x, p.y, p.azimuth) for p in spheres}
+
+
 def followed(row: dict, now: dict[str, tuple[float, float, float]]) -> dict:
-    """An answer as it stands now that its panorama stands `now` (east, north, heading, by id):
-    its place and heading on the plan moved and turned as its panorama was since the answer,
-    about it (its registration, in the panorama's own picture, holds). Left as it is without
-    where its panorama stood then, or its panorama unknown."""
-    reg = registration_of(row) if row.get("registration") else None
-    if not row.get("panorama_at") or reg is None or reg.panorama not in now:
+    """An answer as it stands now that its panorama stands `now` (see where): its place and
+    heading on the plan, and its camera kept in parallax, moved and turned as its panorama was
+    since the answer, about it (its registration, in the panorama's own picture, holds). Left
+    as it is without where its panorama stood then, or its panorama unknown."""
+    if not row.get("panorama_at") or not row.get("registration"):
         return row
-    (x0, y0, a0), (x1, y1, a1) = row["panorama_at"], now[reg.panorama]
-    if (x0, y0, a0) == (x1, y1, a1):
+    panorama = registration_of(row).panorama
+    if panorama not in now or tuple(row["panorama_at"]) == tuple(now[panorama]):
         return row
-    turn = np.radians(a1 - a0)  # compass: clockwise
+    (x0, y0, a0), (x1, y1, a1) = row["panorama_at"], now[panorama]
+    change = poses.Correction(x1 - x0, y1 - y0, a0 - a1)  # counter-clockwise on the plan
+
+    def about(x: float, y: float) -> tuple[float, float]:
+        return tuple(poses.moved(np.array([[x, y]]), np.array([x0, y0]), change)[0])
+
     spot = to_metres(Point(row["lon"], row["lat"]))
-    east, north = spot.x - x0, spot.y - y0
-    there = to_degrees(
-        Point(
-            x1 + east * np.cos(turn) + north * np.sin(turn),
-            y1 - east * np.sin(turn) + north * np.cos(turn),
-        )
-    )
+    there = to_degrees(Point(*about(spot.x, spot.y)))
     heading = None if row.get("heading") is None else (row["heading"] + a1 - a0) % 360
-    return {**row, "lon": there.x, "lat": there.y, "heading": heading, "panorama_at": [x1, y1, a1]}
+    out = {**row, "lon": there.x, "lat": there.y, "heading": heading, "panorama_at": [x1, y1, a1]}
+    if row.get("standing"):
+        camera = row["standing"]["camera"]
+        turn = (
+            Rotation.from_rotvec(camera["turn"])
+            * Rotation.from_euler("z", change.turn, degrees=True).inv()
+        )
+        out["standing"] = {
+            **row["standing"],
+            "camera": {
+                **camera,
+                "position": [*about(*camera["position"][:2]), camera["position"][2]],
+                "turn": [float(v) for v in turn.as_rotvec()],
+            },
+        }
+    return out
 
 
 def registration_of(row: dict) -> Registration | None:

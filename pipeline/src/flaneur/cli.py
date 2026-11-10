@@ -213,7 +213,8 @@ def _placing_answers(
     panorama sees."""
     held = placings.holding(path)
     if any(r.get("panorama_at") for r in held.values()):  # each following its panorama
-        held = placings.holding(path, {p.id: (p.x, p.y, p.azimuth) for p in _spheres()})
+        now = placings.where(_spheres())
+        held = {i: placings.followed(r, now) for i, r in held.items()}
     places = {
         i: {k: r[k] for k in ("lon", "lat", "heading", "at", "flipped")} for i, r in held.items()
     }
@@ -2234,11 +2235,12 @@ def compare_parallax(answers: Path = PLACINGS) -> None:
     des paires avec profondeur, chacune refaite sans elle (part de la diagonale de la photo ;
     un recalage refusé compte comme le pire), et l'écart entre la place trouvée et le départ.
     Avec le modèle (les murs d'aujourd'hui, vus depuis les panoramas voisins)."""
-    rows = [r for r in placings.holding(answers).values() if r.get("pairs") and r["registration"]]
+    spheres, segments = _placing_world()
+    held = placings.holding(answers, placings.where(spheres))
+    rows = [r for r in held.values() if r.get("pairs") and r["registration"]]
     if not rows:
         typer.echo("aucune réponse par points avec ses paires")
         return
-    spheres, segments = _placing_world()
     with closing(db.connect(DB_PATH)) as conn:
         fixed = _fixed_by_colmap(panoramas.load(conn), register.load(FIXES))
     views = _views(kept=8)  # a panorama and its neighbours
@@ -2353,7 +2355,7 @@ def place_photos(
     @functools.lru_cache(maxsize=1)
     def carried_at(answered: tuple[float, int]) -> dict[str, dict]:  # made again on new answers
         return carrying.proposals(
-            placings.holding(answers),
+            placings.holding(answers, placings.where(spheres)),
             graph,
             lambda a, b: chain.kept_pairs(raw, (a, images[a]), (b, images[b])),
             lambda i: _features(store, i, extract=False) if i in photos else None,
