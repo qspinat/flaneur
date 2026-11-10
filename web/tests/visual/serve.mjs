@@ -28,4 +28,4 @@ createServer((req, res) => {
   res.writeHead(200, { 'Content-Type': types[ext] ?? 'application/octet-stream', ...(gzip ? { 'Content-Encoding': 'gzip' } : {}) });
   const stream = createReadStream(file);
   (gzip ? stream.pipe(createGzip()) : stream).pipe(res);
-}).listen(Number(process.argv[2] ?? 4174));
+}).listen(Number(process.argv[2] ?? 4174), '127.0.0.1'); // this machine only: not the local network

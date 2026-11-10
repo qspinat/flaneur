@@ -3,7 +3,7 @@
 // blocking the page (> 50 ms) in each phase, and what stepping fetches. Usage:
 //   node tests/visual/perf.mjs [base-url]
 import { chromium } from 'playwright';
-const base = process.argv[2] ?? 'http://localhost:4174/flaneur/';
+const base = process.argv[2] ?? 'http://127.0.0.1:4174/flaneur/';
 const browser = await chromium.launch();
 const ctx = await browser.newContext({ viewport: { width: 390, height: 844 }, deviceScaleFactor: 2.6, hasTouch: false, bypassCSP: true });
 const page = await ctx.newPage();
