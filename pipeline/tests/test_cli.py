@@ -160,6 +160,17 @@ def test_parallaxe_with_nothing_to_compare_says_so_before_loading_the_world(tmp_
     assert result.exit_code == 0 and "aucune réponse par points" in result.output
 
 
+def test_panoramas_used_by_more_photos_come_first(monkeypatch):
+    near = [
+        match.Panorama(n, x, 0.0, 0.0, 0.0, None)
+        for n, x in [("a", 0.0), ("b", 30.0), ("c", 500.0)]
+    ]
+    walk = [SimpleNamespace(place=(10.0, 0.0)), SimpleNamespace(place=(75.0, 0.0))]
+    monkeypatch.setattr(cli, "_place_of", lambda me: me.place)
+
+    assert cli._used_by_matching(walk, near) == ["b", "a"]  # b near both; c too far from both
+
+
 LEFT = [[-4.0, y, z] for y in np.arange(2.0, 40.0, 0.5) for z in (-1.0, 3.0, 8.0)]
 STREET = np.array(LEFT + [[4.0, y, z] for _, y, z in LEFT])  # two facades along y
 

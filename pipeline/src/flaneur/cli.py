@@ -2167,14 +2167,33 @@ def segment_panoramas(answers: Path = PLACINGS, page: int = 8772) -> None:
 LIDAR_MNS = DATA / "raw" / "lidar_mns"  # IGN's LiDAR HD surface model, patches around panoramas
 
 
+def _used_by_matching(walk: list[export.WalkPhoto], near_by: list[match.Panorama]) -> list[str]:
+    """The panoramas `match` compares the walk's photos with (MATCH_PANORAMAS of those within
+    MATCH_RADIUS_M of each), those of more photos first."""
+    used = Counter(
+        p.id
+        for me in walk
+        for p in _nearest(near_by, *_place_of(me), MATCH_RADIUS_M)[:MATCH_PANORAMAS]
+    )
+    return sorted(used, key=lambda i: (-used[i], i))
+
+
 @app.command("recaler")
 def set_panoramas_right(
     only: Annotated[list[str] | None, typer.Argument(help="préfixes de panoramas")] = None,
     again: Annotated[bool, typer.Option(help="rejuger ceux déjà jugés tels qu'ils sont")] = False,
+    photos: Annotated[
+        bool,
+        typer.Option(
+            "--photos", help="ceux que `match` compare aux photos, les plus employés d'abord"
+        ),
+    ] = False,
 ) -> None:
-    """Recale sur le plan les panoramas nommés (préfixes), sinon ceux dont les paires sont déjà
-    faites (sans en faire d'autres) : la forme entière de leurs détails de bâti cherchée sur les
-    façades de la BD TOPO, à toute rotation et tout décalage, comme le fait l'œil ; une correction
+    """Recale sur le plan les panoramas nommés (préfixes), ou (--photos) ceux que `match`
+    compare aux photos de la balade (leurs paires faites au besoin), sinon ceux dont les paires
+    sont déjà faites (sans en faire d'autres) : la forme entière de leurs détails de bâti
+    cherchée sur les façades de la BD TOPO, à toute rotation et tout décalage, comme le fait
+    l'œil ; une correction
     n'est gardée que si elle dépasse l'écart des deux relevés et que les contours du LiDAR HD de
     l'IGN la confirment (les détails à moins de 4 m d'eux, et pas plus loin qu'avant ; voir poses).
     Les panoramas sont pris tels que COLMAP les a laissés ; chaque verdict est gardé au fur et à
@@ -2189,6 +2208,11 @@ def set_panoramas_right(
         fixed = _fixed_by_colmap(panoramas.load(conn), register.load(FIXES))
     if only:
         homes = [p for p in spheres if any(p.id.startswith(o) for o in only)]
+    elif photos:
+        with closing(db.connect(DB_PATH)) as conn:
+            walk = export.photos(conn, DATA / "pilot", REVIEWS)
+        by_id = {p.id: p for p in spheres}
+        homes = [by_id[i] for i in _used_by_matching(walk, spheres)]
     else:  # those whose pairs are on disk (three or more)
         homes = _paired_homes(spheres, PAIR_MATCHES)
     views = functools.cache(lambda: _views(kept=8))  # the matcher, only if a pair must be made
@@ -2206,7 +2230,7 @@ def set_panoramas_right(
             if not all(masks.kept(p) for p in [home, *neighbours]):
                 typer.echo(f"{home.id[:8]} : un voisin pas segmenté, laissé (`flaneur segmenter`)")
                 continue
-            details = scenes.details(home, neighbours, made_only=not only)
+            details = scenes.details(home, neighbours, made_only=not (only or photos))
             origin = np.array([home.x, home.y, home.z])
             try:
                 found = poses.judge(
