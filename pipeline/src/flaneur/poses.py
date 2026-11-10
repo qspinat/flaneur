@@ -60,6 +60,18 @@ REACH_M = 30.0  # and this close to it
 MOST_DETAILS = 20000  # at most this many fitted (drawn at random: a fit's cost grows with them)
 PINNED = 0.1  # a shift's weaker direction this much of its stronger at least, else not pinned
 # (measured: a lone straight facade 0.01-0.07; a crossroads 0.2-0.7)
+# A fit starts where the details' whole shape best meets the walls, as the eye finds it (see
+# _searched): every turn and shift within these, on a grid this fine, details this near a wall
+# counted; kept only if no other answer (another peak of the counts, putting the details this
+# far from where the best does, of the RIVALS highest) counts nearly as many.
+SEARCH_TURN_DEG = 20.0
+SEARCH_STEP_DEG = 0.5
+SEARCH_SHIFT_M = 15.0  # LiDAR patches reach HALF_M: details (REACH_M) shifted this, still in
+SEARCH_CELL_M = 0.25
+ON_WALL_M = 0.75
+RIVAL_M = 3.0
+RIVALS = 50
+MARGIN = 1.1  # the best counts this many times another answer at least (set on 99, 10/11)
 
 
 class Correction(NamedTuple):
@@ -151,26 +163,38 @@ def clear_of(
 
 
 def fitted(
-    points: np.ndarray, origin: np.ndarray, distance: Callable[[np.ndarray], np.ndarray]
+    points: np.ndarray,
+    origin: np.ndarray,
+    distance: Callable[[np.ndarray], np.ndarray],
+    start: Correction | None = None,
 ) -> Correction | None:
     """The correction laying a panorama's details (plan points) on what `distance` measures
-    to; None with fewer than LEAST_DETAILS near it."""
-    found = _fit(points, origin, distance)
+    to, from where their whole shape best meets it (from `start` if given: a nudge from there);
+    None with fewer than LEAST_DETAILS near it, or two places it meets alike."""
+    found = _fit(points, origin, distance, start)
     return found[0] if found else None
 
 
 def _fit(
-    points: np.ndarray, origin: np.ndarray, distance: Callable[[np.ndarray], np.ndarray]
+    points: np.ndarray,
+    origin: np.ndarray,
+    distance: Callable[[np.ndarray], np.ndarray],
+    start: Correction | None = None,
 ) -> tuple[Correction, np.ndarray | None] | None:
     """fitted, and the plan direction (unit) its details do not pin a shift along, if one: the
     weaker of the shift's two over the stronger below PINNED (one facade's way; measured, a lone
-    straight facade 0.01-0.07, a crossroads 0.2-0.7)."""
-    near = points[distance(points) < NEAR_M]
+    straight facade 0.01-0.07, a crossroads 0.2-0.7). Along it the correction does not move."""
+    searched = _searched(points, origin, distance) if start is None else None
+    if start is None:
+        if searched is None:
+            return None
+        start = searched[0]
+    near = points[distance(moved(points, origin, start)) < NEAR_M]
     if len(near) < LEAST_DETAILS:
         return None
     found = least_squares(
         lambda v: distance(moved(near, origin, Correction(*v))),
-        np.zeros(3),
+        np.array(start, float),
         loss="soft_l1",
         f_scale=LOSS_M,
         diff_step=1e-3,
@@ -178,7 +202,82 @@ def _fit(
     shift = found.jac[:, :2].T @ found.jac[:, :2]
     strength, directions = np.linalg.eigh(shift)
     free = directions[:, 0] if strength[0] < PINNED * strength[1] else None
-    return Correction(*(float(v) for v in found.x)), free
+    if searched is not None and not _alone(points, origin, *searched[1:], free):
+        return None
+    correction = Correction(*(float(v) for v in found.x))
+    return (_pinned(correction, [free]) if free is not None else correction), free
+
+
+def _searched(
+    points: np.ndarray, origin: np.ndarray, distance: Callable[[np.ndarray], np.ndarray]
+) -> tuple[Correction, np.ndarray, np.ndarray, tuple[int, int, int]] | None:
+    """Where a panorama's details (plan points, those within REACH_M) best meet what `distance`
+    measures to, as the eye finds it: for every turn (SEARCH_TURN_DEG either way) and shift
+    (SEARCH_SHIFT_M), how many lie within ON_WALL_M of it, counted at once for all shifts by
+    correlating them with the walls (FFT); of answers counting alike, the least move. The best
+    as a correction, the turns, their counts (turn × north row × east column, the shift grid's
+    middle unmoved) and the best's index; None with no wall about."""
+    half = REACH_M + SEARCH_SHIFT_M
+    n = int(round(2 * half / SEARCH_CELL_M))
+    centres = (np.arange(n) + 0.5) * SEARCH_CELL_M - half
+    east, north = np.meshgrid(centres, -centres)  # rows north to south
+    grid = origin + np.column_stack([east.ravel(), north.ravel()])
+    walls = (distance(grid) < ON_WALL_M).reshape(n, n)
+    if not walls.any():
+        return None
+    near = points[np.linalg.norm(points - origin, axis=1) < REACH_M]
+    size = (2 * n, 2 * n)
+    on_walls = np.fft.rfft2(walls.astype(float), s=size)
+    k = int(round(SEARCH_SHIFT_M / SEARCH_CELL_M))
+    turns = np.arange(-SEARCH_TURN_DEG, SEARCH_TURN_DEG + 1e-9, SEARCH_STEP_DEG)
+    counts = np.empty((len(turns), 2 * k + 1, 2 * k + 1))
+    for t, turn in enumerate(turns):
+        q = moved(near, origin, Correction(0.0, 0.0, float(turn))) - origin
+        seen = np.zeros((n, n))
+        rows = np.floor((half - q[:, 1]) / SEARCH_CELL_M).astype(int)
+        np.add.at(seen, (rows, np.floor((q[:, 0] + half) / SEARCH_CELL_M).astype(int)), 1)
+        met = np.fft.irfft2(np.conj(np.fft.rfft2(seen, s=size)) * on_walls, s=size)
+        counts[t] = np.roll(met, (k, k), axis=(0, 1))[: 2 * k + 1, : 2 * k + 1]
+    offsets = (np.arange(2 * k + 1) - k) * SEARCH_CELL_M
+    moves = np.abs(turns)[:, None, None] + np.hypot(offsets[:, None], offsets[None, :])[None]
+    best = np.unravel_index(np.argmax(np.round(counts) - 1e-3 * moves), counts.shape)
+    t, row, column = (int(i) for i in best)
+    return (
+        Correction(float(offsets[column]), float(-offsets[row]), float(turns[t])),
+        turns,
+        counts,
+        (t, row, column),
+    )
+
+
+def _alone(
+    points: np.ndarray,
+    origin: np.ndarray,
+    turns: np.ndarray,
+    counts: np.ndarray,
+    best: tuple[int, int, int],
+    free: np.ndarray | None,
+) -> bool:
+    """Whether the best answer of _searched counts MARGIN times as many details on the walls as
+    any other: another peak of the counts that puts the details RIVAL_M from where the best does
+    (in median; along a `free` direction, where the walls cannot tell, not counted)."""
+    k = (counts.shape[1] - 1) // 2
+    steps = (np.arange(2 * k + 1) - k) * SEARCH_CELL_M
+    peaks = (counts == ndimage.maximum_filter(counts, size=(3, 5, 5))) & (counts > 0)
+    ranked = sorted(zip(*np.nonzero(peaks), strict=True), key=lambda i: -counts[i])[:RIVALS]
+    sample = points[:: max(1, len(points) // 2000)]
+
+    def where(i: tuple) -> np.ndarray:
+        return moved(sample, origin, Correction(steps[i[2]], -steps[i[1]], turns[i[0]]))
+
+    there = where(best)
+    for i in ranked:
+        apart = where(i) - there
+        if free is not None:
+            apart = apart - np.outer(apart @ free, free)
+        if np.median(np.linalg.norm(apart, axis=1)) >= RIVAL_M:
+            return counts[best] >= MARGIN * counts[i]
+    return True
 
 
 def agreed(
@@ -242,7 +341,7 @@ def judged(
             break
         c = to_lidar[0]
         shown = sees(moved(points, origin, c), origin + [c.east, c.north])
-        to_lidar = _fit(points[shown], origin, lidar)
+        to_lidar = _fit(points[shown], origin, lidar, start=c)
     to_bdtopo = _fit(points, origin, bdtopo)
     fits = [f[0] if f else None for f in (to_bdtopo, to_lidar)]
     free = [f[1] for f in (to_bdtopo, to_lidar) if f and f[1] is not None]

@@ -164,6 +164,56 @@ def test_along_a_lone_facade_the_shift_it_cannot_tell_is_left():
     assert abs(found.north) < 0.2 and abs(found.turn) < 0.3  # nothing to tell them: left
 
 
+def test_a_panorama_turned_and_shifted_far_off_is_found_as_the_eye_finds_it():
+    true = _details()
+    seen = poses.moved(true, ORIGIN, poses.Correction(-6.0, 5.0, -12.0))  # 12 degrees, 8 m off
+    survey = lambda p: poses.segment_distance(p, FACADES)  # noqa: E731
+
+    found = poses.fitted(seen, ORIGIN, survey)
+    nudged = poses.fitted(seen, ORIGIN, survey, start=poses.Correction(0.0, 0.0, 0.0))
+
+    back = poses.moved(seen, ORIGIN, found)
+    assert np.median(np.linalg.norm(back - true, axis=1)) < 0.1
+    pushed = poses.moved(seen, ORIGIN, nudged) if nudged else seen  # from where it stands: lost
+    assert np.median(np.linalg.norm(pushed - true, axis=1)) > 1.0
+
+
+def test_along_a_lone_facade_turned_off_the_turn_and_the_shift_across_are_found():
+    rng = np.random.default_rng(0)
+    facade = np.array([[[1005.0, 1970.0], [1005.0, 2030.0]]])  # one facade, along north
+    true = np.column_stack([np.full(2000, 1005.0), rng.uniform(1975, 2025, 2000)])
+    seen = poses.moved(true, ORIGIN, poses.Correction(-3.0, 0.0, 6.0))
+
+    found = poses.fitted(seen, ORIGIN, lambda p: poses.segment_distance(p, facade))
+
+    back = poses.moved(seen, ORIGIN, found)
+    assert np.median(np.abs(back[:, 0] - 1005.0)) < 0.1  # laid on the facade, turned straight
+    assert abs(found.north) < 0.2  # along it, nothing to tell: left
+    assert abs(np.degrees(np.arctan2(*np.ptp(back, axis=0)[::-1])) - 90.0) < 0.5
+
+
+def test_details_matching_two_places_alike_set_nothing():
+    corner = np.array([[[1004.0, 2004.0], [1004.0, 2016.0]], [[1004.0, 2004.0], [1016.0, 2004.0]]])
+    twins = np.concatenate([corner, corner + [-10.0, 0.0]])  # the same corner 10 m west
+    rng = np.random.default_rng(0)
+    k = rng.integers(2, size=2000)
+    t = rng.uniform(0, 1, 2000)[:, None]
+    seen = corner[k, 0] + t * (corner[k, 1] - corner[k, 0]) + [-5.0, 0.0]  # halfway: either one
+
+    assert poses.fitted(seen, ORIGIN, lambda p: poses.segment_distance(p, twins)) is None
+
+
+def test_a_panorama_both_surveys_place_far_off_alike_is_corrected():
+    true = _details()
+    seen = poses.moved(true, ORIGIN, poses.Correction(-6.0, 5.0, -12.0))  # beyond a nudge
+    survey = lambda p: poses.segment_distance(p, FACADES)  # noqa: E731
+
+    found = poses.judged(seen, ORIGIN, survey, survey)
+
+    back = poses.moved(seen, ORIGIN, found.correction)
+    assert np.median(np.linalg.norm(back - true, axis=1)) < 0.1
+
+
 def test_details_behind_something_raised_are_not_lidars_to_fit():
     heights = np.full((160, 160), 33.0)  # 0.5 m cells, x 960..1040, y 1960..2040
     heights[78:82, 100:104] = 45.0  # a tree crown 10-12 m east of the panorama, at its height
