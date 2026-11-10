@@ -771,21 +771,28 @@ def _placed_inputs(inputs: str, matcher: str | None) -> str:
 
 def _tried(kept: dict | None, inputs: str) -> list[str]:
     """The matchers a photo was tried with from these `inputs` (none: from others, or never;
-    before LoMa-G, only DISK was)."""
+    before LoMa-G, only DISK was). A placement found from other inputs is kept when a later
+    run finds nothing (its attempt beside it, `failed`)."""
     if not kept:
         return []
-    if "x" in kept:
-        matcher = kept.get("matcher")
-        current = kept["inputs"] == _placed_inputs(inputs, matcher)
-        return kept.get("tried", [matcher or DISK]) if current else []
-    return kept.get("tried", [DISK]) if kept.get("inputs") == inputs else []
+    if _placed_now(kept, inputs):
+        return kept.get("tried", [kept.get("matcher") or DISK])
+    attempt = kept.get("failed", {}) if "x" in kept else kept
+    return attempt.get("tried", [DISK]) if attempt.get("inputs") == inputs else []
+
+
+def _placed_now(kept: dict | None, inputs: str) -> bool:
+    """Whether a kept match is a placement found from these `inputs`."""
+    return (
+        bool(kept) and "x" in kept and kept["inputs"] == _placed_inputs(inputs, kept.get("matcher"))
+    )
 
 
 def _left_to_try(kept: dict | None, inputs: str, refused: bool = False) -> list[str]:
     """The matchers a photo is still to be tried with, in order: those it was not tried with,
     unless it is placed as it is now and the user did not turn that placement down."""
     tried = _tried(kept, inputs)
-    if tried and "x" in kept and not refused:
+    if _placed_now(kept, inputs) and not refused:
         return []
     return [m for m in MATCHERS if m not in tried]
 
@@ -1041,7 +1048,9 @@ def _match_with(matcher: str, photos: list[export.WalkPhoto], at: _Run) -> None:
         at.traces[me.id] = at.run[me.id] = {**_traced(trace), "place": list(here)}  # caption's
         at.tried[me.id] = [m for m in MATCHERS if m in at.tried[me.id] or m == matcher]
         if camera is None:  # kept, with what it was tried from: not tried again for nothing
-            at.found[me.id] = {"inputs": inputs, "tried": at.tried[me.id]}
+            attempt = {"inputs": inputs, "tried": at.tried[me.id]}
+            before = at.found.get(me.id) or {}
+            at.found[me.id] = {**before, "failed": attempt} if "x" in before else attempt
             typer.echo(f"{me.id} : rien de sûr ({MATCHERS[matcher].label})")
         else:
             moved = float(np.hypot(camera.x - here[0], camera.y - here[1]))
