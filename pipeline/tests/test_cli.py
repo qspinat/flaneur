@@ -149,6 +149,17 @@ def test_homes_with_pairs_are_counted_under_their_own_names(tmp_path):
     assert cli._paired_homes([a, b], tmp_path) == [a]
 
 
+def test_parallaxe_with_nothing_to_compare_says_so_before_loading_the_world(tmp_path, monkeypatch):
+    def world(**_):
+        raise AssertionError("the world loaded for nothing")
+
+    monkeypatch.setattr(cli, "_placing_world", world)
+
+    result = CliRunner().invoke(app, ["parallaxe", "--answers", str(tmp_path / "none.jsonl")])
+
+    assert result.exit_code == 0 and "aucune réponse par points" in result.output
+
+
 LEFT = [[-4.0, y, z] for y in np.arange(2.0, 40.0, 0.5) for z in (-1.0, 3.0, 8.0)]
 STREET = np.array(LEFT + [[4.0, y, z] for _, y, z in LEFT])  # two facades along y
 

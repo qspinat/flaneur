@@ -205,15 +205,23 @@ def import_placements() -> None:
             )
 
 
+def _standing_now(corrected: bool = True) -> dict[str, tuple[float, float, float]]:
+    """Where the panoramas stand (see placings.where), from their poses alone (no picture, no
+    tilt needed): answers follow them."""
+    with closing(db.connect(DB_PATH)) as conn:
+        placed = _placed(panoramas.load(conn), corrected)
+    return {p.id: poses.at(p.point.x, p.point.y, p.azimuth or 0.0) for p in placed}
+
+
 def _placing_answers(
-    path: Path = PLACINGS,
+    path: Path = PLACINGS, corrected: bool = True
 ) -> tuple[dict[str, dict], dict[str, dict], set[str]]:
     """From the placing page's answers: where each photo answered stands (lon, lat, heading),
     the answers placing a photo in its panorama (on the image it had then), and the photos no
     panorama sees."""
     held = placings.holding(path)
     if any(r.get("panorama_at") for r in held.values()):  # each following its panorama
-        now = placings.where(_spheres())
+        now = _standing_now(corrected)
         held = {i: placings.followed(r, now) for i, r in held.items()}
     places = {
         i: {k: r[k] for k in ("lon", "lat", "heading", "at", "flipped")} for i, r in held.items()
@@ -2117,7 +2125,8 @@ def _paired_homes(spheres: list[match.Panorama], folder: Path) -> list[match.Pan
 def _within(answers: Path, reach: float, corrected: bool = True) -> list[match.Panorama]:
     """The panoramas within `reach` of a photo of the walk, the nearest to one first."""
     with closing(db.connect(DB_PATH)) as conn:
-        spots = np.array([_place_of(me) for me in _walk(conn, _placing_answers(answers)[0])])
+        places = _placing_answers(answers, corrected)[0]
+        spots = np.array([_place_of(me) for me in _walk(conn, places)])
     if not len(spots):
         return []
     spheres = _spheres(corrected)
@@ -2216,7 +2225,7 @@ def set_panoramas_right(
             said = f"corrigé {found.correction}" if found.correction else "laissé"
             how = "COLMAP" if home.id in fixed else "emprunté"
             typer.echo(f"{home.id[:8]} ({how}) : {said} — BD TOPO {found.bdtopo}")
-    where = {p.id: poses.at(p.x, p.y, p.azimuth) for p in spheres}
+    where = placings.where(spheres)
     standing = poses.to_apply(verdicts, where, "all")  # judged where COLMAP still puts them
     typer.echo(f"{len(standing)} panorama(s) corrigé(s) sur {len(verdicts)} jugés")
     applied = len(poses.to_apply(verdicts, where, poses.APPLIED))
@@ -2235,12 +2244,12 @@ def compare_parallax(answers: Path = PLACINGS) -> None:
     des paires avec profondeur, chacune refaite sans elle (part de la diagonale de la photo ;
     un recalage refusé compte comme le pire), et l'écart entre la place trouvée et le départ.
     Avec le modèle (les murs d'aujourd'hui, vus depuis les panoramas voisins)."""
+    if not any(r.get("pairs") and r["registration"] for r in placings.holding(answers).values()):
+        typer.echo("aucune réponse par points avec ses paires")
+        return
     spheres, segments = _placing_world()
     held = placings.holding(answers, placings.where(spheres))
     rows = [r for r in held.values() if r.get("pairs") and r["registration"]]
-    if not rows:
-        typer.echo("aucune réponse par points avec ses paires")
-        return
     with closing(db.connect(DB_PATH)) as conn:
         fixed = _fixed_by_colmap(panoramas.load(conn), register.load(FIXES))
     views = _views(kept=8)  # a panorama and its neighbours

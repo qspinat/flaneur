@@ -466,3 +466,21 @@ def test_an_answer_whose_panorama_stands_as_it_did_or_unknown_is_left():
         == SPOT["lon"]
     )
     assert placings.followed(row, {}) == row
+
+
+def test_where_a_parallax_fit_started_and_the_views_turn_follow_too():
+    x, y = _panorama_south_of_the_spot(10.0)
+    row = {
+        **SPOT,
+        "registration": placings.to_json(R),  # its view facing 40°
+        "panorama_at": [x, y, 0.0],
+        "pairs": {"view": {"heading": 40.0, "pitch": 5.0, "fov": 75.0}},
+        "standing": {"start": {"lon": SPOT["lon"], "lat": SPOT["lat"]}},
+    }
+
+    moved = placings.followed(row, {"p1": (x, y, 90.0)})
+
+    start = to_metres(Point(moved["standing"]["start"]["lon"], moved["standing"]["start"]["lat"]))
+    assert (start.x, start.y) == pytest.approx((x + 10.0, y), abs=0.01)
+    assert placings.registration_of(moved).view.heading == pytest.approx(130.0)
+    assert moved["pairs"]["view"]["heading"] == pytest.approx(130.0)

@@ -134,9 +134,11 @@ def where(spheres: Iterable[Any]) -> dict[str, tuple[float, float, float]]:
 
 def followed(row: dict, now: dict[str, tuple[float, float, float]]) -> dict:
     """An answer as it stands now that its panorama stands `now` (see where): its place and
-    heading on the plan, and its camera kept in parallax, moved and turned as its panorama was
-    since the answer, about it (its registration, in the panorama's own picture, holds). Left
-    as it is without where its panorama stood then, or its panorama unknown."""
+    heading on the plan, where a parallax fit started and its camera, moved and turned as its
+    panorama was since the answer, about it; the compass headings of its views turned too (the
+    views cut from a picture are fixed to the compass). Its registration, in the panorama's own
+    picture, holds. Left as it is without where its panorama stood then, or its panorama
+    unknown."""
     if not row.get("panorama_at") or not row.get("registration"):
         return row
     panorama = registration_of(row).panorama
@@ -148,24 +150,39 @@ def followed(row: dict, now: dict[str, tuple[float, float, float]]) -> dict:
     def about(x: float, y: float) -> tuple[float, float]:
         return tuple(poses.moved(np.array([[x, y]]), np.array([x0, y0]), change)[0])
 
-    spot = to_metres(Point(row["lon"], row["lat"]))
-    there = to_degrees(Point(*about(spot.x, spot.y)))
-    heading = None if row.get("heading") is None else (row["heading"] + a1 - a0) % 360
-    out = {**row, "lon": there.x, "lat": there.y, "heading": heading, "panorama_at": [x1, y1, a1]}
+    def placed(place: dict) -> dict:  # a place on the plan (lon, lat, heading if any)
+        spot = to_metres(Point(place["lon"], place["lat"]))
+        there = to_degrees(Point(*about(spot.x, spot.y)))
+        return {**place, "lon": there.x, "lat": there.y, **facing(place)}
+
+    def facing(view: dict) -> dict:  # a compass heading turns with the panorama
+        heading = view.get("heading")
+        return {} if heading is None else {"heading": (heading + a1 - a0) % 360}
+
+    out = {**placed(row), "panorama_at": [x1, y1, a1]}
+    reg = row["registration"]
+    out["registration"] = {**reg, "view": {**reg["view"], **facing(reg["view"])}}
+    if (row.get("pairs") or {}).get("view"):
+        out["pairs"] = {
+            **row["pairs"],
+            "view": {**row["pairs"]["view"], **facing(row["pairs"]["view"])},
+        }
     if row.get("standing"):
-        camera = row["standing"]["camera"]
-        turn = (
-            Rotation.from_rotvec(camera["turn"])
-            * Rotation.from_euler("z", change.turn, degrees=True).inv()
-        )
-        out["standing"] = {
-            **row["standing"],
-            "camera": {
+        standing = dict(row["standing"])
+        if standing.get("start"):
+            standing["start"] = placed(standing["start"])
+        if standing.get("camera"):
+            camera = standing["camera"]
+            turn = (
+                Rotation.from_rotvec(camera["turn"])
+                * Rotation.from_euler("z", change.turn, degrees=True).inv()
+            )
+            standing["camera"] = {
                 **camera,
                 "position": [*about(*camera["position"][:2]), camera["position"][2]],
                 "turn": [float(v) for v in turn.as_rotvec()],
-            },
-        }
+            }
+        out["standing"] = standing
     return out
 
 
