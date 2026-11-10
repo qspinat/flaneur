@@ -165,10 +165,17 @@ def test_panoramas_used_by_more_photos_come_first(monkeypatch):
         match.Panorama(n, x, 0.0, 0.0, 0.0, None)
         for n, x in [("a", 0.0), ("b", 30.0), ("c", 500.0)]
     ]
-    walk = [SimpleNamespace(place=(10.0, 0.0)), SimpleNamespace(place=(75.0, 0.0))]
+    walk = [
+        SimpleNamespace(id="pm:1", place=(10.0, 0.0)),
+        SimpleNamespace(id="pm:2", place=(75.0, 0.0)),
+        SimpleNamespace(id="pm:3", place=(500.0, 0.0)),  # not exported: match leaves it
+    ]
     monkeypatch.setattr(cli, "_place_of", lambda me: me.place)
+    monkeypatch.setattr(cli, "_exported", lambda i: SimpleNamespace(exists=lambda: i != "pm:3"))
 
-    assert cli._used_by_matching(walk, near) == ["b", "a"]  # b near both; c too far from both
+    used = cli._used_by_matching(walk, near)
+
+    assert [p.id for p in used] == ["b", "a"]  # b near both; c near none that match works on
 
 
 LEFT = [[-4.0, y, z] for y in np.arange(2.0, 40.0, 0.5) for z in (-1.0, 3.0, 8.0)]

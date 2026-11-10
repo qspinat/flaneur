@@ -1056,7 +1056,7 @@ def _match_with(matcher: str, photos: list[export.WalkPhoto], at: _Run) -> None:
     for me in photos:
         inputs = _inputs(me.id, at.setup)
         here = _place_of(me)
-        near = _nearest(at.near_by, *here, MATCH_RADIUS_M)[:MATCH_PANORAMAS]
+        near = _compared_with(at.near_by, me)
         image = cv2.imread(str(_exported(me.id)))
         now = at.then(_then_year(me))
         where = _where(me, at.heights, now)
@@ -1124,12 +1124,11 @@ def match_photos(
     if not checked:
         raise typer.BadParameter("aucun apparieur contrôlé : lancer `flaneur match-check` d'abord")
     with closing(db.connect(DB_PATH)) as conn:
-        # searched around the caption's place (or the review's), never a previous match's
         walk = export.photos(conn, DATA / "pilot", REVIEWS)
     heights, near_by, then = _matching()
     blocks = then(date.today().year).blocks
     found, refused = _matches(), _refused()
-    chosen = [me for me in walk if _exported(me.id).exists() and (not photo or me.id in photo)]
+    chosen = [me for me in _to_match(walk) if not photo or me.id in photo]
     tried, to_try = {}, {}  # the matchers each photo was tried with, and is to be
     for me in chosen:
         kept, inputs = found.get(me.id), _inputs(me.id, setup)
@@ -2167,15 +2166,25 @@ def segment_panoramas(answers: Path = PLACINGS, page: int = 8772) -> None:
 LIDAR_MNS = DATA / "raw" / "lidar_mns"  # IGN's LiDAR HD surface model, patches around panoramas
 
 
-def _used_by_matching(walk: list[export.WalkPhoto], near_by: list[match.Panorama]) -> list[str]:
-    """The panoramas `match` compares the walk's photos with (MATCH_PANORAMAS of those within
-    MATCH_RADIUS_M of each), those of more photos first."""
-    used = Counter(
-        p.id
-        for me in walk
-        for p in _nearest(near_by, *_place_of(me), MATCH_RADIUS_M)[:MATCH_PANORAMAS]
-    )
-    return sorted(used, key=lambda i: (-used[i], i))
+def _to_match(walk: list[export.WalkPhoto]) -> list[export.WalkPhoto]:
+    """The walk's photos `match` works on: those exported (searched around the caption's place,
+    or the review's, never a previous match's)."""
+    return [me for me in walk if _exported(me.id).exists()]
+
+
+def _compared_with(near_by: list[match.Panorama], me: export.WalkPhoto) -> list[match.Panorama]:
+    """The panoramas `match` compares a photo with: MATCH_PANORAMAS of those within
+    MATCH_RADIUS_M of its place, nearest first."""
+    return _nearest(near_by, *_place_of(me), MATCH_RADIUS_M)[:MATCH_PANORAMAS]
+
+
+def _used_by_matching(
+    walk: list[export.WalkPhoto], near_by: list[match.Panorama]
+) -> list[match.Panorama]:
+    """The panoramas `match` compares the walk's photos with (see _to_match, _compared_with),
+    those of more photos first."""
+    used = Counter(p for me in _to_match(walk) for p in _compared_with(near_by, me))
+    return sorted(used, key=lambda p: (-used[p], p.id))
 
 
 @app.command("recaler")
@@ -2183,10 +2192,7 @@ def set_panoramas_right(
     only: Annotated[list[str] | None, typer.Argument(help="préfixes de panoramas")] = None,
     again: Annotated[bool, typer.Option(help="rejuger ceux déjà jugés tels qu'ils sont")] = False,
     photos: Annotated[
-        bool,
-        typer.Option(
-            "--photos", help="ceux que `match` compare aux photos, les plus employés d'abord"
-        ),
+        bool, typer.Option(help="ceux que `match` compare aux photos, les plus employés d'abord")
     ] = False,
 ) -> None:
     """Recale sur le plan les panoramas nommés (préfixes), ou (--photos) ceux que `match`
@@ -2206,15 +2212,14 @@ def set_panoramas_right(
     spheres, segments = _placing_world(corrected=False)  # as COLMAP left them
     with closing(db.connect(DB_PATH)) as conn:
         fixed = _fixed_by_colmap(panoramas.load(conn), register.load(FIXES))
+        walk = export.photos(conn, DATA / "pilot", REVIEWS) if photos and not only else []
+    made_only = False  # their pairs made as needed, unless taken for having them on disk
     if only:
         homes = [p for p in spheres if any(p.id.startswith(o) for o in only)]
     elif photos:
-        with closing(db.connect(DB_PATH)) as conn:
-            walk = export.photos(conn, DATA / "pilot", REVIEWS)
-        by_id = {p.id: p for p in spheres}
-        homes = [by_id[i] for i in _used_by_matching(walk, spheres)]
+        homes = _used_by_matching(walk, spheres)
     else:  # those whose pairs are on disk (three or more)
-        homes = _paired_homes(spheres, PAIR_MATCHES)
+        homes, made_only = _paired_homes(spheres, PAIR_MATCHES), True
     views = functools.cache(lambda: _views(kept=8))  # the matcher, only if a pair must be made
     scenes = _Scenes(
         spheres, fixed, views, threading.Lock(), segments, WALLS, seen=_seeing(make=False)
@@ -2230,7 +2235,7 @@ def set_panoramas_right(
             if not all(masks.kept(p) for p in [home, *neighbours]):
                 typer.echo(f"{home.id[:8]} : un voisin pas segmenté, laissé (`flaneur segmenter`)")
                 continue
-            details = scenes.details(home, neighbours, made_only=not (only or photos))
+            details = scenes.details(home, neighbours, made_only=made_only)
             origin = np.array([home.x, home.y, home.z])
             try:
                 found = poses.judge(
