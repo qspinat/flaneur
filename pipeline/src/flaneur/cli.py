@@ -2174,9 +2174,7 @@ def set_panoramas_right(
             poses.save(POSES, verdicts)
             said = f"corrigé {found.correction}" if found.correction else "laissé"
             how = "COLMAP" if home.id in fixed else "emprunté"
-            typer.echo(
-                f"{home.id[:8]} ({how}) : {said} — BD TOPO {found.bdtopo}, LiDAR {found.lidar}"
-            )
+            typer.echo(f"{home.id[:8]} ({how}) : {said} — BD TOPO {found.bdtopo}")
     moved = poses.corrections(verdicts)
     typer.echo(f"{len(moved)} panorama(s) corrigé(s) sur {len(verdicts)} jugés")
     typer.echo("mesurées, pas encore appliquées : le cadre de la carte (voir poses)")

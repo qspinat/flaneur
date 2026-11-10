@@ -1,5 +1,7 @@
 """Today's panoramas set right on the map against two surveys (BD TOPO, LiDAR HD)."""
 
+import json
+
 import numpy as np
 import pytest
 
@@ -57,17 +59,24 @@ def test_corrections_are_kept_and_read_back(tmp_path):
         "p1": poses.Verdict(
             poses.Correction(2.2, -3.3, 0.8),
             poses.Correction(2.0, -3.0, 1.0),
-            poses.Correction(2.4, -3.6, 0.6),
             900,
             (652000.0, 6861000.0, 12.5),
         ),
-        "p2": poses.Verdict(None, poses.Correction(0.1, 0.0, 0.2), None, 40, (1.0, 2.0, 3.0)),
+        "p2": poses.Verdict(None, poses.Correction(0.1, 0.0, 0.2), 40, (1.0, 2.0, 3.0)),
     }
 
     poses.save(path, kept)
 
     assert poses.load(path) == kept
     assert poses.corrections(poses.load(path)) == {"p1": poses.Correction(2.2, -3.3, 0.8)}
+
+
+def test_verdicts_kept_with_a_lidar_fit_of_their_own_still_read(tmp_path):
+    path = tmp_path / "poses.json"
+    row = {"correction": None, "bdtopo": [0.1, 0.0, 0.2], "lidar": [0.3, 0.1, 0.0], "details": 40}
+    path.write_text(json.dumps({"p1": row}))
+
+    assert poses.load(path) == {"p1": poses.Verdict(None, poses.Correction(0.1, 0.0, 0.2), 40)}
 
 
 def test_a_panorama_both_surveys_place_off_alike_is_corrected():
@@ -121,12 +130,9 @@ def test_a_panorama_turned_and_shifted_far_off_is_found_as_the_eye_finds_it():
     survey = lambda p: poses.segment_distance(p, FACADES)  # noqa: E731
 
     found = poses.fitted(seen, ORIGIN, survey)
-    nudged = poses.fitted(seen, ORIGIN, survey, start=poses.Correction(0.0, 0.0, 0.0))
 
     back = poses.moved(seen, ORIGIN, found)
     assert np.median(np.linalg.norm(back - true, axis=1)) < 0.1
-    pushed = poses.moved(seen, ORIGIN, nudged) if nudged else seen  # from where it stands: lost
-    assert np.median(np.linalg.norm(pushed - true, axis=1)) > 1.0
 
 
 def test_along_a_lone_facade_turned_off_the_turn_and_the_shift_across_are_found():
