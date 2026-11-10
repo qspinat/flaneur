@@ -205,13 +205,28 @@ def import_placements() -> None:
             )
 
 
+def _standing_now(corrected: bool = True) -> dict[str, tuple[float, float, float]]:
+    """Where the panoramas stand (see placings.where), from their poses alone (no picture, no
+    tilt needed): answers follow them."""
+    with closing(db.connect(DB_PATH)) as conn:
+        return _standing(_placed(panoramas.load(conn), corrected))
+
+
+def _standing(pictures: list[Picture]) -> dict[str, tuple[float, float, float]]:
+    """Where these panoramas stand (see placings.where), by id."""
+    return {p.id: poses.at(p.point.x, p.point.y, p.azimuth or 0.0) for p in pictures}
+
+
 def _placing_answers(
-    path: Path = PLACINGS,
+    path: Path = PLACINGS, corrected: bool = True
 ) -> tuple[dict[str, dict], dict[str, dict], set[str]]:
     """From the placing page's answers: where each photo answered stands (lon, lat, heading),
     the answers placing a photo in its panorama (on the image it had then), and the photos no
     panorama sees."""
     held = placings.holding(path)
+    if any(r.get("panorama_at") for r in held.values()):  # each following its panorama
+        now = _standing_now(corrected)
+        held = {i: placings.followed(r, now) for i, r in held.items()}
     places = {
         i: {k: r[k] for k in ("lon", "lat", "heading", "at", "flipped")} for i, r in held.items()
     }
@@ -231,11 +246,19 @@ def _on_image_now(placed: dict[str, dict]) -> dict[str, dict]:
     return {i: r for i, r in placed.items() if _exported(i).exists() and r["inputs"] == _image(i)}
 
 
-def _carried(placed: dict[str, dict]) -> dict[str, dict]:
+def _carried(placed: dict[str, dict], now: dict[str, tuple]) -> dict[str, dict]:
     """The copies carried to the neighbouring panoramas (`flaneur porter`) still made from
-    the answer that holds (`placed`)."""
+    the answer that holds (`placed`), with every panorama it was carried from or tried on
+    standing where it did (`now`: see placings.where, poses.stands)."""
     kept = json.loads(CARRIED.read_text()) if CARRIED.exists() else {}
-    return {i: c for i, c in kept.items() if i in placed and c["made"] == _answered_as(placed[i])}
+    return {
+        i: c
+        for i, c in kept.items()
+        if i in placed
+        and c["made"] == _answered_as(placed[i])
+        and "at" in c
+        and all(poses.stands(at, now.get(p)) for p, at in c["at"].items())
+    }
 
 
 @app.command("export")
@@ -331,34 +354,43 @@ def _panoramas(pictures: list[Picture], heights: scene.CameraHeights) -> list[ma
     ]
 
 
-def _lined_up(pictures: list[Picture]) -> list[Picture]:
+def _lined_up(pictures: list[Picture], corrected: bool = True) -> list[Picture]:
     """The panoramas where they were taken, and levelled (see _levelled), when their tilts
     were measured as tilts are now."""
     if not level.current(TILTS):
         raise typer.BadParameter(
             "les inclinaisons des panoramas ont été mesurées autrement : lancer `flaneur level`"
         )
-    return _levelled(pictures)
+    return _levelled(pictures, corrected)
 
 
-def _levelled(pictures: list[Picture]) -> list[Picture]:
+def _levelled(pictures: list[Picture], corrected: bool = True) -> list[Picture]:
     """The panoramas where they were taken (see _placed), and levelled: those not measured
     leaning as their run's neighbours, else taken as level (see level.borrowed)."""
-    placed = _placed(pictures)
+    placed = _placed(pictures, corrected)
     tilts = level.borrowed(level.kept(TILTS), placed)
     return [
         replace(p, roll=tilt[0], pitch=tilt[1]) if (tilt := tilts.get(p.id)) else p for p in placed
     ]
 
 
-def _placed(pictures: list[Picture]) -> list[Picture]:
+def _placed(pictures: list[Picture], corrected: bool = True) -> list[Picture]:
     """The panoramas where they were taken: placed with each other (reconstruct), else moved
     as their run's nearest panoramas so placed (reconstruct.borrowed), else as recorded (not
-    by their own roofs and corners: see register; nor yet by what `flaneur recaler` finds, see
-    poses)."""
+    by their own roofs and corners: see register); then, `corrected`, set right on the map as
+    `flaneur recaler` found (poses.APPLIED of it) — which judges them as COLMAP left them. A
+    panorama turned so has caches of its own (_levelled_name: its views are other pixels): the
+    corrected world and recaler's each make theirs (masks, pairs) when asked."""
     fixes = register.load(FIXES)
     found = {i: tuple(fixes[i]["fix"]) for i in _fixed_by_colmap(pictures, fixes)}
-    return register.applied(pictures, reconstruct.borrowed(found, pictures))
+    placed = register.applied(pictures, reconstruct.borrowed(found, pictures))
+    if not corrected or poses.APPLIED == "none":
+        return placed
+    verdicts = poses.load(POSES)
+    where = {
+        p.id: poses.at(p.point.x, p.point.y, p.azimuth or 0.0) for p in placed if p.id in verdicts
+    }
+    return register.applied(placed, poses.to_apply(verdicts, where, poses.APPLIED))
 
 
 class _NotRead(Exception):
@@ -396,6 +428,7 @@ class _Scenes:
         seen: Callable[[match.Panorama, np.ndarray], np.ndarray] | None = None,
     ):
         self.by_id = {p.id: p for p in spheres}
+        self.now = placings.where(spheres)  # drawn walls follow their panorama
         self.spheres, self.fixed, self.views, self.lock = spheres, fixed, views, lock
         self.segments, self.walls_path, self.matches = segments, walls_path, matches
         self.seen = seen
@@ -500,7 +533,7 @@ class _Scenes:
             lambda: self._fit(home, chosen, [found[i] for i in neighbours], neighbours),
             self.fitting,
         )
-        drawn = facades.saved_near(self.walls_path, home.x, home.y)
+        drawn = facades.saved_near(self.walls_path, home.x, home.y, now=self.now)
         walls = facades.with_drawn(list(fitted.walls), *drawn, fitted.ground)
         return replace(fitted, walls=tuple(walls))
 
@@ -595,13 +628,15 @@ def _street_facades(features: list[dict]) -> Callable[[float, float], list[facad
     ]
 
 
-def _placing_world() -> tuple[list[match.Panorama], Callable[[float, float], list]]:
+def _placing_world(
+    corrected: bool = True,
+) -> tuple[list[match.Panorama], Callable[[float, float], list]]:
     """The panoramas where they were taken, levelled, at their camera's height over the street
     (parallax needs it on a slope), and BD TOPO's street facades near a spot."""
     with closing(db.connect(DB_PATH)) as conn:
         area = placements.area(conn, buildings.MARGIN_M)
         features = _buildings(area)
-        pictures = _lined_up(panoramas.load(conn))
+        pictures = _lined_up(panoramas.load(conn), corrected)
     return _panoramas(pictures, _heights(features, area)), _street_facades(features)
 
 
@@ -945,6 +980,20 @@ def _found_by(kept: dict) -> dict:
     return found
 
 
+def _to_match(walk: list[export.WalkPhoto]) -> list[export.WalkPhoto]:
+    """The walk's photos `match` works on: those exported."""
+    return [me for me in walk if _exported(me.id).exists()]
+
+
+def _compared_with(
+    near_by: list[match.Panorama], here: tuple[float, float]
+) -> list[match.Panorama]:
+    """The panoramas `match` compares a photo with: MATCH_PANORAMAS of those within
+    MATCH_RADIUS_M of its place (`here`: the caption's, or the review's, never a previous
+    match's: see _place_of), nearest first."""
+    return _nearest(near_by, *here, MATCH_RADIUS_M)[:MATCH_PANORAMAS]
+
+
 def _nearest(
     near_by: list[match.Panorama], x: float, y: float, radius: float = np.inf, but: str = ""
 ) -> list[match.Panorama]:
@@ -1034,7 +1083,7 @@ def _match_with(matcher: str, photos: list[export.WalkPhoto], at: _Run) -> None:
     for me in photos:
         inputs = _inputs(me.id, at.setup)
         here = _place_of(me)
-        near = _nearest(at.near_by, *here, MATCH_RADIUS_M)[:MATCH_PANORAMAS]
+        near = _compared_with(at.near_by, here)
         image = cv2.imread(str(_exported(me.id)))
         now = at.then(_then_year(me))
         where = _where(me, at.heights, now)
@@ -1102,12 +1151,11 @@ def match_photos(
     if not checked:
         raise typer.BadParameter("aucun apparieur contrôlé : lancer `flaneur match-check` d'abord")
     with closing(db.connect(DB_PATH)) as conn:
-        # searched around the caption's place (or the review's), never a previous match's
         walk = export.photos(conn, DATA / "pilot", REVIEWS)
     heights, near_by, then = _matching()
     blocks = then(date.today().year).blocks
     found, refused = _matches(), _refused()
-    chosen = [me for me in walk if _exported(me.id).exists() and (not photo or me.id in photo)]
+    chosen = [me for me in _to_match(walk) if not photo or me.id in photo]
     tried, to_try = {}, {}  # the matchers each photo was tried with, and is to be
     for me in chosen:
         kept, inputs = found.get(me.id), _inputs(me.id, setup)
@@ -1846,10 +1894,10 @@ PROPOSALS = DATA / "pilot" / "proposals_3d.json"  # each photo proposed in its n
 PROPOSING_M = placing.NEAR_M  # a panorama farther from the photo's place is not tried
 
 
-def _spheres() -> list[match.Panorama]:
+def _spheres(corrected: bool = True) -> list[match.Panorama]:
     """The panoramas where they were taken, levelled, for cutting views (no height needed)."""
     with closing(db.connect(DB_PATH)) as conn:
-        pictures = _lined_up(panoramas.load(conn))
+        pictures = _lined_up(panoramas.load(conn), corrected)
     return _panoramas(pictures, lambda x, y: 0.0)
 
 
@@ -1888,6 +1936,7 @@ def propose_in_panoramas(sheets: int = 20) -> None:
                 "inputs": _image(me.id),  # the image it was proposed on
                 "metres": round(float(np.hypot(home.x - here.x, home.y - here.y)), 1),
                 "registration": proposal and registration.to_json(proposal),
+                "at": list(poses.at(home.x, home.y, home.azimuth)),  # stale once it moves
             }
             if proposal and sheets > 0:
                 sheets -= 1
@@ -1927,6 +1976,17 @@ def _features(store: chain.Store, photo_id: str, extract: bool = True) -> match.
     path = _exported(photo_id)
     read = (lambda: match.shrunk(cv2.imread(str(path)))) if extract else None
     return store.features(photo_id, _image(photo_id), read)
+
+
+def _still_proposed(
+    known: dict, photo_id: str, panorama: str, stands: tuple[float, float, float] | None
+) -> bool:
+    """Whether a proposal made by `flaneur proposer` holds: on this panorama and the photo's
+    image now, the panorama standing where it was made (`stands`: see placings.where,
+    poses.stands)."""
+    if (known.get("panorama"), known.get("inputs")) != (panorama, _image(photo_id)):
+        return False
+    return poses.stands(known.get("at"), stands)
 
 
 def _answered_as(row: dict) -> str:
@@ -1988,7 +2048,8 @@ def carry_placed() -> None:
     (data/pilot/carried.json) ; seules les photos répondues depuis la dernière fois sont
     refaites."""
     held = _on_image_now(_placing_answers()[1])  # those placed on another image: not exported
-    carried = _carried(held)
+    now = _standing_now()  # poses alone: nothing redone, no tilt needed
+    carried = _carried(held, now)
     todo = [i for i in held if i not in carried]
     if todo:
         with closing(db.connect(DB_PATH)) as conn:
@@ -1999,8 +2060,13 @@ def carry_placed() -> None:
         for photo_id in todo:
             r = placings.registration_of(held[photo_id])
             home = spheres.get(r.panorama)
-            copies = [] if home is None else _to_neighbours(r, home, spheres, street, views)
-            carried[photo_id] = {"made": _answered_as(held[photo_id]), "copies": copies}
+            tried: set[str] = set()  # those carried to, or tried and not
+            copies = [] if home is None else _to_neighbours(r, home, spheres, street, views, tried)
+            carried[photo_id] = {
+                "made": _answered_as(held[photo_id]),
+                "copies": copies,
+                "at": {p: now.get(p) and list(now[p]) for p in {r.panorama, *tried}},
+            }
             write_json(CARRIED, carried)  # kept photo after photo: a stop loses one at most
     write_json(CARRIED, carried)
     counts = [len(c["copies"]) for c in carried.values()]
@@ -2029,6 +2095,7 @@ def _to_neighbours(
     spheres: dict[str, match.Panorama],
     street: dict[str, list[tuple[str, float, float]]],
     views: match.Views,
+    tried: set[str] | None = None,
 ) -> list[dict]:
     """A photo placed on `home`, carried outward along the street to the panoramas that see
     the same details (the home view's under the photo, matched in their views around its
@@ -2053,6 +2120,8 @@ def _to_neighbours(
     left, nearest, right = proposing.around(home_view.heading)  # the nearest tried first
 
     def carry(panorama: str) -> registration.Registration | None:
+        if tried is not None:
+            tried.add(panorama)
         sphere = spheres[panorama]
         theirs = views.of(sphere)
         for m in (nearest, left, right) if theirs else ():
@@ -2093,13 +2162,21 @@ def _page_closed(page: int) -> None:
             raise typer.Exit(1)
 
 
-def _within(answers: Path, reach: float) -> list[match.Panorama]:
+def _paired_homes(spheres: list[match.Panorama], folder: Path) -> list[match.Panorama]:
+    """The panoramas with three pairs or more kept in `folder` under their name as they stand
+    (see _levelled_name: a panorama turned since has others), by id."""
+    made = Counter(f.name.split("__")[0] for f in folder.glob("*.npz"))
+    return sorted((p for p in spheres if made[_levelled_name(p)] >= 3), key=lambda p: p.id)
+
+
+def _within(answers: Path, reach: float, corrected: bool = True) -> list[match.Panorama]:
     """The panoramas within `reach` of a photo of the walk, the nearest to one first."""
     with closing(db.connect(DB_PATH)) as conn:
-        spots = np.array([_place_of(me) for me in _walk(conn, _placing_answers(answers)[0])])
+        places = _placing_answers(answers, corrected)[0]
+        spots = np.array([_place_of(me) for me in _walk(conn, places)])
     if not len(spots):
         return []
-    spheres = _spheres()
+    spheres = _spheres(corrected)
     nearest, _ = cKDTree(spots).query([(p.x, p.y) for p in spheres])
     return [spheres[i] for i in np.argsort(nearest) if nearest[i] <= reach]
 
@@ -2115,6 +2192,9 @@ def segment_panoramas(answers: Path = PLACINGS, page: int = 8772) -> None:
     segmenter = segment.Segmenter(VIEW_STRUCTURE, threading.Lock(), _levelled_name, make=True)
     reach = queueing.NEAR_M + depth.NEAR_M[1]
     reached = _within(answers, reach)
+    if poses.APPLIED != "none":  # recaler judges them as COLMAP left them: its masks too
+        names = {_levelled_name(p) for p in reached}
+        reached += [p for p in _within(answers, reach, False) if _levelled_name(p) not in names]
     if not reached:
         typer.echo("aucune photo, ou aucun panorama à portée : rien à faire")
         return
@@ -2134,29 +2214,58 @@ def segment_panoramas(answers: Path = PLACINGS, page: int = 8772) -> None:
 LIDAR_MNS = DATA / "raw" / "lidar_mns"  # IGN's LiDAR HD surface model, patches around panoramas
 
 
+def _used_by_matching(
+    walk: list[export.WalkPhoto], near_by: list[match.Panorama]
+) -> list[match.Panorama]:
+    """The panoramas `match` compares the walk's photos with (see _to_match, _compared_with),
+    those of more photos first."""
+    used = Counter(p for me in _to_match(walk) for p in _compared_with(near_by, _place_of(me)))
+    return sorted(used, key=lambda p: (-used[p], p.id))
+
+
 @app.command("recaler")
 def set_panoramas_right(
     only: Annotated[list[str] | None, typer.Argument(help="préfixes de panoramas")] = None,
     again: Annotated[bool, typer.Option(help="rejuger ceux déjà jugés tels qu'ils sont")] = False,
+    photos: Annotated[
+        bool, typer.Option(help="ceux que `match` compare aux photos, les plus employés d'abord")
+    ] = False,
+    page: Annotated[int, typer.Option(help="le port de la page pour placer")] = 8772,
 ) -> None:
-    """Recale sur le plan les panoramas nommés (préfixes), sinon ceux dont les paires sont déjà
-    faites (sans en faire d'autres) : la forme entière de leurs détails de bâti cherchée sur les
-    façades de la BD TOPO, à toute rotation et tout décalage, comme le fait l'œil ; une correction
-    n'est gardée que si elle dépasse l'écart des deux relevés et que les contours du LiDAR HD de
-    l'IGN la confirment (les détails à moins de 4 m d'eux, et pas plus loin qu'avant ; voir poses).
-    Les panoramas sont pris tels que COLMAP les a laissés ; chaque verdict est gardé au fur et à
-    mesure (POSES), avec où était le panorama et la règle qui l'a donné : un panorama déjà jugé
-    là, par la règle d'aujourd'hui, n'est pas rejugé (sauf --again). Un
-    panorama dont un voisin n'est pas segmenté est laissé (`flaneur segmenter` d'abord)."""
-    spheres, segments = _placing_world()
-    by_id = {p.id: p for p in spheres}
+    """Recale sur le plan les panoramas nommés (préfixes), ou (--photos) ceux que `match`
+    compare aux photos de la balade (leurs paires faites au besoin), sinon ceux dont les paires
+    sont déjà faites (sans en faire d'autres) : la forme entière de leurs détails de bâti
+    cherchée sur les façades de la BD TOPO, à toute rotation et tout décalage, comme le fait
+    l'œil ; une correction n'est gardée que si elle dépasse l'écart des deux relevés et que les
+    contours du LiDAR HD de l'IGN la confirment (les détails à moins de 4 m d'eux, et pas plus
+    loin qu'avant ; voir poses). Les panoramas sont jugés tels que COLMAP les a laissés (le
+    reste les lit corrigés, selon poses.APPLIED : appliquer des corrections périme les places de
+    `match`, fait repasser son contrôle, et les panoramas tournés refont leurs caches) ; chaque
+    verdict est gardé au fur et à mesure (POSES), avec où était le panorama et la règle qui l'a
+    donné : un panorama déjà jugé là, par la règle d'aujourd'hui, n'est pas rejugé (sauf
+    --again). Un panorama dont un voisin n'est pas segmenté est laissé (`flaneur segmenter`
+    d'abord). Refusé pendant que la page pour placer tourne : le modèle et elle ne tiennent pas
+    ensemble en mémoire."""
+    if only and photos:
+        raise typer.BadParameter("des préfixes, ou --photos : pas les deux")
+    if only or photos:  # pairs made as needed: the matcher wakes
+        _page_closed(page)
+    spheres, segments = _placing_world(corrected=False)  # as COLMAP left them
     with closing(db.connect(DB_PATH)) as conn:
         fixed = _fixed_by_colmap(panoramas.load(conn), register.load(FIXES))
+        walk = export.photos(conn, DATA / "pilot", REVIEWS) if photos else []
+    made_only = False  # their pairs made as needed, unless taken for having them on disk
     if only:
         homes = [p for p in spheres if any(p.id.startswith(o) for o in only)]
+    elif photos:  # chosen where match will compare them (corrected), judged as COLMAP left them
+        by_id = {p.id: p for p in spheres}
+        homes = [by_id[p.id] for p in _used_by_matching(walk, _spheres()) if p.id in by_id]
+        if not homes:
+            typer.echo("aucune photo exportée à portée d'un panorama : rien à juger")
+            return
+        typer.echo(f"{len(homes)} panoramas que `match` compare aux photos, à juger")
     else:  # those whose pairs are on disk (three or more)
-        made = Counter(f.name.split("_")[0] for f in PAIR_MATCHES.glob("*.npz"))
-        homes = [by_id[i] for i, n in sorted(made.items()) if n >= 3 and i in by_id]
+        homes, made_only = _paired_homes(spheres, PAIR_MATCHES), True
     views = functools.cache(lambda: _views(kept=8))  # the matcher, only if a pair must be made
     scenes = _Scenes(
         spheres, fixed, views, threading.Lock(), segments, WALLS, seen=_seeing(make=False)
@@ -2165,14 +2274,14 @@ def set_panoramas_right(
     verdicts = poses.load(POSES)
     with httpx.Client() as client:
         for home in homes:
-            placed = (round(home.x, 2), round(home.y, 2), round(home.azimuth, 2))
+            placed = poses.at(home.x, home.y, home.azimuth)
             if not again and (kept := verdicts.get(home.id)) and poses.still(kept, placed):
                 continue  # judged as it stands
             neighbours = depth.candidates(home, spheres, fixed)
             if not all(masks.kept(p) for p in [home, *neighbours]):
                 typer.echo(f"{home.id[:8]} : un voisin pas segmenté, laissé (`flaneur segmenter`)")
                 continue
-            details = scenes.details(home, neighbours, made_only=not only)
+            details = scenes.details(home, neighbours, made_only=made_only)
             origin = np.array([home.x, home.y, home.z])
             try:
                 found = poses.judge(
@@ -2191,9 +2300,21 @@ def set_panoramas_right(
             said = f"corrigé {found.correction}" if found.correction else "laissé"
             how = "COLMAP" if home.id in fixed else "emprunté"
             typer.echo(f"{home.id[:8]} ({how}) : {said} — BD TOPO {found.bdtopo}")
-    moved = poses.corrections(verdicts)
-    typer.echo(f"{len(moved)} panorama(s) corrigé(s) sur {len(verdicts)} jugés")
-    typer.echo("mesurées, pas encore appliquées : le cadre de la carte (voir poses)")
+    where = placings.where(spheres)
+    standing = poses.to_apply(verdicts, where, "all")  # judged where COLMAP still puts them
+    judged = sum(  # by the rule of now, where COLMAP still puts them
+        v.rule == poses.RULE and i in where and poses.still(v, where[i])
+        for i, v in verdicts.items()
+    )
+    typer.echo(
+        f"{len(standing)} panorama(s) corrigé(s) sur {judged} jugés par la règle d'aujourd'hui"
+    )
+    applied = len(poses.to_apply(verdicts, where, poses.APPLIED))
+    typer.echo(
+        f"appliquées ({poses.APPLIED}) : {applied}"
+        if poses.APPLIED != "none"
+        else "mesurées, pas encore appliquées (poses.APPLIED)"
+    )
 
 
 @app.command("parallaxe")
@@ -2204,11 +2325,12 @@ def compare_parallax(answers: Path = PLACINGS) -> None:
     des paires avec profondeur, chacune refaite sans elle (part de la diagonale de la photo ;
     un recalage refusé compte comme le pire), et l'écart entre la place trouvée et le départ.
     Avec le modèle (les murs d'aujourd'hui, vus depuis les panoramas voisins)."""
-    rows = [r for r in placings.holding(answers).values() if r.get("pairs") and r["registration"]]
-    if not rows:
+    if not any(r.get("pairs") and r["registration"] for r in placings.holding(answers).values()):
         typer.echo("aucune réponse par points avec ses paires")
         return
     spheres, segments = _placing_world()
+    held = placings.holding(answers, placings.where(spheres))
+    rows = [r for r in held.values() if r.get("pairs") and r["registration"]]
     with closing(db.connect(DB_PATH)) as conn:
         fixed = _fixed_by_colmap(panoramas.load(conn), register.load(FIXES))
     views = _views(kept=8)  # a panorama and its neighbours
@@ -2312,6 +2434,7 @@ def place_photos(
         store.matcher = views.matcher
         return views
 
+    standing = placings.where(spheres)  # proposals, copies and answers made from them
     made: dict[tuple[str, str], dict[str, dict]] = {}  # by source and the answer it holds
 
     def from_source(source: str, row: dict, *rest) -> dict[str, dict]:  # kept while it holds
@@ -2323,7 +2446,7 @@ def place_photos(
     @functools.lru_cache(maxsize=1)
     def carried_at(answered: tuple[float, int]) -> dict[str, dict]:  # made again on new answers
         return carrying.proposals(
-            placings.holding(answers),
+            placings.holding(answers, standing),
             graph,
             lambda a, b: chain.kept_pairs(raw, (a, images[a]), (b, images[b])),
             lambda i: _features(store, i, extract=False) if i in photos else None,
@@ -2340,7 +2463,7 @@ def place_photos(
         """Computed by `flaneur proposer` for this panorama, else (live) made now (those carried
         from a photo placed come first: see placing.serve)."""
         known = computed.get(photo_id)
-        if known and (known["panorama"], known.get("inputs")) == (panorama, _image(photo_id)):
+        if known and _still_proposed(known, photo_id, panorama, standing.get(panorama)):
             found = placings.registration_of(known)
         elif live and panorama in by_id and photo_id in photos:
             views = models()
@@ -2461,7 +2584,7 @@ def write_scene() -> None:
     site = json.loads((WEB_DATA / "walk.json").read_text())
     marked = {p["id"] for p in site["photos"] if p["in_3d"]}  # by the export, on its images
     shown = {i: r for i, r in in_3d.items() if i in marked}
-    copies = {i: c["copies"] for i, c in _carried(shown).items()}
+    copies = {i: c["copies"] for i, c in _carried(shown, _standing(pictures)).items()}
     built, holding = scene.build3d(
         [p for p in pictures if (PANORAMAS / f"{p.id}.jpg").exists()], shown, copies, walk
     )

@@ -467,3 +467,14 @@ def test_a_skyline_behind_a_hidden_band_leaves_the_top():
     (wall,) = facades.topped([_right_wall(5.0)], np.zeros(3), GROUND, hidden_band)
 
     assert wall.top == 5.0
+
+
+def test_walls_drawn_at_a_panorama_follow_it_when_it_is_set_right(tmp_path):
+    path = tmp_path / "walls.jsonl"
+    drawn = [facades.Wall((100.0, 210.0), (110.0, 210.0), 12.0, "drawn")]
+    facades.record(path, "p1", drawn, [((90.0, 205.0), (90.0, 215.0))], at=(100.0, 200.0, 0.0))
+
+    walls, removed, _ = facades.saved_at(path, "p1", now={"p1": (100.0, 200.0, 90.0)})
+
+    assert [*walls[0].a, *walls[0].b] == pytest.approx([110.0, 200.0, 110.0, 190.0])
+    assert [*removed[0][0], *removed[0][1]] == pytest.approx([105.0, 210.0, 115.0, 210.0])

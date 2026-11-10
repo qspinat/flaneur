@@ -5,9 +5,16 @@ clicking pairs of points), "far" (no panorama sees it: no 3D view), "skip" (come
 The last answer on a photo holds, a skip leaving the one before it; the rows before stay."""
 
 from collections import defaultdict
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Any, NamedTuple
 
+import numpy as np
+from scipy.spatial.transform import Rotation
+from shapely.geometry import Point
+
+from flaneur import poses
+from flaneur.gazetteer import to_degrees, to_metres
 from flaneur.registration import (
     LEAST_STANDING,
     Registration,
@@ -39,6 +46,7 @@ def record(
     inputs: str = "",
     pairs: dict | None = None,
     standing: dict | None = None,
+    panorama_at: tuple[float, float, float] | None = None,
 ) -> dict:
     """Append the user's answer on a photo, with the seconds it took; but for a skip, the spot
     and direction set on the map; placed in its panorama ("fits": its proposal accepted,
@@ -47,7 +55,9 @@ def record(
     as directions in its own picture, `own`; the `view` and `side` they were clicked in); kept
     in parallax, its `standing` camera (`camera`, and for each pair the depth it was given,
     `metres`, and the neighbouring panoramas it came `from`, None without). A row by points says
-    which fit the user kept (`fit`: "flat" or "parallax"); its `registration` is always flat."""
+    which fit the user kept (`fit`: "flat" or "parallax"); its `registration` is always flat.
+    Where its panorama stood then (`panorama_at`: east, north, heading), for the answer to
+    follow it if it is set right since (see followed)."""
     if answer not in ANSWERS:
         raise ValueError(f"une réponse est l'une de {ANSWERS}")
     if answer == "skip":
@@ -85,6 +95,7 @@ def record(
             "pairs": pairs,
             "fit": None if pairs is None else "parallax" if standing else "flat",
             "standing": standing,
+            "panorama_at": None if panorama_at is None else [float(v) for v in panorama_at],
         },
     )
 
@@ -95,17 +106,83 @@ class State(NamedTuple):
     answers: list[str]  # the photos answered, one per answer given (not skips), in order
 
 
-def state(path: Path) -> State:
-    """The answers given so far, in one reading."""
+def state(path: Path, now: dict[str, tuple[float, float, float]] | None = None) -> State:
+    """The answers given so far, in one reading; with where the panoramas stand `now` (east,
+    north, heading, by id), each following its panorama (see followed)."""
     written = rows(path)
-    held = {row["photo_id"]: row for row in written if row["answer"] != "skip"}
+    held = {
+        row["photo_id"]: followed(row, now) if now else row
+        for row in written
+        if row["answer"] != "skip"
+    }
     answers = [row["photo_id"] for row in written if row["answer"] != "skip"]
     return State(held, {row["photo_id"] for row in written} - held.keys(), answers)
 
 
-def holding(path: Path) -> dict[str, dict]:
+def holding(
+    path: Path, now: dict[str, tuple[float, float, float]] | None = None
+) -> dict[str, dict]:
     """The answer that holds on each photo answered (see state)."""
-    return state(path).held
+    return state(path, now).held
+
+
+def where(spheres: Iterable[Any]) -> dict[str, tuple[float, float, float]]:
+    """Where panoramas stand (east, north, heading, as poses.at keeps it), by id: answers follow
+    them (see followed)."""
+    return {p.id: poses.at(p.x, p.y, p.azimuth) for p in spheres}
+
+
+def followed(row: dict, now: dict[str, tuple[float, float, float]]) -> dict:
+    """An answer as it stands now that its panorama stands `now` (see where): its place and
+    heading on the plan, where a parallax fit started and its camera, moved and turned as its
+    panorama was since the answer, about it; the compass headings of its views turned too (the
+    views cut from a picture are fixed to the compass). Its registration, in the panorama's own
+    picture, holds. Left as it is without where its panorama stood then, or its panorama
+    unknown."""
+    if not row.get("panorama_at") or not row.get("registration"):
+        return row
+    panorama = registration_of(row).panorama
+    if panorama not in now or tuple(row["panorama_at"]) == tuple(now[panorama]):
+        return row
+    (_, _, a0), (x1, y1, a1) = row["panorama_at"], now[panorama]
+
+    def about(x: float, y: float) -> tuple[float, float]:
+        return tuple(poses.carried(np.array([[x, y]]), row["panorama_at"], now[panorama])[0])
+
+    def placed(place: dict) -> dict:  # a place on the plan (lon, lat, heading if any)
+        spot = to_metres(Point(place["lon"], place["lat"]))
+        there = to_degrees(Point(*about(spot.x, spot.y)))
+        return {**place, "lon": there.x, "lat": there.y, **facing(place)}
+
+    def facing(view: dict) -> dict:  # a compass heading turns with the panorama
+        heading = view.get("heading")
+        return {} if heading is None else {"heading": (heading + a1 - a0) % 360}
+
+    out = {**placed(row), "panorama_at": [x1, y1, a1]}
+    reg = row["registration"]
+    out["registration"] = {**reg, "view": {**reg["view"], **facing(reg["view"])}}
+    if (row.get("pairs") or {}).get("view"):
+        out["pairs"] = {
+            **row["pairs"],
+            "view": {**row["pairs"]["view"], **facing(row["pairs"]["view"])},
+        }
+    if row.get("standing"):
+        standing = dict(row["standing"])
+        if standing.get("start"):
+            standing["start"] = placed(standing["start"])
+        if standing.get("camera"):
+            camera = standing["camera"]
+            turn = (
+                Rotation.from_rotvec(camera["turn"])
+                * Rotation.from_euler("z", a0 - a1, degrees=True).inv()  # counter-clockwise
+            )
+            standing["camera"] = {
+                **camera,
+                "position": [*about(*camera["position"][:2]), camera["position"][2]],
+                "turn": [float(v) for v in turn.as_rotvec()],
+            }
+        out["standing"] = standing
+    return out
 
 
 def registration_of(row: dict) -> Registration | None:

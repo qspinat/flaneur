@@ -8,7 +8,7 @@ import pytest
 import typer
 from typer.testing import CliRunner
 
-from flaneur import cli, confirming, depth, facades, match, segment
+from flaneur import cli, confirming, depth, facades, match, poses, segment
 from flaneur.cli import app
 
 
@@ -108,6 +108,127 @@ def test_panoramas_fixed_by_colmap_are_told_apart():
     }
 
     assert cli._fixed_by_colmap([here, moved], fixes) == {"p1"}
+
+
+def test_panoramas_stand_corrected_except_for_recaler(tmp_path, monkeypatch):
+    from flaneur.panoramax import Picture
+
+    here = Picture("p1", 2.3466, 48.852, 40.0, True, "2024-01-01", "", "")
+    at = poses.at(here.point.x, here.point.y, 40.0)
+    verdicts = {"p1": poses.Verdict(poses.Correction(2.0, -1.0, 4.0), None, 900, at)}
+    poses.save(tmp_path / "poses.json", verdicts)
+    monkeypatch.setattr(cli, "POSES", tmp_path / "poses.json")
+    monkeypatch.setattr(cli, "FIXES", tmp_path / "fixes.json")  # none: as recorded
+    monkeypatch.setattr(poses, "APPLIED", "all")
+
+    (corrected,) = cli._placed([here])
+    (as_colmap,) = cli._placed([here], corrected=False)
+
+    assert corrected != here and as_colmap == here
+
+
+def test_nothing_applied_reads_no_verdict(tmp_path, monkeypatch):
+    from flaneur.panoramax import Picture
+
+    here = Picture("p1", 2.3466, 48.852, 40.0, True, "2024-01-01", "", "")
+    (tmp_path / "poses.json").write_text("not json")
+    monkeypatch.setattr(cli, "POSES", tmp_path / "poses.json")
+    monkeypatch.setattr(cli, "FIXES", tmp_path / "fixes.json")
+    monkeypatch.setattr(poses, "APPLIED", "none")
+
+    assert cli._placed([here]) == [here]
+
+
+def test_homes_with_pairs_are_counted_under_their_own_names(tmp_path):
+    a = match.Panorama("a", 0.0, 0.0, 0.0, 10.0, tmp_path / "a.jpg")
+    b = match.Panorama("b", 5.0, 0.0, 0.0, 20.0, tmp_path / "b.jpg")
+    for n in range(3):
+        (tmp_path / f"{cli._levelled_name(a)}__x{n}_0.0_0.00_0.00.npz").touch()
+        (tmp_path / f"b_99.0_0.00_0.00__x{n}_0.0_0.00_0.00.npz").touch()  # b as turned since
+
+    assert cli._paired_homes([a, b], tmp_path) == [a]
+
+
+def test_parallaxe_with_nothing_to_compare_says_so_before_loading_the_world(tmp_path, monkeypatch):
+    def world(**_):
+        raise AssertionError("the world loaded for nothing")
+
+    monkeypatch.setattr(cli, "_placing_world", world)
+
+    result = CliRunner().invoke(app, ["parallaxe", "--answers", str(tmp_path / "none.jsonl")])
+
+    assert result.exit_code == 0 and "aucune réponse par points" in result.output
+
+
+def test_panoramas_used_by_more_photos_come_first(monkeypatch):
+    near = [
+        match.Panorama(n, x, 0.0, 0.0, 0.0, None)
+        for n, x in [("a", 0.0), ("b", 30.0), ("c", 500.0)]
+    ]
+    walk = [
+        SimpleNamespace(id="pm:1", place=(10.0, 0.0)),
+        SimpleNamespace(id="pm:2", place=(75.0, 0.0)),
+        SimpleNamespace(id="pm:3", place=(500.0, 0.0)),  # not exported: match leaves it
+    ]
+    monkeypatch.setattr(cli, "_place_of", lambda me: me.place)
+    monkeypatch.setattr(cli, "_exported", lambda i: SimpleNamespace(exists=lambda: i != "pm:3"))
+
+    used = cli._used_by_matching(walk, near)
+
+    assert [p.id for p in used] == ["b", "a"]  # b near both; c near none that match works on
+
+
+def test_recaler_refuses_prefixes_and_photos_together(monkeypatch):
+    monkeypatch.setattr(cli, "_placing_world", lambda **_: pytest.fail("loaded for nothing"))
+
+    result = CliRunner().invoke(app, ["recaler", "1a2b", "--photos"])
+
+    assert result.exit_code != 0 and "--photos" in result.output
+
+
+@pytest.mark.parametrize(
+    "known_at, holds",
+    [
+        ([1.0, 2.0, 30.0], True),
+        ([1.0, 2.0, 33.0], False),  # its panorama turned since
+        (None, False),  # made before poses were kept: made again
+    ],
+)
+def test_a_proposal_holds_while_its_panorama_stands_where_it_was_made(monkeypatch, known_at, holds):
+    monkeypatch.setattr(cli, "_image", lambda photo_id: "h")
+    known = {"panorama": "p1", "inputs": "h", **({"at": known_at} if known_at else {})}
+
+    assert cli._still_proposed(known, "pm:1", "p1", (1.0, 2.0, 30.0)) is holds
+
+
+def test_copies_carried_from_panoramas_moved_since_are_made_again(tmp_path, monkeypatch):
+    row = {"registration": {"panorama": "a"}, "inputs": "i", "flipped": False}
+    made = cli._answered_as(row)
+    kept = {
+        "pm:1": {"made": made, "copies": [], "at": {"a": [0.0, 0.0, 0.0], "b": [5.0, 0.0, 0.0]}},
+        "pm:2": {"made": made, "copies": [], "at": {"a": [0.0, 0.0, 0.0], "c": [9.0, 0.0, 0.0]}},
+        "pm:3": {"made": made, "copies": [], "at": {"d": None}},  # its home at hand since
+    }
+    (tmp_path / "carried.json").write_text(json.dumps(kept))
+    monkeypatch.setattr(cli, "CARRIED", tmp_path / "carried.json")
+    now = {"a": (0.0, 0.0, 0.0), "b": (5.0, 0.0, 0.0), "c": (9.0, 0.0, 4.0), "d": (1.0, 1.0, 0.0)}
+
+    assert set(cli._carried({"pm:1": row, "pm:2": row, "pm:3": row}, now)) == {"pm:1"}
+
+
+def test_recaler_keeps_clear_of_the_page_only_when_it_wakes_the_matcher(monkeypatch):
+    guarded = []
+    monkeypatch.setattr(cli, "_page_closed", lambda page: guarded.append(page))
+
+    def world(**_):
+        raise RuntimeError("world")
+
+    monkeypatch.setattr(cli, "_placing_world", world)
+
+    CliRunner().invoke(app, ["recaler"])  # pairs on disk only: no model
+    assert guarded == []
+    CliRunner().invoke(app, ["recaler", "--photos"])
+    assert guarded == [8772]
 
 
 LEFT = [[-4.0, y, z] for y in np.arange(2.0, 40.0, 0.5) for z in (-1.0, 3.0, 8.0)]

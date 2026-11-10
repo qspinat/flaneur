@@ -5,7 +5,7 @@ import json
 import numpy as np
 import pytest
 
-from flaneur import poses
+from flaneur import match, poses
 
 ORIGIN = np.array([1000.0, 2000.0])
 # a crossroads: two facades along the street, one across it ahead, one behind (on the plan, metres)
@@ -393,3 +393,58 @@ def test_lidar_cells_without_data_are_unknown_and_a_wrong_answer_is_refused(tmp_
             3000.0, 2000.0, tmp_path, _Client(_Answer(b"<ServiceException/>", "text/xml"))
         )
     assert not (tmp_path / "mns_3000_2000.npy").exists()
+
+
+JUDGED = {"p": poses.Verdict(poses.Correction(2.0, -1.0, 4.0), None, 900, (1.0, 2.0, 30.0))}
+
+
+@pytest.mark.parametrize(
+    "where, applied, expected",
+    [
+        ((1.0, 2.0, 30.0), "all", {"p": (2.0, -1.0, -4.0)}),
+        ((1.0, 2.5, 30.0), "all", {}),  # COLMAP moved it since it was judged
+        ((1.0, 2.0, 30.0), "turns", {"p": (0.0, 0.0, -4.0)}),
+        ((1.0, 2.0, 30.0), "none", {}),
+    ],
+)
+def test_corrections_apply_where_they_were_judged_as_much_as_asked(where, applied, expected):
+    assert poses.to_apply(JUDGED, {"p": where}, applied) == expected
+
+
+def test_an_unknown_way_of_applying_is_refused():
+    with pytest.raises(ValueError):
+        poses.to_apply(JUDGED, {"p": (1.0, 2.0, 30.0)}, "turn")
+
+
+def test_a_corrected_heading_turns_what_the_panorama_sees_as_the_correction_does():
+    turned = {"p": poses.Verdict(poses.Correction(0.0, 0.0, 10.0), None, 900, (1.0, 2.0, 30.0))}
+    _, _, heading = poses.to_apply(turned, {"p": (1.0, 2.0, 30.0)}, "all")["p"]
+
+    ahead = match.camera_axes(30.0 + heading)[1][:2]
+
+    expected = poses.moved(
+        match.camera_axes(30.0)[1][None, :2], np.zeros(2), turned["p"].correction
+    )
+    assert ahead == pytest.approx(expected[0], abs=1e-9)
+
+
+def test_turns_alone_are_applied_only_beyond_the_surveys_own_disagreement():
+    small = {"p": poses.Verdict(poses.Correction(2.0, 0.5, 1.2), None, 900, (1.0, 2.0, 30.0))}
+
+    assert poses.to_apply(small, {"p": (1.0, 2.0, 30.0)}, "turns") == {}
+    assert poses.to_apply(small, {"p": (1.0, 2.0, 30.0)}, "all") == {"p": (2.0, 0.5, -1.2)}
+
+
+def test_points_are_carried_as_their_panorama_moved_about_it():
+    points = np.array([[100.0, 210.0]])  # 10 m north of the panorama
+
+    moved = poses.carried(points, (100.0, 200.0, 0.0), (102.0, 200.0, 90.0))
+
+    assert moved == pytest.approx(np.array([[112.0, 200.0]]))  # 2 m east, turned right: east
+
+
+def test_a_pose_stands_only_where_it_was_recorded():
+    assert poses.stands([1.0, 2.0, 30.0], (1.0, 2.0, 30.0))
+    assert not poses.stands([1.0, 2.0, 30.0], (1.0, 2.0, 33.0))
+    assert not poses.stands(None, (1.0, 2.0, 30.0))  # made before poses were kept
+    assert not poses.stands([1.0, 2.0, 30.0], None)  # its panorama no longer at hand

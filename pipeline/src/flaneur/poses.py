@@ -24,7 +24,7 @@ import json
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import NamedTuple
+from typing import Literal, NamedTuple
 
 import httpx
 import numpy as np
@@ -76,6 +76,10 @@ MARGIN = 1.02  # the best counts this many times another answer at least: a tie,
 # (measured on 99 panoramas, 10/11: above it, LiDAR tells right from wrong better than a margin)
 # How verdicts are reached: "1", two surveys' fits agreeing (until 2026-11-10); "2", BD TOPO's
 # whole shape borne out by LiDAR, with what decides it. A verdict by another is judged again.
+# What of the corrections what reads panoramas' poses takes (cli._placed): "all", "turns" (their
+# turn only: no shift changes the distances to neighbours its depths come from) or "none".
+Applied = Literal["all", "turns", "none"]
+APPLIED: Applied = "none"
 RULE = "2:" + ",".join(
     str(v)
     for v in (MARGIN, FAR_M, ON_WALL_M, RIVAL_M, NEAR_M, LEAST_SHIFT_M, LEAST_TURN_DEG)
@@ -114,6 +118,22 @@ def moved(points: np.ndarray, origin: np.ndarray, c: Correction) -> np.ndarray:
         [np.cos(t) * q[:, 0] - np.sin(t) * q[:, 1], np.sin(t) * q[:, 0] + np.cos(t) * q[:, 1]]
     )
     return origin + turned + [c.east, c.north]
+
+
+def stands(then: list | tuple | None, now: tuple[float, float, float] | None) -> bool:
+    """Whether what was made from a panorama standing `then` (see at) holds with it standing
+    `now`: both known, and alike (made before poses were kept, or its panorama no longer at
+    hand: made again)."""
+    return then is not None and now is not None and tuple(then) == tuple(now)
+
+
+def carried(
+    points: np.ndarray, then: tuple[float, float, float], now: tuple[float, float, float]
+) -> np.ndarray:
+    """Plan points (n × 2) seen from a panorama that stood `then` (east, north, compass heading)
+    and stands `now`: moved and turned with it, about it."""
+    (x0, y0, a0), (x1, y1, a1) = then, now
+    return moved(points, np.array([x0, y0]), Correction(x1 - x0, y1 - y0, a0 - a1))
 
 
 def segment_distance(points: np.ndarray, segments: np.ndarray) -> np.ndarray:
@@ -441,6 +461,33 @@ def still(verdict: Verdict, placed: tuple[float, float, float]) -> bool:
     """Whether a verdict stands for a panorama `placed` so (east, north, heading): judged there,
     by the RULE of now."""
     return verdict.placed == placed and verdict.rule == RULE
+
+
+def at(x: float, y: float, heading: float) -> tuple[float, float, float]:
+    """Where a panorama stands, as a verdict keeps it (Verdict.placed): to the hundredth."""
+    return round(x, 2), round(y, 2), round(heading, 2)
+
+
+def to_apply(
+    verdicts: dict[str, Verdict], placed: dict[str, tuple[float, float, float]], applied: Applied
+) -> dict[str, tuple[float, float, float]]:
+    """The fixes (east, north, change of heading: compass degrees, clockwise) that set panoramas
+    right, as register.applied takes them: the corrections by the RULE of now of those still
+    `placed` (see at) where they were judged; `applied` (see APPLIED) "turns": the turn only,
+    "none": none. A correction turns counter-clockwise on the plan: the heading by its
+    opposite."""
+    if applied not in ("all", "turns", "none"):
+        raise ValueError(f"applied: all, turns or none, not {applied!r}")
+    if applied == "none":
+        return {}
+    shifts = applied == "all"
+    return {
+        i: (c.east if shifts else 0.0, c.north if shifts else 0.0, -c.turn)
+        for i, c in corrections(verdicts).items()
+        if i in placed
+        and still(verdicts[i], placed[i])
+        and (shifts or abs(c.turn) >= LEAST_TURN_DEG)  # a turn alone: beyond the surveys' own
+    }
 
 
 def corrections(verdicts: dict[str, Verdict]) -> dict[str, Correction]:
