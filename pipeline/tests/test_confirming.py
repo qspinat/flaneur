@@ -61,3 +61,17 @@ def test_photos_to_check_closely_come_first_among_those_to_judge():
     ]
 
     assert [p["id"] for p in confirming.queue(placed, {})] == ["b", "a"]
+
+
+def test_a_no_keeps_the_reason_it_was_given(tmp_path):
+    path = tmp_path / "anchors.jsonl"
+
+    confirming.record(path, "pm:1", "no", "abc", 1, reason="reproduction")
+
+    assert json.loads(path.read_text())["reason"] == "reproduction"
+
+
+@pytest.mark.parametrize(("verdict", "reason"), [("yes", "reproduction"), ("no", "because")])
+def test_a_reason_goes_only_with_a_no_and_is_one_of_the_page_s(tmp_path, verdict, reason):
+    with pytest.raises(ValueError):
+        confirming.record(tmp_path / "anchors.jsonl", "pm:1", verdict, "abc", 1, reason=reason)

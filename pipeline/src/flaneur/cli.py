@@ -1764,16 +1764,17 @@ def _cut_view(panorama: match.Panorama, heading: float) -> np.ndarray:
     return match.perspective(picture, panorama.axes, heading, fov=CHECK_FOV, side=800, pitch=0)
 
 
-def _sheet_row(
+def _framed(
     photo_id: str,
     m: match.Situated,
     heights: scene.CameraHeights,
     near_by: list[match.Panorama],
     read: Callable[[Path], np.ndarray | None],
-    width: int = SHEET_COLUMN,
-) -> np.ndarray | None:
-    """A photo situated, then today's true view from the nearest panorama at hand, framed as
-    the camera found, and the photo's outlines drawn on that view; each `width` wide."""
+    width: int,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, float] | None:
+    """A photo situated (as exported, and `width` wide) and today's true view from the
+    nearest panorama at hand framed as the camera found, of the same size, with how far that
+    panorama stands from the camera; none without the photo or a panorama near enough."""
     photo = cv2.imread(str(_exported(photo_id)))
     if photo is None:
         return None
@@ -1786,9 +1787,24 @@ def _sheet_row(
     else:
         return None
     real = match.real_view(m.view(heights.street(m.x, m.y)), old.shape[:2], panorama, picture)
+    return photo, old, real, float(np.hypot(panorama.x - m.x, panorama.y - m.y))
+
+
+def _sheet_row(
+    photo_id: str,
+    m: match.Situated,
+    heights: scene.CameraHeights,
+    near_by: list[match.Panorama],
+    read: Callable[[Path], np.ndarray | None],
+    width: int = SHEET_COLUMN,
+) -> np.ndarray | None:
+    """A photo situated, then today's true view from the nearest panorama at hand, framed as
+    the camera found, and the photo's outlines drawn on that view; each `width` wide."""
+    if (framed := _framed(photo_id, m, heights, near_by, read, width)) is None:
+        return None
+    photo, old, real, away = framed
     pictures = np.hstack([old, real, _outlines(photo, real)])
     row = np.vstack([np.full((LABEL_BAND, *pictures.shape[1:]), 40, np.uint8), pictures])
-    away = np.hypot(panorama.x - m.x, panorama.y - m.y)
     for column, text in enumerate(
         [
             f"{photo_id}  {m.agree} pts, {m.panoramas} sources, a {m.moved_m:.0f} m de sa legende",
@@ -1848,6 +1864,9 @@ def _with_chained(
     return placed, rounds
 
 
+CONFIRM_WIDTH = 960  # pixels: the photo and today's view on the confirmation page
+
+
 @app.command("confirmer")
 def confirm_placed(port: int = 8768, open_browser: bool = True) -> None:
     """Ouvre la page de confirmation (locale) : oui ou non à chaque photo située, contre les
@@ -1882,14 +1901,17 @@ def confirm_placed(port: int = 8768, open_browser: bool = True) -> None:
     read = functools.lru_cache(maxsize=16)(lambda path: cv2.imread(str(path)))
 
     @functools.lru_cache(maxsize=64)
-    def sheet(photo_id: str) -> bytes:
-        row = _sheet_row(photo_id, situated[photo_id], heights, near_by, read, width=480)
-        if row is None:
-            return b""
-        return cv2.imencode(".jpg", row, SHEET_JPEG)[1].tobytes()
+    def frames(photo_id: str) -> dict | None:
+        framed = _framed(photo_id, situated[photo_id], heights, near_by, read, CONFIRM_WIDTH)
+        if framed is None:
+            return None
+        photo, old, today, away = framed
+        drawn = {"old": old, "today": today, "outlines": _outlines(photo, today)}
+        jpeg = {k: cv2.imencode(".jpg", v, SHEET_JPEG)[1].tobytes() for k, v in drawn.items()}
+        return {**jpeg, "away_m": round(away, 1)}
 
     _serve_page(
-        lambda: confirming.serve(placed, ANCHORS, _verdicts, sheet, port),
+        lambda: confirming.serve(placed, ANCHORS, _verdicts, frames, port),
         f"photos situées ({len(placed)})",
         port,
         open_browser,
