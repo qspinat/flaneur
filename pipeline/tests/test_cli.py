@@ -501,13 +501,31 @@ def test_match_tries_lomag_then_disk_on_the_photos_left_and_keeps_what_each_did(
     }
 
 
-def test_a_run_that_finds_nothing_keeps_the_placement_found_before(tmp_path, monkeypatch):
-    before = _kept(inputs="other", matcher="disk", tried=["disk"])
+def test_a_redo_that_finds_nothing_keeps_the_placement_made_from_these_inputs(
+    tmp_path, monkeypatch
+):
+    before = _kept(matcher="disk", tried=["disk"])  # placed from today's inputs ("i")
     _match_world(tmp_path, monkeypatch, {"pm:1": dict(before)}, lambda matcher: None)
+
+    cli.match_photos(photo=["pm:1"], again=False, force=True)
+
+    assert json.loads((tmp_path / "matches.json").read_text())["pm:1"] == before
+
+
+@pytest.mark.parametrize(
+    "before, refused",
+    [
+        (_kept(inputs="other", matcher="disk", tried=["disk"]), set()),  # placed from others
+        (_kept(matcher="disk", tried=["disk"]), {("pm:1", "i")}),  # turned down
+    ],
+)
+def test_a_run_that_finds_nothing_replaces_a_stale_or_refused_placement(
+    tmp_path, monkeypatch, before, refused
+):
+    _match_world(tmp_path, monkeypatch, {"pm:1": dict(before)}, lambda matcher: None)
+    monkeypatch.setattr(cli, "_refused", lambda: refused)
 
     cli.match_photos(photo=None, again=False, force=True)
 
-    kept = json.loads((tmp_path / "matches.json").read_text())
-    assert kept["pm:1"] == {**before, "failed": {"inputs": "i", "tried": ["lomag", "disk"]}}
-    assert cli._left_to_try(kept["pm:1"], "i") == []  # tried from these: not again for nothing
-    assert kept["pm:2"] == {"inputs": "i", "tried": ["lomag", "disk"]}
+    kept = json.loads((tmp_path / "matches.json").read_text())["pm:1"]
+    assert kept == {"inputs": "i", "tried": ["lomag", "disk"]}
