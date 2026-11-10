@@ -2125,9 +2125,10 @@ def set_panoramas_right(
     again: Annotated[bool, typer.Option(help="rejuger ceux déjà jugés tels qu'ils sont")] = False,
 ) -> None:
     """Recale sur le plan les panoramas nommés (préfixes), sinon ceux dont les paires sont déjà
-    faites (sans en faire d'autres) : leurs détails de bâti contre les façades de la BD TOPO et
-    contre les contours du LiDAR HD de l'IGN, deux relevés ; une correction n'est gardée que si
-    les deux s'accordent et qu'elle dépasse leur propre écart (voir poses). Les panoramas sont
+    faites (sans en faire d'autres) : la forme entière de leurs détails de bâti cherchée sur les
+    façades de la BD TOPO, à toute rotation et tout décalage, comme le fait l'œil ; une correction
+    n'est gardée que si elle dépasse l'écart des deux relevés et que les contours du LiDAR HD de
+    l'IGN la confirment (les détails pas plus loin d'eux qu'avant ; voir poses). Les panoramas sont
     pris tels que COLMAP les a laissés ; chaque verdict est gardé au fur et à mesure (POSES),
     avec où était le panorama : un panorama déjà jugé là n'est pas rejugé (sauf --again). Un
     panorama dont un voisin n'est pas segmenté est laissé (`flaneur segmenter` d'abord)."""

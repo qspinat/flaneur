@@ -4,11 +4,14 @@ So a panorama's walls, right in its own picture, may stand off the buildings on 
 2026-11-07, 4 m for one (bd6b343f), 14° for another, though placed by COLMAP (88e4e410).
 
 A panorama's correction (a shift east and north, a turn about it) is what lays its building
-details (see cli._Scenes) on the buildings, fitted twice: against BD TOPO's facades, and against
-the outlines of IGN's LiDAR HD surface model (where it stands above the street). Neither survey is
-right to better than about a metre here (BD TOPO generalises; LiDAR sees eaves, and takes tree
-crowns for buildings: measured 0.9 m apart around one crossroads), so a correction is kept only
-when the two agree, and when it is larger than what they disagree by.
+details (see cli._Scenes) on the buildings: found as the eye finds it, the details' whole shape
+against BD TOPO's facades (every turn and shift, then refined), and borne out by the outlines of
+IGN's LiDAR HD surface model (where it stands above the street): the details no further from
+them than as the panorama stands. Neither survey is right to better than about a metre here (BD
+TOPO generalises; LiDAR sees eaves, and takes tree crowns for buildings: measured 0.9 m apart
+around one crossroads), so only a correction larger than that is kept. LiDAR alone does not find
+(measured 2026-11-10 on 99 panoramas: its outlines, trees and courtyards among them, meet the
+details nearly as well in several places, nearly always).
 
 Measured, not yet applied (2026-11-08): moving a panorama placed by COLMAP alone breaks the
 distances to its neighbours that its pairs' depths come from (depth.set_right), and its walls got
@@ -33,13 +36,9 @@ from flaneur.sources import write_atomic, write_text
 NEAR_M = 4.0  # details this close to a facade or an outline are the fit's (not interiors, trees)
 LEAST_DETAILS = 300  # and at least this many of them
 LOSS_M = 0.5  # beyond this off a facade, a detail weighs less and less (soft L1)
-AGREE_M = 1.0  # the two surveys' corrections agree when they put the details this close, or
-AGREE_SHARE = 0.5  # within this share of the smaller of the two (both far off: closer to each
-# other than to the panorama as it stands; the surveys themselves 0.9 m apart round one crossroads)
-AGREE_DEG = 1.0  # and turn it alike within this, or AGREE_SHARE of the lesser turn (beyond the
-# details, a turn they disagree on puts walls and facades wrong)
 LEAST_SHIFT_M = 1.5  # a correction moving them this far at least (or turning LEAST_TURN_DEG):
 LEAST_TURN_DEG = 3.0  # beyond the surveys' own disagreement
+FAR_M = 4.0  # a detail's distance to LiDAR, weighed up to this at most (one far off: as far)
 ABOVE_STREET_M = 3.0  # LiDAR's surface this far above the street: a building (or a tree)
 LIDAR = (  # IGN's LiDAR HD surface model (MNS), Lambert-93, as float32 heights
     "https://data.geopf.fr/wms-r/wms?SERVICE=WMS&VERSION=1.3.0&REQUEST=GetMap&STYLES="
@@ -71,7 +70,8 @@ SEARCH_CELL_M = 0.25
 ON_WALL_M = 0.75
 RIVAL_M = 3.0
 RIVALS = 50
-MARGIN = 1.1  # the best counts this many times another answer at least (set on 99, 10/11)
+MARGIN = 1.02  # the best counts this many times another answer at least: a tie, refused
+# (measured on 99 panoramas, 10/11: above it, LiDAR tells right from wrong better than a margin)
 
 
 class Correction(NamedTuple):
@@ -202,7 +202,7 @@ def _fit(
     shift = found.jac[:, :2].T @ found.jac[:, :2]
     strength, directions = np.linalg.eigh(shift)
     free = directions[:, 0] if strength[0] < PINNED * strength[1] else None
-    if searched is not None and not _alone(points, origin, *searched[1:], free):
+    if searched is not None and _margin(points, origin, *searched[1:], free) < MARGIN:
         return None
     correction = Correction(*(float(v) for v in found.x))
     return (_pinned(correction, [free]) if free is not None else correction), free
@@ -250,17 +250,18 @@ def _searched(
     )
 
 
-def _alone(
+def _margin(
     points: np.ndarray,
     origin: np.ndarray,
     turns: np.ndarray,
     counts: np.ndarray,
     best: tuple[int, int, int],
     free: np.ndarray | None,
-) -> bool:
-    """Whether the best answer of _searched counts MARGIN times as many details on the walls as
-    any other: another peak of the counts that puts the details RIVAL_M from where the best does
-    (in median; along a `free` direction, where the walls cannot tell, not counted)."""
+) -> float:
+    """How many times as many details on the walls the best answer of _searched counts as any
+    other (infinite: none): another peak of the counts that puts the details RIVAL_M from where
+    the best does (in median; along a `free` direction, where the walls cannot tell, not
+    counted)."""
     k = (counts.shape[1] - 1) // 2
     steps = (np.arange(2 * k + 1) - k) * SEARCH_CELL_M
     peaks = (counts == ndimage.maximum_filter(counts, size=(3, 5, 5))) & (counts > 0)
@@ -276,39 +277,8 @@ def _alone(
         if free is not None:
             apart = apart - np.outer(apart @ free, free)
         if np.median(np.linalg.norm(apart, axis=1)) >= RIVAL_M:
-            return counts[best] >= MARGIN * counts[i]
-    return True
-
-
-def agreed(
-    bdtopo: Correction | None,
-    lidar: Correction | None,
-    points: np.ndarray,
-    origin: np.ndarray,
-    free: list[np.ndarray] = (),
-) -> Correction | None:
-    """Both surveys' corrections, averaged, when they put a panorama's details (plan points)
-    within AGREE_M of each other, or AGREE_SHARE of how far the lesser moves them (in median:
-    two corrections may differ in turn and shift and move the details alike), turn them alike
-    (AGREE_DEG), and when it moves them LEAST_SHIFT_M or turns LEAST_TURN_DEG at least; else
-    None. Along a `free` direction (unit, on the plan: one survey's details do not pin a shift
-    along it), neither is compared nor followed: what it says there is noise."""
-    if bdtopo is None or lidar is None:
-        return None
-    bdtopo, lidar = (_pinned(c, free) for c in (bdtopo, lidar))
-    one, other = moved(points, origin, bdtopo), moved(points, origin, lidar)
-    lesser = min(np.median(np.linalg.norm(q - points, axis=1)) for q in (one, other))
-    if np.median(np.linalg.norm(one - other, axis=1)) > max(AGREE_M, AGREE_SHARE * lesser):
-        return None
-    if abs(bdtopo.turn - lidar.turn) > max(
-        AGREE_DEG, AGREE_SHARE * min(abs(bdtopo.turn), abs(lidar.turn))
-    ):
-        return None
-    mean = Correction(*((a + b) / 2 for a, b in zip(bdtopo, lidar, strict=True)))
-    shift = np.median(np.linalg.norm(moved(points, origin, mean) - points, axis=1))
-    if shift < LEAST_SHIFT_M and abs(mean.turn) < LEAST_TURN_DEG:
-        return None
-    return mean
+            return float(counts[best] / counts[i])
+    return float("inf")
 
 
 def _pinned(c: Correction, free: list[np.ndarray]) -> Correction:
@@ -331,21 +301,58 @@ def judged(
     lidar: Callable[[np.ndarray], np.ndarray],
     sees: Callable[[np.ndarray, np.ndarray], np.ndarray] | None = None,
 ) -> Verdict:
-    """A panorama's building details (plan points) fitted to each survey (their distances), and
-    the correction they agree on, if any. To LiDAR, only the details it `sees` (plan points and
-    the panorama: which have a clear sight line, see clear_of), judged where the correction puts
-    them: a panorama placed off sees its details inside the buildings, behind their outlines."""
-    to_lidar = _fit(points, origin, lidar)
+    """A panorama's building details (plan points) fitted to each survey (their distances): to BD
+    TOPO from where their whole shape best meets it, to LiDAR from where the panorama stands; the
+    correction is BD TOPO's, kept if larger than the surveys' own disagreement and borne out by
+    LiDAR (see borne_out). To LiDAR, only the details it `sees` (plan points and the panorama:
+    which have a clear sight line, see clear_of), judged where the correction puts them: a
+    panorama placed off sees its details inside the buildings, behind their outlines."""
+    to_lidar = _fit(points, origin, lidar, start=Correction(0.0, 0.0, 0.0))
     for _ in range(SIGHT_ROUNDS if sees else 0):
         if to_lidar is None:
             break
         c = to_lidar[0]
         shown = sees(moved(points, origin, c), origin + [c.east, c.north])
         to_lidar = _fit(points[shown], origin, lidar, start=c)
-    to_bdtopo = _fit(points, origin, bdtopo)
-    fits = [f[0] if f else None for f in (to_bdtopo, to_lidar)]
-    free = [f[1] for f in (to_bdtopo, to_lidar) if f and f[1] is not None]
-    return Verdict(agreed(*fits, points, origin, free), *fits, len(points))
+    to_bdtopo = fitted(points, origin, bdtopo)
+    kept = (
+        to_bdtopo
+        if to_bdtopo
+        and _large(to_bdtopo, points, origin)
+        and borne_out(to_bdtopo, points, origin, lidar, sees)
+        else None
+    )
+    return Verdict(kept, to_bdtopo, to_lidar[0] if to_lidar else None, len(points))
+
+
+def _large(c: Correction, points: np.ndarray, origin: np.ndarray) -> bool:
+    """Whether a correction moves a panorama's details LEAST_SHIFT_M (in median) or turns them
+    LEAST_TURN_DEG at least: beyond what the surveys disagree by."""
+    shift = np.median(np.linalg.norm(moved(points, origin, c) - points, axis=1))
+    return bool(shift >= LEAST_SHIFT_M or abs(c.turn) >= LEAST_TURN_DEG)
+
+
+def borne_out(
+    c: Correction,
+    points: np.ndarray,
+    origin: np.ndarray,
+    lidar: Callable[[np.ndarray], np.ndarray],
+    sees: Callable[[np.ndarray, np.ndarray], np.ndarray] | None = None,
+) -> bool:
+    """Whether LiDAR bears a correction out: the details it sees from where the correction puts
+    the panorama (LEAST_DETAILS at least) lie, in median, no further from its outlines than those
+    it sees from where the panorama stands (FAR_M if too few)."""
+
+    def off(c: Correction) -> float | None:
+        q, at = moved(points, origin, c), origin + [c.east, c.north]
+        shown = sees(q, at) if sees else np.ones(len(q), bool)
+        if shown.sum() < LEAST_DETAILS:
+            return None
+        return float(np.median(np.minimum(lidar(q[shown]), FAR_M)))
+
+    there = off(c)
+    here = off(Correction(0.0, 0.0, 0.0))
+    return there is not None and there <= (FAR_M if here is None else here)
 
 
 def judge(

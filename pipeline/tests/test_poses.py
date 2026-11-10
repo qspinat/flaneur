@@ -42,41 +42,6 @@ def test_too_few_details_by_the_facades_set_nothing():
     assert poses.fitted(far, ORIGIN, lambda p: poses.segment_distance(p, FACADES)) is None
 
 
-def test_two_surveys_agreeing_on_a_large_error_correct_it():
-    a, b = poses.Correction(2.0, -3.0, 1.0), poses.Correction(2.4, -3.6, 0.6)
-
-    found = poses.agreed(a, b, _details(), ORIGIN)
-
-    assert list(found) == pytest.approx([2.2, -3.3, 0.8])
-
-
-def test_two_surveys_disagreeing_correct_nothing():
-    details = _details()
-    a, b = poses.Correction(2.0, -3.0, 0.0), poses.Correction(-1.0, -3.0, 0.0)
-    assert poses.agreed(a, b, details, ORIGIN) is None
-    a, b = poses.Correction(0.0, 0.0, 7.0), poses.Correction(0.0, 0.0, 2.0)
-    assert poses.agreed(a, b, details, ORIGIN) is None
-
-
-def test_an_error_as_small_as_the_surveys_own_is_left():
-    small = poses.Correction(0.6, -0.7, 0.6)
-
-    assert poses.agreed(small, small, _details(), ORIGIN) is None
-
-
-def test_corrections_moving_the_details_alike_agree_whatever_their_numbers():
-    rng = np.random.default_rng(0)
-    cluster = np.array([1010.0, 2015.0]) + rng.normal(0, 1.5, (800, 2))  # 18 m off, a few m wide
-    centre = cluster.mean(axis=0)
-    a = poses.Correction(3.0, 0.0, -14.0)
-    turned_a = poses.moved(centre[None], ORIGIN, a)[0]
-    turned_b = poses.moved(centre[None], ORIGIN, poses.Correction(0.0, 0.0, -13.0))[0]
-    shift = turned_a - turned_b  # the second turns 1° less, about the panorama, and shifts more
-    b = poses.Correction(float(shift[0]), float(shift[1]), -13.0)
-
-    assert poses.agreed(a, b, cluster, ORIGIN) is not None
-
-
 def test_lidar_outlines_are_found_where_a_building_stands_above_the_street():
     heights = np.full((40, 40), 33.0)  # 0.5 m cells, the street at 33 m
     heights[:, 20:] = 50.0  # a building east of x = 10 m
@@ -114,20 +79,6 @@ def test_a_panorama_both_surveys_place_off_alike_is_corrected():
 
     assert list(found.correction) == pytest.approx([2.0, -2.5, 0.0], abs=0.1)
     assert found.details == len(seen)
-
-
-def test_a_panorama_the_surveys_place_apart_is_left():
-    seen = poses.moved(_details(), ORIGIN, poses.Correction(-2.0, 2.5, 0.0))
-    elsewhere = FACADES + [3.0, 3.0]  # a second survey 4 m off the first, both ways
-
-    found = poses.judged(
-        seen,
-        ORIGIN,
-        lambda p: poses.segment_distance(p, FACADES),
-        lambda p: poses.segment_distance(p, elsewhere),
-    )
-
-    assert found.correction is None and found.bdtopo is not None and found.lidar is not None
 
 
 def test_a_panorama_placed_off_is_set_right_against_lidar_outlines():
@@ -214,6 +165,56 @@ def test_a_panorama_both_surveys_place_far_off_alike_is_corrected():
     assert np.median(np.linalg.norm(back - true, axis=1)) < 0.1
 
 
+def test_a_correction_found_on_bd_topo_is_kept_when_the_lidar_bears_it_out_though_undecided():
+    true = _details()
+    seen = poses.moved(true, ORIGIN, poses.Correction(-6.0, 5.0, -12.0))
+    twice = np.concatenate([FACADES, FACADES + [0.0, 10.0]])  # LiDAR: the same, and 10 m north
+
+    found = poses.judged(
+        seen,
+        ORIGIN,
+        lambda p: poses.segment_distance(p, FACADES),
+        lambda p: poses.segment_distance(p, twice),
+    )
+
+    back = poses.moved(seen, ORIGIN, found.correction)
+    assert np.median(np.linalg.norm(back - true, axis=1)) < 0.1
+
+
+def test_a_correction_the_lidar_does_not_bear_out_is_refused():
+    true = _details()
+    off = poses.Correction(-6.0, 5.0, -12.0)
+    seen = poses.moved(true, ORIGIN, off)
+    as_seen = poses.moved(FACADES.reshape(-1, 2), ORIGIN, off).reshape(-1, 2, 2)
+
+    found = poses.judged(
+        seen,
+        ORIGIN,
+        lambda p: poses.segment_distance(p, FACADES),
+        lambda p: poses.segment_distance(p, as_seen),  # LiDAR: right where it stands
+    )
+
+    assert found.correction is None and found.bdtopo is not None
+
+
+def test_a_correction_where_the_lidar_sees_nothing_is_refused():
+    seen = poses.moved(_details(), ORIGIN, poses.Correction(-6.0, 5.0, -12.0))
+    survey = lambda p: poses.segment_distance(p, FACADES)  # noqa: E731
+
+    found = poses.judged(seen, ORIGIN, survey, survey, lambda p, at: np.zeros(len(p), bool))
+
+    assert found.correction is None
+
+
+def test_an_error_as_small_as_the_surveys_own_is_left():
+    seen = poses.moved(_details(), ORIGIN, poses.Correction(0.6, -0.7, 0.6))
+    survey = lambda p: poses.segment_distance(p, FACADES)  # noqa: E731
+
+    found = poses.judged(seen, ORIGIN, survey, survey)
+
+    assert found.correction is None and found.bdtopo is not None
+
+
 def test_details_behind_something_raised_are_not_lidars_to_fit():
     heights = np.full((160, 160), 33.0)  # 0.5 m cells, x 960..1040, y 1960..2040
     heights[78:82, 100:104] = 45.0  # a tree crown 10-12 m east of the panorama, at its height
@@ -248,25 +249,6 @@ def test_details_seen_inside_buildings_by_a_panorama_placed_off_are_still_lidars
     assert found.correction is not None and found.correction.east == pytest.approx(-2.0, abs=0.3)
 
 
-def test_surveys_both_placing_a_panorama_far_off_agree_relative_to_how_far():
-    details = _details()
-    a, b = poses.Correction(-4.0, 3.0, 0.0), poses.Correction(-4.0, 4.6, 0.0)  # 5 m off, 1.6 apart
-
-    assert poses.agreed(a, b, details, ORIGIN) is not None
-    near, apart = poses.Correction(-1.6, 0.0, 0.0), poses.Correction(-1.6, 1.2, 0.0)
-    assert poses.agreed(near, apart, details, ORIGIN) is None  # 1.2 m apart for 1.6 m off: no
-
-
-def test_surveys_disagreeing_on_the_turn_correct_nothing_even_near_the_panorama():
-    rng = np.random.default_rng(0)
-    near = ORIGIN + rng.normal(0, 3.0, (800, 2))  # details close by: a turn moves them little
-    a, b = poses.Correction(-2.0, 0.0, 1.8), poses.Correction(-2.0, 0.0, 4.8)  # turns 3° apart
-
-    assert poses.agreed(a, b, near, ORIGIN) is None
-    big = poses.Correction(-4.0, 3.0, -14.6), poses.Correction(-4.0, 3.0, -13.5)  # 1.1° of 14
-    assert poses.agreed(*big, near, ORIGIN) is not None
-
-
 def test_a_panorama_is_judged_from_its_details_both_surveys_and_the_street(tmp_path):
     n = int(2 * poses.HALF_M / poses.CELL_M)  # the patch kept around (1000, 2000), as fetched
     heights = np.full((n, n), 33.0)
@@ -294,28 +276,6 @@ def test_a_panorama_is_judged_from_its_details_both_surveys_and_the_street(tmp_p
     found = poses.judge(details, np.array([1000.0, 2000.0, 2.5]), 0.0, facades, tmp_path, None)
 
     assert list(found.correction) == pytest.approx([-2.0, 1.5, 0.0], abs=0.3)
-
-
-def test_along_what_the_details_cannot_tell_the_surveys_are_not_compared_nor_followed():
-    rng = np.random.default_rng(0)
-    along = np.column_stack([np.full(2000, 1005.0), rng.uniform(1975, 2025, 2000)])  # one facade
-    a, b = poses.Correction(-2.0, 2.6, 0.0), poses.Correction(-2.0, 5.2, 0.0)  # apart along it
-
-    found = poses.agreed(a, b, along, ORIGIN, free=[np.array([0.0, 1.0])])  # north: not pinned
-
-    assert found is not None and list(found) == pytest.approx([-2.0, 0.0, 0.0])
-    assert poses.agreed(a, b, along, ORIGIN) is None  # compared as they stand: 2.6 m apart
-
-
-def test_a_direction_either_survey_cannot_pin_is_neither_compared_nor_followed():
-    rng = np.random.default_rng(0)
-    along = np.column_stack([np.full(2000, 1005.0), rng.uniform(1975, 2025, 2000)])
-    a, b = poses.Correction(-2.0, 0.0, 0.0), poses.Correction(-2.0, 3.0, 0.0)  # apart along it
-    free = [np.array([0.0, 1.0]), np.array([0.0, -1.0])]  # the same direction, from each fit
-
-    assert list(poses.agreed(a, b, along, ORIGIN, free=free)) == pytest.approx([-2.0, 0.0, 0.0])
-    across = [np.array([0.0, 1.0]), np.array([1.0, 0.0])]  # nothing pinned by both: a turn alone
-    assert poses.agreed(a, b, along, ORIGIN, free=across) is None
 
 
 def test_something_raised_right_over_the_panorama_hides_nothing():
