@@ -33,9 +33,9 @@ def record(
     reason: str | None = None,
 ) -> dict:
     """Append the user's verdict on a photo placed from `inputs` (see cli._inputs), with the
-    camera judged (`camera`: x, y, heading), which a verdict follows to a placement that hardly
-    moves it (see cli._Judged); a "no" with its
-    `reason` when one was given (see REASONS)."""
+    camera judged (`camera`: x, y, heading, fov, horizon), which a verdict follows to a
+    placement that hardly moves it (see cli._Judged); a "no" with its `reason` when one was
+    given (see REASONS)."""
     if verdict not in VERDICTS:
         raise ValueError(f"un verdict est l'un de {VERDICTS}")
     if reason is not None and (verdict != "no" or reason not in REASONS):
