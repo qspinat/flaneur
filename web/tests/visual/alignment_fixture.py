@@ -2,8 +2,8 @@
 leaning panorama of the pilot, and the pipeline's own drawing of it in a view; written to the
 folder given (nothing in the site's data). Run with the pipeline's environment:
     cd pipeline && uv run python ../web/tests/visual/alignment_fixture.py <folder> [fov]
-The view is drawn as the 3D walk opens it: `fov` must be the page's own (72°, see OPENING_FOV);
-another draws the board at another size and the check fails though the page is right."""
+`fov` defaults to the page's opening view (OPENING_FOV); another fails the check though the page
+is right."""
 
 import json
 import shutil
