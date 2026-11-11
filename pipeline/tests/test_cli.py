@@ -448,6 +448,21 @@ def _kept(**more) -> dict:
     return {**fields, **more}
 
 
+def _judged(tmp_path, *rows):
+    path = tmp_path / "anchors.jsonl"
+    path.write_text("".join(json.dumps(r) + "\n" for r in rows))
+    return cli._Judged(path)
+
+
+def _said(verdict, inputs, x=0.0, y=0.0, heading=90.0):
+    return {
+        "photo_id": "a",
+        "verdict": verdict,
+        "inputs": inputs,
+        "camera": {"x": x, "y": y, "heading": heading},
+    }
+
+
 def test_a_placement_kept_with_its_matcher_is_read_as_it_was_found():
     situated = cli._situation(_kept(matcher="lomag"))
 
@@ -596,6 +611,7 @@ def _match_world(tmp_path, monkeypatch, previous: dict, places) -> None:
     for name, value in {
         "MATCHES": tmp_path / "matches.json",
         "MATCH_TRACE": tmp_path / "trace.json",
+        "ANCHORS": tmp_path / "anchors.jsonl",  # the user's verdicts: none unless a test says
         "_setup": lambda: "s",
         "_matching": lambda: (heights, [], lambda year: SimpleNamespace(blocks=None)),
         "_matches": lambda: previous,
@@ -658,17 +674,19 @@ def test_a_redo_that_finds_nothing_keeps_the_placement_made_from_these_inputs(
 
 
 @pytest.mark.parametrize(
-    "before, refused",
+    "before, said",
     [
-        (_kept(inputs="other", matcher="disk", tried=["disk"]), set()),  # placed from others
-        (_kept(matcher="disk", tried=["disk"]), {("pm:1", "i")}),  # turned down
+        (_kept(inputs="other", matcher="disk", tried=["disk"]), []),  # placed from others
+        (_kept(matcher="disk", tried=["disk"]), [_said("no", "i", x=1.0, y=2.0)]),  # turned down
     ],
 )
 def test_a_run_that_finds_nothing_replaces_a_stale_or_refused_placement(
-    tmp_path, monkeypatch, before, refused
+    tmp_path, monkeypatch, before, said
 ):
     _match_world(tmp_path, monkeypatch, {"pm:1": dict(before)}, lambda matcher: None)
-    monkeypatch.setattr(cli, "_refused", lambda: refused)
+    (tmp_path / "anchors.jsonl").write_text(
+        "".join(json.dumps({**r, "photo_id": "pm:1"}) + "\n" for r in said)
+    )
 
     cli.match_photos(photo=None, again=False, force=True)
 
@@ -727,9 +745,9 @@ def test_a_proposed_camera_is_a_placement_once_said_yes_to(
     cv2.imwrite(str(photo), np.zeros((8, 8, 3), np.uint8))
     proposal = cli._proposals(
         {"a": {"candidates": [_candidate(60, "position incertaine")]}},
-        {"a": {"inputs": "i", "tried": ["lomag"]}},
+        {"a": {"inputs": "s:i", "tried": ["lomag"]}},
         lambda k: (0.0, 0.0),
-        lambda k: "i",
+        lambda k: "s:i",
         2.4,
     )
     (tmp_path / "proposed.json").write_text(json.dumps(proposal))
@@ -737,9 +755,12 @@ def test_a_proposed_camera_is_a_placement_once_said_yes_to(
     monkeypatch.setattr(cli, "_matches", dict)
     monkeypatch.setattr(cli, "_exported", lambda photo_id: photo)
     monkeypatch.setattr(cli, "_scenes_now", lambda: {"a": "s"})
-    monkeypatch.setattr(cli, "_inputs", lambda scene, photo_id: inputs_now)
-    said = {"a": {"verdict": verdict, "inputs": proposal["a"]["inputs"]}} if verdict else {}
-    monkeypatch.setattr(cli, "_verdicts", lambda: said)
+    monkeypatch.setattr(cli, "_photo_part", lambda photo_id: inputs_now)  # the photo now
+    a = proposal["a"]
+    camera = {"x": a["x"], "y": a["y"], "heading": a["heading"]}
+    said = [{"photo_id": "a", "verdict": verdict, "inputs": a["inputs"], "camera": camera}]
+    (tmp_path / "anchors.jsonl").write_text(json.dumps(said[0]) + "\n" if verdict else "")
+    monkeypatch.setattr(cli, "ANCHORS", tmp_path / "anchors.jsonl")
 
     assert ("a" in cli._situated()) == placed
 
@@ -800,18 +821,18 @@ def test_a_no_to_a_proposed_camera_leaves_the_photo_to_chaining(monkeypatch):
     assert cli._turned_down() == {"b"}
 
 
-def test_a_proposed_camera_judged_already_is_not_offered_again():
-    proposed = {
-        "a": {"inputs": "i:proposed-1"},
-        "b": {"inputs": "i:proposed-2"},
-        "c": {"inputs": "i:proposed-3"},
-    }
-    verdicts = {
-        "a": {"verdict": "no", "inputs": "i:proposed-1"},
-        "b": {"verdict": "no", "inputs": "i:proposed-0"},
-    }
+def test_a_proposed_camera_judged_already_is_not_offered_again(tmp_path):
+    def camera(n):
+        return {"inputs": f"s:i:proposed-{n}", "x": 10.0 * n, "y": 0.0, "heading": 90.0}
 
-    assert set(cli._to_judge(proposed, verdicts)) == {"b", "c"}
+    proposed = {"a": camera(1), "b": camera(2), "c": camera(3)}
+    judged = _judged(
+        tmp_path,
+        {**_said("no", "s:i:proposed-1", x=10.0), "photo_id": "a"},  # that very camera
+        {**_said("no", "s:i:proposed-0", x=0.0), "photo_id": "b"},  # another, 20 m away
+    )
+
+    assert set(cli._to_judge(proposed, judged)) == {"b", "c"}
 
 
 def test_a_seeds_image_is_read_where_it_was_kept_and_never_published(monkeypatch, tmp_path):
@@ -860,3 +881,84 @@ def test_a_photos_fingerprint_changes_with_what_its_match_is_found_from():
     assert _scene([_panorama(1, 10.0, roll=1.0), *near_by[1:]]) != before  # one levelled again
     assert _scene(near_by, here=(0.5, 0.0)) != before  # the photo's place moved
     assert _scene(near_by, code="other") != before  # the code that finds it changed
+
+
+def test_a_verdict_follows_its_camera_found_again_from_other_panoramas(tmp_path):
+    judged = _judged(tmp_path, _said("yes", "oldscene:img:lomag"))
+
+    assert judged.on("a", "newscene:img", 0.6, 0.6, 91.5)["verdict"] == "yes"  # hardly moved
+    assert judged.on("a", "newscene:img", 1.2, 0.0, 90.0) is None  # moved
+    assert judged.on("a", "newscene:img", 0.0, 0.0, 93.0) is None  # turned
+    assert judged.on("a", "newscene:other", 0.0, 0.0, 90.0) is None  # another crop of the photo
+    assert judged.on("a", "newscene:img:ab12cd34", 0.0, 0.0, 90.0) is None  # landmarks marked since
+
+
+def test_the_last_word_on_a_camera_holds(tmp_path):
+    judged = _judged(tmp_path, _said("yes", "s1:img"), _said("no", "s2:img", x=0.3))
+
+    assert judged.on("a", "s3:img", 0.1, 0.0, 90.0)["verdict"] == "no"
+    assert judged.on("a", "s1:img", 50.0, 0.0, 0.0)["verdict"] == "yes"  # its very inputs
+
+
+def test_a_yes_holds_while_the_photo_is_the_same(tmp_path):
+    judged = _judged(tmp_path, _said("yes", "oldscene:img"))
+    placed = {"inputs": "oldscene:img", "x": 0.0, "y": 0.0, "heading": 90.0}
+
+    assert judged.holds("a", placed, "img")
+    assert not judged.holds("a", placed, "recropped")
+    assert not _judged(tmp_path, _said("near", "oldscene:img")).holds("a", placed, "img")
+
+
+def _placed_now(monkeypatch, tmp_path, kept, *said, photo="img"):
+    """What is placed now (`_situated`, `_confirmed`) of one photo "a" stored as `kept`, its
+    scene now "new" and the photo itself now `photo`, the user having `said` these."""
+    image = tmp_path / "old.jpg"
+    cv2.imwrite(str(image), np.zeros((8, 8, 3), np.uint8))
+    anchors = tmp_path / "anchors.jsonl"
+    anchors.write_text("".join(json.dumps(r) + "\n" for r in said))
+    monkeypatch.setattr(cli, "_matches", lambda: {"a": kept})
+    monkeypatch.setattr(cli, "_exported", lambda photo_id: image)
+    monkeypatch.setattr(cli, "_scenes_now", lambda: {"a": "new"})
+    monkeypatch.setattr(cli, "_photo_part", lambda photo_id: photo)
+    monkeypatch.setattr(cli, "PROPOSED_CAMERAS", tmp_path / "proposed.json")
+    monkeypatch.setattr(cli, "ANCHORS", anchors)
+    return set(cli._situated()), set(cli._confirmed())
+
+
+def test_a_placement_said_yes_to_stands_while_the_photo_is_the_same(monkeypatch, tmp_path):
+    kept, yes = _kept(inputs="old:img"), _said("yes", "old:img", x=1.0, y=2.0)
+
+    assert _placed_now(monkeypatch, tmp_path, kept, yes) == ({"a"}, {"a"})
+    assert _placed_now(monkeypatch, tmp_path, kept, yes, photo="recropped") == (set(), set())
+    assert _placed_now(monkeypatch, tmp_path, kept) == (set(), set())  # stale, not judged
+
+
+def test_a_verdict_given_to_a_camera_holds_for_it_found_again(monkeypatch, tmp_path):
+    found_again = _kept(inputs="new:img", x=1.3)  # 0.3 m from the camera judged
+
+    no = _said("no", "old:img", x=1.0, y=2.0)
+    yes = _said("yes", "old:img", x=1.0, y=2.0)
+
+    assert _placed_now(monkeypatch, tmp_path, found_again) == ({"a"}, set())  # to judge
+    assert _placed_now(monkeypatch, tmp_path, found_again, no) == (set(), set())
+    assert _placed_now(monkeypatch, tmp_path, found_again, yes) == ({"a"}, {"a"})
+
+
+ELSEWHERE = match.Camera(30.0, 2.0, 1.5, 90.0, 0.5, 60.0, agree=30, panoramas=2)  # 29 m away
+
+
+@pytest.mark.parametrize(
+    ("photo", "again", "found"),
+    [(None, True, ELSEWHERE), (["pm:1"], False, ELSEWHERE), (["pm:1"], False, None)],
+)
+def test_matching_never_takes_away_a_placement_said_yes_to(
+    tmp_path, monkeypatch, photo, again, found
+):
+    before = _kept(inputs="old:h", matcher="disk", tried=["disk"])  # other panoramas then
+    _match_world(tmp_path, monkeypatch, {"pm:1": dict(before)}, lambda matcher: found)
+    yes = {**_said("yes", "old:h", x=1.0, y=2.0), "photo_id": "pm:1"}
+    (tmp_path / "anchors.jsonl").write_text(json.dumps(yes) + "\n")
+
+    cli.match_photos(photo=photo, again=again, force=True)
+
+    assert json.loads((tmp_path / "matches.json").read_text())["pm:1"] == before

@@ -72,6 +72,7 @@ from flaneur.panoramas import PANORAMA_HEIGHT_M
 from flaneur.panoramax import Picture
 from flaneur.read import read_all
 from flaneur.sources import albert_kahn, paris_musees, write_atomic, write_json
+from flaneur.sources import rows as jsonl_rows
 
 ROOT = Path(__file__).resolve().parents[3]
 DATA = ROOT / "data"
@@ -919,40 +920,49 @@ def _not_chained(matches: dict[str, dict | None], situated: dict[str, match.Situ
 
 def _situated() -> dict[str, match.Situated]:
     """The old photos whose camera was found against today's panoramas, from what they are
-    now (a match found from other panoramas or another crop of the photo is left out), and
-    not turned down by the user; and those whose camera matching turned down the user said
-    yes to (see _proposals)."""
-    scenes, verdicts = _scenes_now(), _verdicts()
-    refused = _refused(verdicts)
+    now (a match found from other panoramas or another crop of the photo is left out, unless
+    the user said yes to it and the photo is the same: see _Judged.holds), and not turned down
+    by the user (as placed, or as found again: see _Judged.on); and those whose camera matching
+    turned down the user said yes to (see _proposals)."""
+    scenes, judged = _scenes_now(), _Judged()
     found = {}
     for photo_id, m in _matches().items():
         if m and "x" in m and photo_id in scenes and _exported(photo_id).exists():
-            now = _inputs(scenes[photo_id], photo_id)
-            if _placed_now(m, now) and (photo_id, m["inputs"]) not in refused:
+            said = judged.on(photo_id, m["inputs"], m["x"], m["y"], m["heading"])
+            if said and said["verdict"] != "yes":
+                continue
+            if _placed_now(m, _inputs(scenes[photo_id], photo_id)) or judged.holds(
+                photo_id, m, _photo_part(photo_id)
+            ):
                 found[photo_id] = _situation(m)
-    for photo_id, p in _proposed_now(scenes).items():
-        said = verdicts.get(photo_id) or {}
-        if photo_id not in found and said.get("verdict") == "yes" and said["inputs"] == p["inputs"]:
+    for photo_id, p in _proposed_now(scenes, judged).items():
+        said = judged.on(photo_id, p["inputs"], p["x"], p["y"], p["heading"])
+        if photo_id not in found and said and said["verdict"] == "yes":
             found[photo_id] = _situation(p)
     return found
 
 
-def _proposed_now(scenes: dict[str, str]) -> dict[str, dict]:
+def _proposed_now(scenes: dict[str, str], judged: "_Judged") -> dict[str, dict]:
     """The cameras proposed (see _proposals) for photos as they are now (`scenes`: each one's,
-    see _scene_of)."""
+    see _scene_of), or said yes to while the photo is the same (see _Judged.holds)."""
     return {
         k: p
         for k, p in register.load(PROPOSED_CAMERAS).items()
-        if k in scenes and _exported(k).exists() and _placed_now(p, _inputs(scenes[k], k))
+        if k in scenes
+        and _exported(k).exists()
+        and (_placed_now(p, _inputs(scenes[k], k)) or judged.holds(k, p, _photo_part(k)))
     }
 
 
-def _to_judge(proposed: dict[str, dict], verdicts: dict[str, dict]) -> dict[str, dict]:
-    """The cameras proposed the user has not turned down (no or near to that very camera)."""
+def _to_judge(proposed: dict[str, dict], judged: "_Judged") -> dict[str, dict]:
+    """The cameras proposed the user has not turned down (no or near to that camera)."""
     return {
         k: p
         for k, p in proposed.items()
-        if not ((v := verdicts.get(k)) and v["inputs"] == p["inputs"] and v["verdict"] != "yes")
+        if not (
+            (said := judged.on(k, p["inputs"], p["x"], p["y"], p["heading"]))
+            and said["verdict"] != "yes"
+        )
     }
 
 
@@ -1022,14 +1032,15 @@ def propose_turned_down() -> None:
 def _confirmed() -> dict[str, match.Situated]:
     """The situated photos the user said yes to as they are placed now: the photo walk takes
     their place and the 3D walk shows them (unless their place was set by hand since: a
-    reviewed place wins, see export.photos). A placement not judged, or judged on other inputs,
-    waits for a yes (a camera can collapse onto a panorama's spot and still look right).
+    reviewed place wins, see export.photos). A placement not judged (as placed, or as found
+    again: see _Judged.on) waits for a yes (a camera can collapse onto a panorama's spot and
+    still look right).
     Photos placed by chaining are not among them: chaining is set aside."""
-    verdicts = _verdicts()
+    judged = _Judged()
     return {
         photo_id: m
         for photo_id, m in _situated().items()
-        if (v := verdicts.get(photo_id)) and v["verdict"] == "yes" and v["inputs"] == m.inputs
+        if (said := judged.on(photo_id, m.inputs, m.x, m.y, m.heading)) and said["verdict"] == "yes"
     }
 
 
@@ -1254,7 +1265,7 @@ class _Run(NamedTuple):
     traces: dict
     run: dict
     placed: set[str]
-    refused: set[tuple[str, str]]
+    judged: "_Judged"
 
 
 def _match_with(matcher: str, photos: list[export.WalkPhoto], at: _Run) -> None:
@@ -1285,9 +1296,17 @@ def _match_with(matcher: str, photos: list[export.WalkPhoto], at: _Run) -> None:
         at.tried[me.id] = [m for m in MATCHERS if m in at.tried[me.id] or m == matcher]
         if camera is None:  # kept, with what it was tried from: not tried again for nothing
             before = at.found.get(me.id)
-            if not (_placed_now(before, inputs) and (me.id, before["inputs"]) not in at.refused):
+            if not _stands(before, inputs, at.judged, me.id):
                 at.found[me.id] = {"inputs": inputs, "tried": at.tried[me.id]}
             typer.echo(f"{me.id} : rien de sûr ({MATCHERS[matcher].label})")
+        elif (
+            (before := at.found.get(me.id))
+            and "x" in before
+            and at.judged.holds(me.id, before, _photo_part(me.id))
+            and not _same_camera(before, camera.x, camera.y, camera.heading)
+        ):  # said yes to (asked again by name): the user's word stands
+            at.placed.add(me.id)
+            typer.echo(f"{me.id} : gardée telle que dite juste, trouvée ailleurs cette fois")
         else:
             moved = float(np.hypot(camera.x - here[0], camera.y - here[1]))
             outline = outlines.contrast(_grey(image), camera, now.blocks)
@@ -1342,15 +1361,21 @@ def match_photos(
     heights, near_by, then = _matching()
     scenes = _scenes(walk, near_by)
     blocks = then(date.today().year).blocks
-    found, refused = _matches(), _refused()
+    found, judged = _matches(), _Judged()
     chosen = [me for me in _to_match(walk) if not photo or me.id in photo]
     tried, to_try = {}, {}  # the matchers each photo was tried with, and is to be
     for me in chosen:
         kept, inputs = found.get(me.id), _inputs(scenes[me.id], me.id)
-        if again or photo:
+        placed = kept if kept and "x" in kept else None
+        if placed and not photo and judged.holds(me.id, placed, _photo_part(me.id)):
+            tried[me.id], to_try[me.id] = _tried(kept, inputs), []  # said yes to: not redone
+        elif again or photo:
             tried[me.id], to_try[me.id] = [], list(MATCHERS)
         else:
-            turned_down = (me.id, (kept or {}).get("inputs")) in refused
+            said = placed and judged.on(
+                me.id, placed["inputs"], placed["x"], placed["y"], placed["heading"]
+            )
+            turned_down = bool(said) and said["verdict"] != "yes"
             tried[me.id] = _tried(kept, inputs)
             to_try[me.id] = _left_to_try(kept, inputs, turned_down)
     at = _Run(
@@ -1363,7 +1388,7 @@ def match_photos(
         traces=register.load(MATCH_TRACE),
         run={},
         placed=set(),
-        refused=refused,
+        judged=judged,
     )
 
     chosen = sorted((me for me in chosen if to_try[me.id]), key=_visit)
@@ -1406,9 +1431,93 @@ def _where(me: export.WalkPhoto, heights: scene.CameraHeights, now: "Then") -> m
     return match.Where(heights.streets, now.free, _place_of(me), _sights().get(me.id, ()))
 
 
+def _said_on(placed: list[dict]) -> dict[str, dict]:
+    """For each photo `placed` (id, inputs, camera), the user's word that holds for it as it is
+    placed (see _Judged.on), read anew: as given to it, with its inputs."""
+    judged = _Judged()
+    return {
+        p["id"]: {**said, "inputs": p["inputs"]}
+        for p in placed
+        if (
+            said := judged.on(
+                p["id"], p["inputs"], *(p["camera"][k] for k in ("x", "y", "heading"))
+            )
+        )
+    }
+
+
 def _verdicts() -> dict[str, dict]:
     """The user's last word on each photo placed (ANCHORS: yes, near or no)."""
     return review.latest(ANCHORS, key="photo_id")
+
+
+# A verdict holds for a camera found again this near the one judged, and turned this little:
+# placed from other panoramas, it is the same camera (to the eye, on the confirmation page).
+CARRY_M = 1.0
+CARRY_DEG = 2.0
+
+
+def _same_camera(camera: dict, x: float, y: float, heading: float) -> bool:
+    """Whether a camera at x, y, `heading` is `camera` (x, y, heading) found again: within
+    CARRY_M of it, turned within CARRY_DEG."""
+    return bool(
+        np.hypot(camera["x"] - x, camera["y"] - y) <= CARRY_M
+        and abs(angle(camera["heading"], heading)) <= CARRY_DEG
+    )
+
+
+def _stands(before: dict | None, inputs: str, judged: "_Judged", photo_id: str) -> bool:
+    """Whether a placement kept (`before`) stands though a redo from `inputs` found nothing:
+    the user said yes to it and the photo is the same, or it was made from these very inputs
+    and the user did not turn it down."""
+    if not before or "x" not in before:
+        return False
+    if judged.holds(photo_id, before, _photo_part(photo_id)):
+        return True
+    said = judged.on(photo_id, before["inputs"], before["x"], before["y"], before["heading"])
+    return _placed_now(before, inputs) and not (said and said["verdict"] != "yes")
+
+
+def _photo_of(inputs: str) -> str:
+    """The part of a placement's inputs the photo itself gives (see _inputs): its image, and
+    its landmarks' mark when it has any."""
+    fields = inputs.split(":")
+    if len(fields) > 2 and re.fullmatch(r"[0-9a-f]{8}", fields[2]):
+        return f"{fields[1]}:{fields[2]}"
+    return fields[1] if len(fields) > 1 else ""
+
+
+class _Judged:
+    """Every verdict the user gave (ANCHORS), by photo, in the order given: what each says
+    of a placement."""
+
+    def __init__(self, path: Path | None = None) -> None:
+        self.by_photo: dict[str, list[dict]] = {}
+        for row in jsonl_rows(path or ANCHORS):
+            self.by_photo.setdefault(row["photo_id"], []).append(row)
+
+    def on(self, photo_id: str, inputs: str, x: float, y: float, heading: float) -> dict | None:
+        """The user's last word on a placement (from `inputs`, its camera at x, y, `heading`):
+        given to it, or to a camera of the same photo found within CARRY_M and CARRY_DEG of it
+        (placed again from other panoramas, or by the other matcher)."""
+        for said in reversed(self.by_photo.get(photo_id, [])):
+            if said["inputs"] == inputs:
+                return said
+            camera = said.get("camera")  # recorded since 10/11
+            if (
+                camera
+                and _photo_of(said["inputs"]) == _photo_of(inputs)
+                and _same_camera(camera, x, y, heading)
+            ):
+                return said
+        return None
+
+    def holds(self, photo_id: str, placed: dict, photo_now: str) -> bool:
+        """Whether a placement (`placed`: as kept) the user said yes to stands as it is: the
+        photo is the same (`photo_now`, see _photo_part), whatever became of the panoramas (its
+        camera is in the world, not in a panorama)."""
+        said = self.on(photo_id, placed["inputs"], placed["x"], placed["y"], placed["heading"])
+        return bool(said) and said["verdict"] == "yes" and _photo_of(placed["inputs"]) == photo_now
 
 
 def _chain_setup() -> str:
@@ -2080,8 +2189,8 @@ def confirm_placed(port: int = 8768, open_browser: bool = True) -> None:
         if k in rounds and situated[k].inputs == inputs:
             rounds[k]["doubt"] = f"jugée fausse à l'œil : {why}"
     kept = _matches()  # round 0: each placement as kept, its matcher with it
-    setup = _setup()
-    for k, p in _to_judge(_proposed_now(setup), _verdicts()).items():  # turned down: yes or no?
+    scenes, judged = _scenes_now(), _Judged()
+    for k, p in _to_judge(_proposed_now(scenes, judged), judged).items():  # turned down: yes or no?
         if k in titles and k not in situated:
             situated[k] = _situation(p)
             rounds[k] = {"round": 0, "from": [], "proposed": p["why"]}
@@ -2113,7 +2222,7 @@ def confirm_placed(port: int = 8768, open_browser: bool = True) -> None:
         return cv2.imencode(".jpg", picture, SHEET_JPEG)[1].tobytes()
 
     _serve_page(
-        lambda: confirming.serve(placed, ANCHORS, _verdicts, frame, port),
+        lambda: confirming.serve(placed, ANCHORS, functools.partial(_said_on, placed), frame, port),
         f"photos situées ({len(placed)})",
         port,
         open_browser,
