@@ -92,6 +92,23 @@ export function hashOf(id: string): string {
   return `#/${encodeURIComponent(id)}`;
 }
 
+/** Writes `hash` into the address: as a new entry (`push`), or into this one unless it already
+ *  says so. A browser may refuse (Firefox, after very many changes in a few seconds): the photo
+ *  must still show, so the refusal is let be. */
+export function setAddress(
+  hash: string,
+  push: boolean,
+  history: Pick<History, 'pushState' | 'replaceState'> = window.history,
+  location: Pick<Location, 'hash'> = window.location,
+): void {
+  if (!push && location.hash === hash) return;
+  try {
+    (push ? history.pushState : history.replaceState).call(history, null, '', hash);
+  } catch (error) {
+    if (!(error instanceof DOMException && error.name === 'SecurityError')) throw error;
+  }
+}
+
 /** "1912", "1905–1906", or "" when unknown. */
 export function yearsLabel([start, end]: [number | null, number | null]): string {
   if (start == null && end == null) return '';

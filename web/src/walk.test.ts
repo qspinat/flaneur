@@ -8,6 +8,7 @@ import {
   erasOf,
   fitting,
   hashOf,
+  setAddress,
   httpsUrl,
   largest,
   photoIdFrom,
@@ -143,5 +144,35 @@ describe('the 3D walk, opened on a photo', () => {
 
     expect(parsePhoto3d(link)).toEqual({ id: 'paris_musees:171285', range: [1855, 1878] });
     expect(parsePhoto3d('#2.3466,48.852,40,1850-2026')).toBeNull();
+  });
+});
+
+
+describe('setAddress', () => {
+  const browser = (hash: string, refuse = false) => {
+    const calls: string[] = [];
+    const write = (how: string) => (_: unknown, __: string, url?: string | URL | null) => {
+      if (refuse) throw new DOMException('The operation is insecure.', 'SecurityError');
+      calls.push(`${how} ${url}`);
+    };
+    return { calls, history: { pushState: write('push'), replaceState: write('replace') }, location: { hash } };
+  };
+
+  it('writes a new entry, or this one', () => {
+    const b = browser('#/a');
+    setAddress('#/b', true, b.history, b.location);
+    setAddress('#/c', false, b.history, b.location);
+    expect(b.calls).toEqual(['push #/b', 'replace #/c']);
+  });
+
+  it('leaves this entry alone when it already says so', () => {
+    const b = browser('#/a');
+    setAddress('#/a', false, b.history, b.location);
+    expect(b.calls).toEqual([]);
+  });
+
+  it('lets a browser that refuses be: the photo still shows', () => {
+    const b = browser('#/a', true);
+    expect(() => setAddress('#/b', true, b.history, b.location)).not.toThrow();
   });
 });

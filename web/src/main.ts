@@ -9,6 +9,7 @@ import {
   erasOf,
   fitting,
   hashOf,
+  setAddress,
   offerOf3d,
   photo3d,
   json,
@@ -231,7 +232,7 @@ class Walker {
   private toPlan(event?: Event): void {
     event?.preventDefault();
     if (!$('home').hidden) return;
-    history.pushState(null, '', '#/');
+    setAddress('#/', true);
     this.route();
   }
 
@@ -287,7 +288,7 @@ class Walker {
 
   /** Into a photograph from the plan: its print grows into it. */
   private enter(photo: Photo): void {
-    history.pushState(null, '', hashOf(photo.id));
+    setAddress(hashOf(photo.id), true);
     morph($('print-img'), $('photo'), () => this.showPhoto(photo));
   }
 
@@ -333,14 +334,14 @@ class Walker {
   }
 
   private go(photo: Photo): void {
-    history.pushState(null, '', hashOf(photo.id));
+    setAddress(hashOf(photo.id), true);
     this.arrive(photo);
   }
 
   private arrive(photo: Photo): void {
     this.here = photo;
     this.showingToday = false;
-    history.replaceState(null, '', hashOf(photo.id));
+    setAddress(hashOf(photo.id), false);
     const img = $<HTMLImageElement>('photo');
     img.classList.add('loading');
     img.onload = () => {
