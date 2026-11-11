@@ -11,6 +11,7 @@ They are kept apart from `locations`, which holds what the caption alone tells.
 
 import json
 import sqlite3
+from collections.abc import Collection
 from pathlib import Path
 
 from shapely.geometry import MultiPoint, Point
@@ -106,7 +107,16 @@ def publishable(
         )
         if (pilot_dir / "photos" / safe_name(r["photo_id"]) / "info.json").exists()
     ]
-    return dedup.one_per_negative(rows, negatives)
+    # a negative shown by a print a person placed, else (only then) by a seeded one
+    people = dedup.one_per_negative([r for r in rows if r["confidence"] != SEED], negatives)
+    shown = {negatives.get(r["photo_id"], [r["photo_id"]])[0] for r in people}
+    only_seeded = [
+        r
+        for r in dedup.one_per_negative([r for r in rows if r["confidence"] == SEED], negatives)
+        if negatives.get(r["photo_id"], [r["photo_id"]])[0] not in shown
+    ]
+    order = {r["photo_id"]: i for i, r in enumerate(rows)}
+    return sorted(people + only_seeded, key=lambda r: order[r["photo_id"]])
 
 
 def area(conn: sqlite3.Connection, margin_m: float) -> BaseGeometry:
@@ -118,7 +128,12 @@ def area(conn: sqlite3.Connection, margin_m: float) -> BaseGeometry:
     return points.envelope.buffer(margin_m).envelope
 
 
-def seeds(conn: sqlite3.Connection, pilot_dir: Path, area: BaseGeometry) -> list[dict]:
+def seeds(
+    conn: sqlite3.Connection,
+    pilot_dir: Path,
+    area: BaseGeometry,
+    placed: Collection[str] = (),
+) -> list[dict]:
     """A start for each prepared photo with no placement of its own and an open licence: the
     museum's camera position, else the door or corner its caption names, else the middle of its
     street within `area` (Lambert-93); none for what the caption reading says is not a street
@@ -129,6 +144,7 @@ def seeds(conn: sqlite3.Connection, pilot_dir: Path, area: BaseGeometry) -> list
         for f in sorted((pilot_dir / "photos").glob("*"))
         if (f / "info.json").exists() and not (f / "placement.json").exists()
     ]
+    unplaced = [i for i in unplaced if i not in placed]  # `placed`: given its negative's
     started = []
     for r in conn.execute(
         "SELECT p.id, p.camera_lon, p.camera_lat, l.point, s.geometry, g.kind "
@@ -169,9 +185,12 @@ def _start(point: str | None, street: str | None, area: BaseGeometry) -> tuple[f
         stretch = from_geojson(street).intersection(area)
         if stretch.is_empty:
             return None
-        if hasattr(stretch, "geoms"):  # in pieces: the longest
-            stretch = max(stretch.geoms, key=lambda piece: piece.length)
-        at = stretch.interpolate(0.5, normalized=True) if stretch.length else stretch.centroid
+        if hasattr(stretch, "geoms"):  # in pieces: the largest
+            stretch = max(stretch.geoms, key=lambda piece: piece.area or piece.length)
+        if stretch.geom_type == "LineString":
+            at = stretch.interpolate(0.5, normalized=True)
+        else:  # a footprint, as streets are stored: a point surely on it
+            at = stretch.representative_point()
     else:
         return None
     at = to_degrees(at)

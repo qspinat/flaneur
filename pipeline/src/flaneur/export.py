@@ -417,16 +417,22 @@ def write_seeds(
     seeds: list[WalkPhoto], client: httpx.Client, cache_dir: Path, out_dir: Path
 ) -> int:
     """Write the images of photos only seeded, apart from the site's: the one size matching
-    reads, once, never published. Returns how many are there."""
-    there = 0
-    for me in seeds:
-        path = out_dir / image_name(me.id)
-        if not path.exists():
-            try:
-                _save(_framed(me, client, cache_dir), PHOTO_SIDE, path)
-            except (httpx.HTTPError, OSError):
-                continue
-        there += 1
+    reads, as cropped now, never published; the images of photos no longer seeds removed.
+    Returns how many are there."""
+
+    def one(me: WalkPhoto) -> bool:
+        try:
+            _save(_framed(me, client, cache_dir), PHOTO_SIDE, out_dir / image_name(me.id))
+        except (httpx.HTTPError, OSError):
+            return False
+        return True
+
+    with ThreadPoolExecutor(DOWNLOADS_AT_ONCE) as pool:
+        there = sum(pool.map(one, seeds))
+    kept = {image_name(me.id) for me in seeds}
+    for path in (out_dir / "photos").glob("*"):
+        if f"photos/{path.name}" not in kept:
+            path.unlink()
     return there
 
 

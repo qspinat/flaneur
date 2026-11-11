@@ -239,3 +239,59 @@ def test_no_start_for_an_unverified_image_an_interior_or_a_photo_placed_by_hand(
     (placed / "placement.json").write_text("{}")
 
     assert placements.seeds(conn, pilot_dir, pilot.AREA) == []
+
+
+def test_a_street_known_by_its_footprint_starts_its_photos_on_it(tmp_path):
+    from shapely.geometry import box
+
+    from flaneur import pilot
+    from flaneur.gazetteer import to_geojson
+
+    conn = db.connect(tmp_path / "f.sqlite")
+    centre = pilot.AREAS["cite"].centroid
+    footprint = box(centre.x - 400, centre.y + 40, centre.x + 400, centre.y + 60)  # as stored
+    conn.execute(
+        "INSERT INTO streets (id, label, status, arrondissements, geometry) "
+        "VALUES ('quai', 'quai aux Fleurs', 'current', '[4]', ?)",
+        (to_geojson(footprint),),
+    )
+    _photo(conn, tmp_path / "pilot", "pm:street", street="quai")
+
+    (seed,) = placements.seeds(conn, tmp_path / "pilot", pilot.AREA)
+
+    at = to_metres(Point(seed["lon"], seed["lat"]))
+    assert at.within(footprint) and at.within(pilot.AREA)
+
+
+def test_a_print_given_its_negatives_placement_gets_no_seed(tmp_path):
+    from flaneur import pilot
+
+    conn = db.connect(tmp_path / "f.sqlite")
+    _photo(conn, tmp_path / "pilot", "pm:other", door=pilot.AREAS["cite"].centroid)
+
+    assert placements.seeds(conn, tmp_path / "pilot", pilot.AREA, placed={"pm:other"}) == []
+
+
+def test_a_negative_is_shown_by_the_print_a_person_placed_rather_than_one_only_seeded(tmp_path):
+    from flaneur import dedup
+
+    conn = db.connect(tmp_path / "f.sqlite")
+    for photo_id, confidence in (("pm:a", "seed"), ("pm:b", "high")):
+        conn.execute(
+            "INSERT INTO photos (id, source, source_id, license, credit, raw) "
+            f"VALUES ('{photo_id}', 'pm', '{photo_id}', 'CC0', 'x', '{{}}')"
+        )
+        conn.execute(
+            "INSERT INTO placements (photo_id, is_street_view, lon, lat, confidence) "
+            f"VALUES ('{photo_id}', 1, 2.35, 48.85, '{confidence}')"
+        )
+        folder = tmp_path / "pilot" / "photos" / photo_id.replace(":", "_")
+        folder.mkdir(parents=True)
+        (folder / "info.json").write_text("{}")
+    conn.execute(
+        "INSERT INTO copies (photo_id, negative) VALUES ('pm:a', 'pm:a'), ('pm:b', 'pm:a')"
+    )
+
+    rows = placements.publishable(conn, tmp_path / "pilot", dedup.negatives(conn), seeded=True)
+
+    assert [r["photo_id"] for r in rows] == ["pm:b"]

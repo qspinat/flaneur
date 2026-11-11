@@ -195,7 +195,8 @@ def import_placements() -> None:
     """Enregistre les placements fins du quartier pilote et les compare aux positions connues."""
     with closing(db.connect(DB_PATH)) as conn:
         found = placements.inherit(placements.load(DATA / "pilot"), dedup.negatives(conn))
-        seeded = placements.seeds(conn, DATA / "pilot", pilot.AREA)
+        placed = {p["photo_id"] for p in found}  # its own placement, or its negative's
+        seeded = placements.seeds(conn, DATA / "pilot", pilot.AREA, placed)
         placements.save(conn, found + seeded)
         distances = placements.distances_to_truth(conn)
     typer.echo(f"{len(found)} placements enregistrés, et {len(seeded)} amorces (à situer)")

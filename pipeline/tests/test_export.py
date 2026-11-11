@@ -349,3 +349,22 @@ def test_a_seed_is_matched_but_not_shown_until_its_camera_is_confirmed(tmp_path)
     assert seen == {"pm:1": True, "pm:2": False}  # matching sees it
     assert shown == ["pm:2"]  # the walk does not
     assert then["pm:1"] == (2.347, 100)  # until its camera is confirmed
+
+
+def test_seeds_images_are_written_again_each_time_and_others_removed(tmp_path):
+    from PIL import Image
+
+    me = photo("pm:1")
+    archive = tmp_path / "cache" / "archive"
+    archive.mkdir(parents=True)
+    Image.new("RGB", (80, 60), "grey").save(archive / "pm_1.jpg")
+    out = tmp_path / "seeded"
+    (out / "photos").mkdir(parents=True)
+    (out / export.image_name("pm:old")).write_bytes(b"stale")
+    (out / export.image_name("pm:1")).write_bytes(b"an older crop")
+
+    there = export.write_seeds([me], None, tmp_path / "cache", out)
+
+    assert there == 1
+    assert not (out / export.image_name("pm:old")).exists()
+    assert (out / export.image_name("pm:1")).read_bytes() != b"an older crop"

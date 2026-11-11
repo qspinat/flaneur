@@ -179,7 +179,7 @@ def save(conn: sqlite3.Connection, found: list[set[str]]) -> int:
         r["id"]: (
             r["license"] not in db.OPEN_LICENSES,
             r["license"] != "CC0",  # public domain rather than a print that asks for credit
-            r["confidence"] == db.SEED,
+            r["confidence"] in (None, db.SEED),  # placed by a person, rather than seeded or not
             not r["is_street_view"],
             r["match"] is None,
             r["viewpoint"] is None,
