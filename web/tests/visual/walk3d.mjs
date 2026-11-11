@@ -56,7 +56,8 @@ print(f"{((a > 0) & (b > 0)).sum() / max(1, ((a > 0) | (b > 0)).sum()):.3f} {abs
 `, `${fixtures}/expected.png`, `${out}/walk3d-shown.png`]).toString().trim().split(' ').map(Number);
 const [overlap, dx, dy, shown] = measured;
 console.log(`alignment: overlap ${overlap}, shift ${dx} px, ${dy} px (${shown} red pixels shown)`);
-check(shown > 1000 && Math.hypot(dx, dy) <= 2, 'the photo lies where the pipeline puts it (within 2 px)');
+// a shift means something only where the boards overlap
+check(shown > 1000 && overlap >= 0.6 && Math.hypot(dx, dy) <= 2, 'the photo lies where the pipeline puts it (within 2 px)');
 
 await page.evaluate(() => document.querySelectorAll('body > *').forEach((e) => (e.style.visibility = '')));
 const credits = await page.locator('#credits-list').textContent(); // folded away: its text still

@@ -907,7 +907,7 @@ function onLine(px) {
   return best;
 }
 $('third').addEventListener('click', async (e) => {
-  if (!pairing || !pairs.length || !third) return;
+  if (!pairing || !pairs.length || !third || !measurable($('third'))) return;
   const pair = pairs[aimed()], px = onLine(pixelOf($('third'), e)), neighbour = third;
   try {
     const found = await post('/api/second', about({ view_px: pair[1], neighbour, neighbour_px: px }));
@@ -957,6 +957,21 @@ function help() {
     : '';
   $('points-help').textContent = pairing && pairs.length ? `Un point se déplace d'un clic dessus.${deep}` : '';
   refreshChrome();
+}
+/** Whether `img` has its pixels: one coming in (another panorama's, say) keeps its place on
+ *  screen without them, and a click there would be taken at its corner. */
+const PICTURES = { photo: 'La photo', view: 'La vue', third: 'La vue du voisin' };
+let waitingFor = null;  // the picture the message says is coming, cleared when it comes
+function measurable(img) {
+  if (img.complete && img.naturalWidth > 0) return true;
+  const name = PICTURES[img.id];
+  waitingFor = img.complete ? null : img;  // complete with no pixels: it failed, and will not come
+  say(img.complete ? `${name} n’a pas pu être chargée : changer de panorama ou recharger la page.`
+                   : `${name} se charge : cliquer une fois qu’elle est là.`);
+  return false;
+}
+for (const id of Object.keys(PICTURES)) {
+  $(id).addEventListener('load', () => { if (waitingFor === $(id)) { waitingFor = null; say(''); } });
 }
 function pixelOf(img, event) {
   const box = img.getBoundingClientRect();  // as shown, zoomed or not
@@ -1021,13 +1036,13 @@ function pairAt(img, side, e) {
   return pairs.findIndex((pair) => Math.hypot(pair[side][0] - x, pair[side][1] - y) < reach);
 }
 $('photo').addEventListener('click', (e) => {
-  if (!pairing) return;
+  if (!pairing || !measurable($('photo'))) return;
   const i = pairAt($('photo'), 0, e);
   if (i >= 0) { pairs.splice(i, 1); target = null; pickedUp(); }  // its photo point placed again
   waiting = pixelOf($('photo'), e); drawDots();
 });
 $('view').addEventListener('click', async (e) => {
-  if (!pairing) return;
+  if (!pairing || !measurable($('view'))) return;
   const i = pairAt($('view'), 1, e);
   if (i >= 0 && !waiting) { waiting = pairs[i][0]; pairs.splice(i, 1); target = null; pickedUp(); return; }
   if (!waiting) return;
