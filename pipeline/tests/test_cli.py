@@ -736,8 +736,8 @@ def test_a_proposed_camera_is_a_placement_once_said_yes_to(
     monkeypatch.setattr(cli, "PROPOSED_CAMERAS", tmp_path / "proposed.json")
     monkeypatch.setattr(cli, "_matches", dict)
     monkeypatch.setattr(cli, "_exported", lambda photo_id: photo)
-    monkeypatch.setattr(cli, "_setup", lambda: "s")
-    monkeypatch.setattr(cli, "_inputs", lambda photo_id, setup: inputs_now)
+    monkeypatch.setattr(cli, "_scenes_now", lambda: {"a": "s"})
+    monkeypatch.setattr(cli, "_inputs", lambda scene, photo_id: inputs_now)
     said = {"a": {"verdict": verdict, "inputs": proposal["a"]["inputs"]}} if verdict else {}
     monkeypatch.setattr(cli, "_verdicts", lambda: said)
 
@@ -766,8 +766,8 @@ def test_a_yes_is_to_the_camera_proposed_not_to_the_next_one(tmp_path, monkeypat
     monkeypatch.setattr(cli, "PROPOSED_CAMERAS", tmp_path / "proposed.json")
     monkeypatch.setattr(cli, "_matches", dict)
     monkeypatch.setattr(cli, "_exported", lambda photo_id: photo)
-    monkeypatch.setattr(cli, "_setup", lambda: "s")
-    monkeypatch.setattr(cli, "_inputs", lambda photo_id, setup: "i")
+    monkeypatch.setattr(cli, "_scenes_now", lambda: {"a": "s"})
+    monkeypatch.setattr(cli, "_inputs", lambda scene, photo_id: "i")
     monkeypatch.setattr(
         cli, "_verdicts", lambda: {"a": {"verdict": "yes", "inputs": first["a"]["inputs"]}}
     )
@@ -826,3 +826,37 @@ def test_a_seeds_image_is_read_where_it_was_kept_and_never_published(monkeypatch
 
     assert cli._exported("pm:shown") == tmp_path / "site" / export.image_name("pm:shown")
     assert cli._exported("pm:seed") == tmp_path / "seeded" / export.image_name("pm:seed")
+
+
+def _panorama(n, x, y=0.0, roll=0.0):
+    from pathlib import Path
+
+    from flaneur import match
+
+    return match.Panorama(f"p{n}", x, y, 0.0, 0.0, Path(f"p{n}.jpg"), roll, 0.0)
+
+
+def _scene(near_by, here=(0.0, 0.0), code="code"):
+    from flaneur import cli
+
+    return cli._scene_of(cli._compared_with(near_by, here), here, code)
+
+
+def test_a_photos_fingerprint_holds_when_panoramas_it_does_not_compare_are_added():
+    from flaneur import cli
+
+    near_by = [_panorama(n, 2.0 * n) for n in range(cli.MATCH_PANORAMAS)]  # all within reach
+
+    assert _scene(near_by) == _scene(near_by + [_panorama(99, 500.0)])  # far away
+    assert _scene(near_by) == _scene(near_by + [_panorama(98, 50.0)])  # in reach, not among 16
+
+
+def test_a_photos_fingerprint_changes_with_what_its_match_is_found_from():
+    near_by = [_panorama(n, 10.0 * n) for n in range(1, 4)]
+    before = _scene(near_by)
+
+    assert _scene(near_by + [_panorama(9, 5.0)]) != before  # a nearer panorama
+    assert _scene([_panorama(1, 10.5), *near_by[1:]]) != before  # one moved
+    assert _scene([_panorama(1, 10.0, roll=1.0), *near_by[1:]]) != before  # one levelled again
+    assert _scene(near_by, here=(0.5, 0.0)) != before  # the photo's place moved
+    assert _scene(near_by, code="other") != before  # the code that finds it changed

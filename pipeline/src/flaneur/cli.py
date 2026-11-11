@@ -10,7 +10,7 @@ import socket
 import threading
 import time
 from collections import Counter, OrderedDict
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Sequence
 from contextlib import closing
 from dataclasses import asdict, fields, replace
 from datetime import date
@@ -754,10 +754,20 @@ WRONG_SHARE = 0.05  # of all the views, bands and decoys: at most this share wro
 
 
 @functools.cache  # the panoramas do not move while a command runs
+@functools.cache
+def _code() -> str:
+    """The code a camera is found by (the check's own landmarks among it): a match or a check
+    found by other code is stale."""
+    digest = hashlib.sha1()
+    for path in (Path(match.__file__), Path(buildings.__file__), Path(landmarks.__file__)):
+        digest.update(path.read_bytes())
+    return digest.hexdigest()[:16]
+
+
 def _setup() -> str:
-    """What a match now depends on (where the panoramas whose picture is at hand stand, as
-    lined up and levelled, and the code that finds it): a match or a check found from another
-    setup is stale."""
+    """Every panorama whose picture is at hand, where it stands (lined up and levelled), and
+    the code: what chaining is still keyed on (a photo's own match depends on its own panoramas
+    only, see _scene_of)."""
     with closing(db.connect(DB_PATH)) as conn:
         levelled = _levelled(panoramas.load(conn))
     where = sorted(
@@ -765,14 +775,45 @@ def _setup() -> str:
         for p in levelled
         if (PANORAMAS / f"{p.id}.jpg").exists()
     )
-    digest = hashlib.sha1(repr(where).encode())
-    for path in (
-        Path(match.__file__),
-        Path(buildings.__file__),
-        Path(landmarks.__file__),  # the check's own landmarks
-    ):
-        digest.update(path.read_bytes())
-    return digest.hexdigest()[:16]
+    return hashlib.sha1(f"{where!r}{_code()}".encode()).hexdigest()[:16]
+
+
+def _scene_of(near: Sequence[match.Panorama], here: tuple[float, float], code: str) -> str:
+    """What one photo's match is found from besides the photo itself: the panoramas it is
+    compared with (`near`, see _compared_with: where each stands, faces and leans), its place
+    (`here`: where its camera may stand) and the `code`. A panorama added out of its reach, or
+    moved there, leaves it be: photos and areas are added step by step."""
+    seen = [
+        (
+            p.id,
+            round(p.x, 2),
+            round(p.y, 2),
+            round(p.azimuth, 2),
+            round(p.roll or 0.0, 3),
+            round(p.pitch or 0.0, 3),
+        )
+        for p in near
+    ]
+    place = (round(here[0], 1), round(here[1], 1))
+    return hashlib.sha1(f"{seen!r}{place!r}{code}".encode()).hexdigest()[:16]
+
+
+def _scenes(walk: Iterable[export.WalkPhoto], near_by: list[match.Panorama]) -> dict[str, str]:
+    """Each photo's scene (see _scene_of), among the panoramas `near_by` as matching has them."""
+    code = _code()
+    return {
+        me.id: _scene_of(_compared_with(near_by, here := _place_of(me)), here, code) for me in walk
+    }
+
+
+@functools.cache  # for one run, as _image
+def _scenes_now() -> dict[str, str]:
+    """Each walk photo's scene as it is now, for what reads placements without matching: the
+    panoramas where matching has them (their height aside: it does not choose them)."""
+    with closing(db.connect(DB_PATH)) as conn:
+        walk = export.photos(conn, DATA / "pilot", REVIEWS)
+        pictures = _levelled(panoramas.load(conn))
+    return _scenes(walk, _panoramas(pictures, lambda x, y: 0.0))
 
 
 def _exported(photo_id: str) -> Path:
@@ -802,13 +843,19 @@ def _sights() -> dict[str, tuple[match.Sight, ...]]:
     return kept
 
 
-def _inputs(photo_id: str, setup: str) -> str:
-    """What a photo's match is found from: the panoramas' setup, its image as exported
-    (cropped) and the landmarks marked in it."""
-    inputs = f"{setup}:{_image(photo_id)}"
+def _photo_part(photo_id: str) -> str:
+    """What a photo itself gives its match: its image as exported (cropped), and the landmarks
+    marked in it."""
+    part = _image(photo_id)
     if sights := _sights().get(photo_id):
-        inputs += f":{hashlib.sha1(repr(sights).encode()).hexdigest()[:8]}"
-    return inputs
+        part += f":{hashlib.sha1(repr(sights).encode()).hexdigest()[:8]}"
+    return part
+
+
+def _inputs(scene: str, photo_id: str) -> str:
+    """What a photo's match is found from: its `scene` (see _scene_of), then the photo itself
+    (see _photo_part)."""
+    return f"{scene}:{_photo_part(photo_id)}"
 
 
 def _matches() -> dict[str, dict | None]:
@@ -875,26 +922,28 @@ def _situated() -> dict[str, match.Situated]:
     now (a match found from other panoramas or another crop of the photo is left out), and
     not turned down by the user; and those whose camera matching turned down the user said
     yes to (see _proposals)."""
-    setup, verdicts = _setup(), _verdicts()
+    scenes, verdicts = _scenes_now(), _verdicts()
     refused = _refused(verdicts)
     found = {}
     for photo_id, m in _matches().items():
-        if m and "x" in m and _exported(photo_id).exists():  # cheap checks before the hash
-            if _placed_now(m, _inputs(photo_id, setup)) and (photo_id, m["inputs"]) not in refused:
+        if m and "x" in m and photo_id in scenes and _exported(photo_id).exists():
+            now = _inputs(scenes[photo_id], photo_id)
+            if _placed_now(m, now) and (photo_id, m["inputs"]) not in refused:
                 found[photo_id] = _situation(m)
-    for photo_id, p in _proposed_now(setup).items():
+    for photo_id, p in _proposed_now(scenes).items():
         said = verdicts.get(photo_id) or {}
         if photo_id not in found and said.get("verdict") == "yes" and said["inputs"] == p["inputs"]:
             found[photo_id] = _situation(p)
     return found
 
 
-def _proposed_now(setup: str) -> dict[str, dict]:
-    """The cameras proposed (see _proposals) for photos as they are now."""
+def _proposed_now(scenes: dict[str, str]) -> dict[str, dict]:
+    """The cameras proposed (see _proposals) for photos as they are now (`scenes`: each one's,
+    see _scene_of)."""
     return {
         k: p
         for k, p in register.load(PROPOSED_CAMERAS).items()
-        if _exported(k).exists() and _placed_now(p, _inputs(k, setup))
+        if k in scenes and _exported(k).exists() and _placed_now(p, _inputs(scenes[k], k))
     }
 
 
@@ -955,7 +1004,7 @@ def propose_turned_down() -> None:
     """Propose à la page de confirmation les caméras que le contrôle a refusées alors que
     beaucoup de points s'accordaient avec elles (data/pilot/proposed_cameras.json) : un « oui »
     en fait une place (sans points gardés : pas une ancre d'enchaînement)."""
-    setup, kept = _setup(), _matches()
+    scenes, kept = _scenes_now(), _matches()
     with closing(db.connect(DB_PATH)) as conn:
         walk = {me.id: me for me in export.photos(conn, DATA / "pilot", REVIEWS)}
     heights = [m["above_street"] for m in kept.values() if m and "x" in m]
@@ -963,7 +1012,7 @@ def propose_turned_down() -> None:
         register.load(MATCH_TRACE),
         {k: m for k, m in kept.items() if k in walk and _exported(k).exists()},
         lambda k: _place_of(walk[k]),
-        lambda k: _inputs(k, setup),
+        lambda k: _inputs(scenes[k], k),
         float(np.median(heights)) if heights else PROPOSED_ABOVE_M,
     )
     write_json(PROPOSED_CAMERAS, proposed)
@@ -1192,11 +1241,10 @@ def _to_width(image: np.ndarray, width: int) -> np.ndarray:
 
 
 class _Run(NamedTuple):
-    """What one `match` run reads (the panoramas' setup, where they stand, the buildings) and
-    keeps (each photo's match, the matchers it was tried with, traces, those placed; the
-    placements the user turned down)."""
+    """What one `match` run reads (the panoramas, where they stand, the buildings) and keeps
+    (each photo's match, the matchers it was tried with, traces, those placed; the placements
+    the user turned down)."""
 
-    setup: str
     near_by: list[match.Panorama]
     then: Callable[[int], Then]
     heights: scene.CameraHeights
@@ -1216,9 +1264,9 @@ def _match_with(matcher: str, photos: list[export.WalkPhoto], at: _Run) -> None:
     views = _views(matcher=matcher)
     store = chain.Store(MATCHERS[matcher].photos, views.matcher)
     for me in photos:
-        inputs = _inputs(me.id, at.setup)
         here = _place_of(me)
         near = _compared_with(at.near_by, here)
+        inputs = _inputs(_scene_of(near, here, _code()), me.id)
         image = cv2.imread(str(_exported(me.id)))
         now = at.then(_then_year(me))
         where = _where(me, at.heights, now)
@@ -1292,12 +1340,13 @@ def match_photos(
     with closing(db.connect(DB_PATH)) as conn:
         walk = export.photos(conn, DATA / "pilot", REVIEWS)
     heights, near_by, then = _matching()
+    scenes = _scenes(walk, near_by)
     blocks = then(date.today().year).blocks
     found, refused = _matches(), _refused()
     chosen = [me for me in _to_match(walk) if not photo or me.id in photo]
     tried, to_try = {}, {}  # the matchers each photo was tried with, and is to be
     for me in chosen:
-        kept, inputs = found.get(me.id), _inputs(me.id, setup)
+        kept, inputs = found.get(me.id), _inputs(scenes[me.id], me.id)
         if again or photo:
             tried[me.id], to_try[me.id] = [], list(MATCHERS)
         else:
@@ -1305,7 +1354,6 @@ def match_photos(
             tried[me.id] = _tried(kept, inputs)
             to_try[me.id] = _left_to_try(kept, inputs, turned_down)
     at = _Run(
-        setup=setup,
         near_by=near_by,
         then=then,
         heights=heights,
@@ -1388,7 +1436,8 @@ class _Chaining:
         with closing(db.connect(DB_PATH)) as conn:
             walk = export.photos(conn, DATA / "pilot", REVIEWS)
             self.negatives = dedup.negatives(conn)
-        self.heights, _, then = _matching()
+        self.heights, near_by, then = _matching()
+        self.scenes = _scenes(walk, near_by)  # what each photo's own match is found from
         # by year: the buildings of a year are built once (a few kept at a time)
         self.walk = sorted((me for me in walk if _exported(me.id).exists()), key=_then_year)
         self.where = {me.id: _where(me, self.heights, then(_then_year(me))) for me in self.walk}
@@ -1434,7 +1483,7 @@ class _Chaining:
         ]
 
     def observed(self, me: export.WalkPhoto) -> match.Observed | None:
-        return self.store.observed(me.id, _inputs(me.id, self.setup))
+        return self.store.observed(me.id, _inputs(self.scenes[me.id], me.id))
 
     def place(
         self,
@@ -1552,7 +1601,7 @@ def _rounds(work: _Chaining, left_out: set[str]) -> tuple[dict[str, dict], dict[
             found = work.place(me, observed, anchors, trace)
             if found.camera is not None:
                 parents = [a for a in anchors if a.id in chain.provenance(found.points)]
-                inputs = _placed_from(_inputs(me.id, work.setup), parents)
+                inputs = _placed_from(_inputs(work.scenes[me.id], me.id), parents)
                 if (me.id, inputs) in work.refused:
                     trace.verdict = "refusée"
                 else:
