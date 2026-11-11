@@ -1918,11 +1918,14 @@ def match_check(
         landmarks=landmarks.among(today.blocks),
     )
     views = _views(matcher=matcher)
+    seeing = _seeing(make=False)  # what a view shows: segmented by `flaneur segmenter`
     # only panoramas COLMAP placed: another's place is borrowed from its run, or its phone's
     with closing(db.connect(DB_PATH)) as conn:
         fixed = _fixed_by_colmap(panoramas.load(conn), register.load(FIXES))
     for name in [area] if area else list(pilot.AREAS):
-        _check_area(name, tries, seed, matcher, near_by, fixed, heights, today, shown, views)
+        _check_area(
+            name, tries, seed, matcher, near_by, fixed, heights, today, shown, views, seeing
+        )
 
 
 def _wanting(
@@ -1967,6 +1970,7 @@ def _check_area(
     today: "Then",
     shown: Callable[[match.View], tuple[match.Sight, ...]],
     views,
+    seeing: Callable[[match.Panorama, np.ndarray], np.ndarray] | None = None,
 ) -> None:
     """One area's known-answer check (see match_check): its views cut from the panoramas COLMAP
     placed in it, its decoys from its own streets far from them, its result kept for it alone."""
@@ -1991,7 +1995,7 @@ def _check_area(
         heading = float(rng.uniform(0, 360))
         far = far_from(me)
         true = _cut_view(me, heading)
-        truth = _Truth.of(me, heading, today.blocks)
+        truth = _Truth.of(me, heading, today.blocks, seeing)
         there, facing = far[rng.integers(len(far))], float(rng.uniform(0, 360))
         elsewhere = _cut_view(there, facing)
         keep = rng.uniform(*CHECK_KEPT)
@@ -2122,9 +2126,17 @@ class _Truth(NamedTuple):
     seen: np.ndarray | None
 
     @classmethod
-    def of(cls, panorama: match.Panorama, heading: float, blocks) -> "_Truth":
+    def of(
+        cls,
+        panorama: match.Panorama,
+        heading: float,
+        blocks,
+        seeing: Callable[[match.Panorama, np.ndarray], np.ndarray] | None = None,
+    ) -> "_Truth":
+        """`seeing`: what rays from a panorama show (see _seeing); none: walls everywhere."""
         view = _check_view(panorama, heading)
-        seen, share = _seen_points(view, blocks)
+        sees = None if seeing is None else functools.partial(seeing, panorama)
+        seen, share = _seen_points(view, blocks, sees)
         return cls(panorama.id, view, seen if share >= SCENE_SHARE else None)
 
     def off(
@@ -2148,15 +2160,21 @@ def _right(metres: float, degrees: float, dcre: float | None = None) -> bool:
     return bool(near or (dcre is not None and dcre <= DCRE_RIGHT))
 
 
-def _seen_points(view: match.View, blocks) -> tuple[np.ndarray, float]:
+def _seen_points(
+    view: match.View, blocks, sees: Callable[[np.ndarray], np.ndarray] | None = None
+) -> tuple[np.ndarray, float]:
     """The walls a check's view shows (east, north, up; one point per ray of a SCENE_GRID
-    across and down that meets one), and the share of the rays that do."""
+    across and down that meets one where its panorama shows a building: `sees` tells what each
+    ray shows, see segment.seen; a tree before a wall hides it), and the share of the rays
+    that do."""
     across = (np.arange(SCENE_GRID) + 0.5) * CHECK_SIDE / SCENE_GRID
     pixels = np.stack(np.meshgrid(across, across), axis=-1).reshape(-1, 2)
     size = (CHECK_SIDE, CHECK_SIDE)
     directions = match.rays(pixels, size, view.fov, view.horizon, view.heading)
     walls, _ = blocks.hit(np.array([view.x, view.y, view.z]), directions)
     met = np.isfinite(walls).all(axis=1)
+    if sees is not None:
+        met &= sees(directions) == segment.BUILT
     return walls[met], float(met.mean())
 
 

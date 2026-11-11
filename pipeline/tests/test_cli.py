@@ -1218,6 +1218,18 @@ def test_a_check_view_sees_the_wall_ahead_and_nothing_else():
     assert 0.1 < share < 0.6  # the sky above it, the street below: left out
 
 
+def test_a_check_view_sees_a_wall_only_where_its_panorama_shows_one():
+    from flaneur import segment
+
+    def trees_on_the_left(rays):  # what the panorama shows each way: a tree west of north
+        return np.where(rays[:, 0] < 0, segment.OTHER, segment.BUILT)
+
+    seen, share = cli._seen_points(TRUE_VIEW, _wall_north(50.0), trees_on_the_left)
+
+    assert len(seen) and (seen[:, 0] > 0).all()  # the wall behind the tree left out
+    assert share < cli._seen_points(TRUE_VIEW, _wall_north(50.0))[1]
+
+
 def test_a_camera_found_aside_lines_up_with_a_far_scene_not_with_a_near_one():
     def dcre(distance, **off):
         seen, _ = cli._seen_points(TRUE_VIEW, _wall_north(distance))
