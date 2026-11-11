@@ -103,7 +103,8 @@ export function setAddress(
 ): void {
   if (!push && location.hash === hash) return;
   try {
-    (push ? history.pushState : history.replaceState).call(history, null, '', hash);
+    if (push) history.pushState(null, '', hash);
+    else history.replaceState(null, '', hash);
   } catch (error) {
     if (!(error instanceof DOMException && error.name === 'SecurityError')) throw error;
   }

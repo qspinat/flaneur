@@ -341,11 +341,11 @@ class Walker {
   private arrive(photo: Photo): void {
     this.here = photo;
     this.showingToday = false;
-    setAddress(hashOf(photo.id), false);
     const img = $<HTMLImageElement>('photo');
     img.classList.add('loading');
     img.onload = () => {
       img.classList.remove('loading');
+      img.dataset.photo = photo.id; // which photo is on screen, once it is
       // the photograph ahead, once this one is shown (the very file it will be shown with); the
       // other ways once one lingers here (looking around, one turns), or points at them
       this.fetchAhead(photo.links.forward?.id);
@@ -363,6 +363,7 @@ class Walker {
     }
     this.drawAbout();
     this.maps?.show(photo);
+    setAddress(hashOf(photo.id), false); // last: the address never stands in the way of the photo
   }
 
   private drawSteps(photo: Photo): void {

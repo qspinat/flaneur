@@ -183,11 +183,8 @@ const page = await browser.newPage({ viewport: { width: 1440, height: 900 }, red
 let shown = 0;
 for (const photo of walk.photos) {
   await page.goto(`${base}#/${encodeURIComponent(photo.id)}`);
-  // this photo's own image, not the previous one still on screen (the hash changes, not the page)
-  await page.waitForFunction((name) => {
-    const image = document.getElementById('photo');
-    return image.naturalWidth > 0 && image.currentSrc.includes(name);
-  }, photo.id.replace(':', '_'));
+  // this photo on screen, not the previous one still there (the hash changes, not the page)
+  await page.waitForFunction((id) => document.getElementById('photo').dataset.photo === id, photo.id);
   const credit = await page.textContent('#credit');
   if (credit.includes(photo.credit) && OPEN_LICENCE.test(credit)) shown += 1;
 }

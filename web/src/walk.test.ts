@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   arrondissementLabel,
   offerOf3d,
@@ -147,32 +147,36 @@ describe('the 3D walk, opened on a photo', () => {
   });
 });
 
-
 describe('setAddress', () => {
-  const browser = (hash: string, refuse = false) => {
-    const calls: string[] = [];
-    const write = (how: string) => (_: unknown, __: string, url?: string | URL | null) => {
-      if (refuse) throw new DOMException('The operation is insecure.', 'SecurityError');
-      calls.push(`${how} ${url}`);
-    };
-    return { calls, history: { pushState: write('push'), replaceState: write('replace') }, location: { hash } };
-  };
+  const browser = (hash: string, pushState = vi.fn()) => ({
+    history: { pushState, replaceState: vi.fn() },
+    location: { hash },
+  });
 
   it('writes a new entry, or this one', () => {
     const b = browser('#/a');
     setAddress('#/b', true, b.history, b.location);
     setAddress('#/c', false, b.history, b.location);
-    expect(b.calls).toEqual(['push #/b', 'replace #/c']);
+    expect(b.history.pushState).toHaveBeenCalledWith(null, '', '#/b');
+    expect(b.history.replaceState).toHaveBeenCalledWith(null, '', '#/c');
   });
 
   it('leaves this entry alone when it already says so', () => {
     const b = browser('#/a');
     setAddress('#/a', false, b.history, b.location);
-    expect(b.calls).toEqual([]);
+    expect(b.history.replaceState).not.toHaveBeenCalled();
   });
 
   it('lets a browser that refuses be: the photo still shows', () => {
-    const b = browser('#/a', true);
+    const refuse = () => {
+      throw new DOMException('The operation is insecure.', 'SecurityError');
+    };
+    const b = browser('#/a', vi.fn(refuse));
     expect(() => setAddress('#/b', true, b.history, b.location)).not.toThrow();
+  });
+
+  it('lets any other error through', () => {
+    const b = browser('#/a', vi.fn(() => { throw new TypeError('broken'); }));
+    expect(() => setAddress('#/b', true, b.history, b.location)).toThrow(TypeError);
   });
 });
