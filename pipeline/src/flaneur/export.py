@@ -44,6 +44,7 @@ TODAY_SIDE = 1200
 # How a licence is named under a photo.
 LICENSES = {
     "CC0": "domaine public (CC0)",
+    "CC-BY-4.0": "CC BY 4.0",
     "etalab-2.0": "Licence Ouverte 2.0",
     "CC-BY-SA-4.0": "CC BY-SA 4.0",
 }

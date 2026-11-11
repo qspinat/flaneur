@@ -23,7 +23,7 @@ import httpx
 from PIL import Image, ImageDraw
 from shapely.geometry import Point, box
 
-from flaneur import crop, dedup, panoramax
+from flaneur import crop, db, dedup, panoramax
 from flaneur.gazetteer import from_geojson, to_metres
 from flaneur.sources import write_json
 
@@ -40,9 +40,9 @@ PLACED = ("street", "corner", "address", "viewpoint_street")
 
 
 def select(conn: sqlite3.Connection) -> list[sqlite3.Row]:
-    """Photos of the pilot area: CC0 photos, and Albert-Kahn photos (their camera position
-    is known: they measure how well photos are placed; their image licence is unverified,
-    so they are only used here, never published)."""
+    """Photos of the pilot area: openly licensed photos, and every Albert-Kahn photo (their
+    camera position is known: they measure how well photos are placed; those whose image
+    licence is unverified are only used here, never published)."""
     rows = conn.execute(
         f"""SELECT p.id, p.source, p.title, p.caption, p.year_start, p.year_end, p.image_url,
                    p.license, l.status, l.label, l.point, s.id AS street_id,
@@ -51,7 +51,7 @@ def select(conn: sqlite3.Connection) -> list[sqlite3.Row]:
             LEFT JOIN streets s ON s.id = l.street_id
             WHERE l.status IN ({", ".join("?" * len(PLACED))})
               AND (l.point IS NOT NULL OR s.id IS NOT NULL)
-              AND (p.license = 'CC0' OR p.source = 'albert_kahn')""",
+              AND (p.license IN {db.OPEN_LICENSES_SQL} OR p.source = 'albert_kahn')""",
         PLACED,
     ).fetchall()
     street_inside: dict[str, bool] = {}  # many photos share a street: decided once per street

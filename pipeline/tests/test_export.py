@@ -303,3 +303,13 @@ def test_a_print_placed_flipped_is_shown_the_right_way_round_and_says_so(tmp_pat
 
     me = next(p for p in walk if p.id == "pm:1")
     assert me.for_site()["flipped"] is True and "image retournée" in me.for_site()["credit"]
+
+
+def test_a_cc_by_photo_is_published_with_its_credit_and_an_unverified_one_is_not(tmp_path):
+    conn = two_photos(tmp_path)
+    conn.execute("UPDATE photos SET license = 'CC-BY-4.0', credit = 'Musée, A 1' WHERE id = 'pm:1'")
+    conn.execute("UPDATE photos SET license = 'unverified' WHERE id = 'pm:2'")
+
+    (walk,) = export.photos(conn, tmp_path / "pilot", tmp_path / "reviews.jsonl")
+
+    assert (walk.id, walk.credit) == ("pm:1", "Musée, A 1, CC BY 4.0")

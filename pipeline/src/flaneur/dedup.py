@@ -170,13 +170,13 @@ def places(conn: sqlite3.Connection) -> dict[str, BaseGeometry]:
 
 def save(conn: sqlite3.Connection, found: list[set[str]]) -> int:
     """Replace the stored groups with these. Each negative is named after the print that
-    stands for it, on which it is placed and shown: a CC0 print first, then one already
+    stands for it, on which it is placed and shown: an openly licensed print first, then one already
     placed as a street view, then one matched to a picture of today, then one whose caption
     says where the camera stood."""
     ids = json.dumps(sorted(i for g in found for i in g))
     rank = {
         r["id"]: (
-            r["license"] != "CC0",
+            r["license"] not in db.OPEN_LICENSES,
             not r["is_street_view"],
             r["match"] is None,
             r["viewpoint"] is None,
