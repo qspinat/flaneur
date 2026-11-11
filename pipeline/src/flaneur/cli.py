@@ -10,7 +10,7 @@ import socket
 import threading
 import time
 from collections import Counter, OrderedDict
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Sequence
 from contextlib import closing
 from dataclasses import asdict, fields, replace
 from datetime import date
@@ -72,6 +72,7 @@ from flaneur.panoramas import PANORAMA_HEIGHT_M
 from flaneur.panoramax import Picture
 from flaneur.read import read_all
 from flaneur.sources import albert_kahn, paris_musees, write_atomic, write_json
+from flaneur.sources import rows as jsonl_rows
 
 ROOT = Path(__file__).resolve().parents[3]
 DATA = ROOT / "data"
@@ -745,6 +746,7 @@ EARLIEST_YEAR = 1850  # an undated photo: only the buildings standing by then ru
 CHECK_M = 1.0
 CHECK_DEG = 2.0
 CHECK_SHARE = 0.7  # and at least this share of them situated
+CHECK_LEAST = 10  # views, for an area's check to pass: fewer tell nothing
 CHECK_KEPT = (0.25, 0.35)  # the share of the true view a band keeps
 FAR_M = 200  # a decoy: a view of a street this far away
 CHECK_FOV = 60  # its views' width (and height: they are square)
@@ -753,11 +755,21 @@ RIGHT_M, RIGHT_DEG = 3.0, 5.0  # a camera found farther off than this is a wrong
 WRONG_SHARE = 0.05  # of all the views, bands and decoys: at most this share wrong
 
 
+@functools.cache
+def _code() -> str:
+    """The code a camera is found by (the check's own landmarks among it): a match or a check
+    found by other code is stale."""
+    digest = hashlib.sha1()
+    for path in (Path(match.__file__), Path(buildings.__file__), Path(landmarks.__file__)):
+        digest.update(path.read_bytes())
+    return digest.hexdigest()[:16]
+
+
 @functools.cache  # the panoramas do not move while a command runs
 def _setup() -> str:
-    """What a match now depends on (where the panoramas whose picture is at hand stand, as
-    lined up and levelled, and the code that finds it): a match or a check found from another
-    setup is stale."""
+    """Every panorama whose picture is at hand, where it stands (lined up and levelled), and
+    the code: what chaining is still keyed on (a photo's own match depends on its own panoramas
+    only, see _scene_of)."""
     with closing(db.connect(DB_PATH)) as conn:
         levelled = _levelled(panoramas.load(conn))
     where = sorted(
@@ -765,14 +777,43 @@ def _setup() -> str:
         for p in levelled
         if (PANORAMAS / f"{p.id}.jpg").exists()
     )
-    digest = hashlib.sha1(repr(where).encode())
-    for path in (
-        Path(match.__file__),
-        Path(buildings.__file__),
-        Path(landmarks.__file__),  # the check's own landmarks
-    ):
-        digest.update(path.read_bytes())
-    return digest.hexdigest()[:16]
+    return hashlib.sha1(f"{where!r}{_code()}".encode()).hexdigest()[:16]
+
+
+def _scene_of(near: Sequence[match.Panorama], here: tuple[float, float], code: str) -> str:
+    """What one photo's match is found from besides the photo itself: the panoramas it is
+    compared with (`near`, see _compared_with: where each stands, faces and leans), its place
+    (`here`: where its camera may stand) and the `code`. A panorama added out of its reach, or
+    moved there, leaves it be: photos and areas are added step by step."""
+    seen = [
+        (
+            p.id,
+            round(p.x, 2),
+            round(p.y, 2),
+            round(p.azimuth, 2),
+            round(p.roll or 0.0, 3),
+            round(p.pitch or 0.0, 3),
+        )
+        for p in near
+    ]
+    place = (round(here[0], 1), round(here[1], 1))
+    return hashlib.sha1(f"{seen!r}{place!r}{code}".encode()).hexdigest()[:16]
+
+
+def _scenes(walk: Iterable[export.WalkPhoto], near_by: list[match.Panorama]) -> dict[str, str]:
+    """Each photo's scene (see _scene_of), among the panoramas `near_by` as matching has them."""
+    code, compared_with = _code(), _reach(near_by)
+    return {me.id: _scene_of(compared_with(here := _place_of(me)), here, code) for me in walk}
+
+
+@functools.cache  # for one run, as _image
+def _scenes_now() -> dict[str, str]:
+    """Each walk photo's scene as it is now, for what reads placements without matching: the
+    panoramas where matching has them (their height aside: it does not choose them)."""
+    with closing(db.connect(DB_PATH)) as conn:
+        walk = export.photos(conn, DATA / "pilot", REVIEWS)
+        pictures = _levelled(panoramas.load(conn))
+    return _scenes(walk, _panoramas(pictures, lambda x, y: 0.0))
 
 
 def _exported(photo_id: str) -> Path:
@@ -802,13 +843,19 @@ def _sights() -> dict[str, tuple[match.Sight, ...]]:
     return kept
 
 
-def _inputs(photo_id: str, setup: str) -> str:
-    """What a photo's match is found from: the panoramas' setup, its image as exported
-    (cropped) and the landmarks marked in it."""
-    inputs = f"{setup}:{_image(photo_id)}"
+def _photo_part(photo_id: str) -> str:
+    """What a photo itself gives its match: its image as exported (cropped), and the landmarks
+    marked in it."""
+    part = _image(photo_id)
     if sights := _sights().get(photo_id):
-        inputs += f":{hashlib.sha1(repr(sights).encode()).hexdigest()[:8]}"
-    return inputs
+        part += f":{hashlib.sha1(repr(sights).encode()).hexdigest()[:8]}"
+    return part
+
+
+def _inputs(scene: str, photo_id: str) -> str:
+    """What a photo's match is found from: its `scene` (see _scene_of), then the photo itself
+    (see _photo_part)."""
+    return f"{scene}:{_photo_part(photo_id)}"
 
 
 def _matches() -> dict[str, dict | None]:
@@ -824,7 +871,8 @@ def _situation(kept: dict) -> match.Situated:
 
 def _placed_inputs(inputs: str, matcher: str | None) -> str:
     """What a placement is found from: the photo's `inputs` (see _inputs), and its matcher
-    unless DISK (as before LoMa-G): a verdict on one matcher's placement is not another's."""
+    unless DISK (as before LoMa-G): a placement of each (a verdict may still follow a camera
+    found again by the other: see _Judged.on)."""
     return inputs if matcher in (None, DISK) else f"{inputs}:{matcher}"
 
 
@@ -872,38 +920,32 @@ def _not_chained(matches: dict[str, dict | None], situated: dict[str, match.Situ
 
 def _situated() -> dict[str, match.Situated]:
     """The old photos whose camera was found against today's panoramas, from what they are
-    now (a match found from other panoramas or another crop of the photo is left out), and
-    not turned down by the user; and those whose camera matching turned down the user said
-    yes to (see _proposals)."""
-    setup, verdicts = _setup(), _verdicts()
-    refused = _refused(verdicts)
+    now (a match found from other panoramas or another crop of the photo is left out, unless
+    the user said yes to it and the photo is the same: see _Judged.holds), and not turned down
+    by the user (as placed, or as found again: see _Judged.on); and those whose camera matching
+    turned down the user said yes to (see _proposals)."""
+    scenes, judged, matches = _scenes_now(), _Judged(), _matches()
     found = {}
-    for photo_id, m in _matches().items():
-        if m and "x" in m and _exported(photo_id).exists():  # cheap checks before the hash
-            if _placed_now(m, _inputs(photo_id, setup)) and (photo_id, m["inputs"]) not in refused:
+    for photo_id, m in matches.items():
+        if m and "x" in m and photo_id in scenes and _exported(photo_id).exists():
+            if _stands(photo_id, m, _inputs(scenes[photo_id], photo_id), judged):
                 found[photo_id] = _situation(m)
-    for photo_id, p in _proposed_now(setup).items():
-        said = verdicts.get(photo_id) or {}
-        if photo_id not in found and said.get("verdict") == "yes" and said["inputs"] == p["inputs"]:
+    for photo_id, p in _proposed_now(scenes, judged).items():
+        if judged.said_yes(photo_id, p) and not (
+            photo_id in found and judged.said_yes(photo_id, matches[photo_id])
+        ):  # the user's yes wins over a placement not judged
             found[photo_id] = _situation(p)
     return found
 
 
-def _proposed_now(setup: str) -> dict[str, dict]:
-    """The cameras proposed (see _proposals) for photos as they are now."""
+def _proposed_now(scenes: dict[str, str], judged: "_Judged") -> dict[str, dict]:
+    """The cameras proposed (see _proposals) for photos as they are now (`scenes`: each one's,
+    see _scene_of) the user did not turn down, or said yes to while the photo is the same (see
+    _stands)."""
     return {
         k: p
         for k, p in register.load(PROPOSED_CAMERAS).items()
-        if _exported(k).exists() and _placed_now(p, _inputs(k, setup))
-    }
-
-
-def _to_judge(proposed: dict[str, dict], verdicts: dict[str, dict]) -> dict[str, dict]:
-    """The cameras proposed the user has not turned down (no or near to that very camera)."""
-    return {
-        k: p
-        for k, p in proposed.items()
-        if not ((v := verdicts.get(k)) and v["inputs"] == p["inputs"] and v["verdict"] != "yes")
+        if k in scenes and _exported(k).exists() and _stands(k, p, _inputs(scenes[k], k), judged)
     }
 
 
@@ -955,7 +997,7 @@ def propose_turned_down() -> None:
     """Propose à la page de confirmation les caméras que le contrôle a refusées alors que
     beaucoup de points s'accordaient avec elles (data/pilot/proposed_cameras.json) : un « oui »
     en fait une place (sans points gardés : pas une ancre d'enchaînement)."""
-    setup, kept = _setup(), _matches()
+    scenes, kept = _scenes_now(), _matches()
     with closing(db.connect(DB_PATH)) as conn:
         walk = {me.id: me for me in export.photos(conn, DATA / "pilot", REVIEWS)}
     heights = [m["above_street"] for m in kept.values() if m and "x" in m]
@@ -963,9 +1005,12 @@ def propose_turned_down() -> None:
         register.load(MATCH_TRACE),
         {k: m for k, m in kept.items() if k in walk and _exported(k).exists()},
         lambda k: _place_of(walk[k]),
-        lambda k: _inputs(k, setup),
+        lambda k: _inputs(scenes[k], k),
         float(np.median(heights)) if heights else PROPOSED_ABOVE_M,
     )
+    judged = _Judged()  # those said yes to stay, whatever became of their panoramas
+    held = {k: p for k, p in register.load(PROPOSED_CAMERAS).items() if judged.holds(k, p)}
+    proposed = {**proposed, **held}
     write_json(PROPOSED_CAMERAS, proposed)
     typer.echo(f"{len(proposed)} caméras refusées proposées à la confirmation ({PROPOSED_CAMERAS})")
 
@@ -973,30 +1018,23 @@ def propose_turned_down() -> None:
 def _confirmed() -> dict[str, match.Situated]:
     """The situated photos the user said yes to as they are placed now: the photo walk takes
     their place and the 3D walk shows them (unless their place was set by hand since: a
-    reviewed place wins, see export.photos). A placement not judged, or judged on other inputs,
-    waits for a yes (a camera can collapse onto a panorama's spot and still look right).
+    reviewed place wins, see export.photos). A placement not judged (as placed, or as found
+    again: see _Judged.on) waits for a yes (a camera can collapse onto a panorama's spot and
+    still look right).
     Photos placed by chaining are not among them: chaining is set aside."""
-    verdicts = _verdicts()
+    judged = _Judged()
     return {
-        photo_id: m
-        for photo_id, m in _situated().items()
-        if (v := verdicts.get(photo_id)) and v["verdict"] == "yes" and v["inputs"] == m.inputs
+        photo_id: m for photo_id, m in _situated().items() if judged.said_yes(photo_id, asdict(m))
     }
-
-
-def _refused(verdicts: dict[str, dict] | None = None) -> set[tuple[str, str]]:
-    """The placements the user did not take as they are (no, or near: the right buildings,
-    the camera off): the photo, and what it was placed from (`verdicts`: read when not
-    given)."""
-    verdicts = _verdicts() if verdicts is None else verdicts
-    return {(k, v["inputs"]) for k, v in verdicts.items() if v["verdict"] != "yes"}
 
 
 def _turned_down() -> set[str]:
     """The photos the user's last word on is not a yes: chaining leaves them out, as close
     placements of them come back from the same details through a point or two of another
     photo (they wait for their camera to be set right, or a new match to be judged)."""
-    return {k for k, inputs in _refused() if not _is_proposal(inputs)}  # a camera proposed: not
+    return {  # a camera proposed and turned down: not (the photo waits for another)
+        k for k, v in _verdicts().items() if v["verdict"] != "yes" and not _is_proposal(v["inputs"])
+    }
 
 
 def _places(situated: dict[str, match.Situated]) -> dict[str, dict]:
@@ -1044,9 +1082,26 @@ def _matching() -> tuple[scene.CameraHeights, list[match.Panorama], Callable[[in
     return heights, _panoramas(pictures, heights), then
 
 
-def _check_setup(matcher: str, setup: str) -> str:
-    """What a matcher's known-answer check depends on: the panoramas' setup (see _setup), and
-    for LoMa-G its own code and LoMa's revision."""
+def _per_area(path: Path, matcher: str) -> dict[str, dict]:
+    """A matcher's file kept area by area (a known-answer check, its traces): those of the areas."""
+    return {k: v for k, v in register.load(_of_matcher(path, matcher)).items() if k in pilot.AREAS}
+
+
+def _area_of(here: tuple[float, float]) -> str:
+    """The area a place belongs to (see pilot.AREAS): the one it stands in, else the nearest."""
+    point = Point(*here)
+    return min(pilot.AREAS, key=lambda name: pilot.AREAS[name].distance(point))
+
+
+def _check_setup(matcher: str, area: str, near_by: list[match.Panorama]) -> str:
+    """What a matcher's known-answer check in an `area` depends on: the panoramas within reach
+    of it (MATCH_RADIUS_M: its views' and those they are compared with, see _check_area; where
+    each stands, faces and leans: see _scene_of), the code, and for LoMa-G its own
+    code and LoMa's revision. Panoramas added or moved elsewhere leave it be."""
+    reach = pilot.AREAS[area].buffer(MATCH_RADIUS_M)
+    inside = sorted((p for p in near_by if reach.contains(Point(p.x, p.y))), key=lambda p: p.id)
+    centre = pilot.AREAS[area].centroid
+    setup = f"{area}:{_scene_of(inside, (centre.x, centre.y), _code())}"
     if matcher == DISK:
         return setup
     from importlib import metadata
@@ -1124,8 +1179,24 @@ def _compared_with(
 ) -> list[match.Panorama]:
     """The panoramas `match` compares a photo with: MATCH_PANORAMAS of those within
     MATCH_RADIUS_M of its place (`here`: the caption's, or the review's, never a previous
-    match's: see _place_of), nearest first."""
-    return _nearest(near_by, *here, MATCH_RADIUS_M)[:MATCH_PANORAMAS]
+    match's: see _place_of), nearest first (ties: in `near_by`'s order)."""
+    return _reach(near_by)(here)
+
+
+def _reach(
+    near_by: list[match.Panorama],
+) -> Callable[[tuple[float, float]], list[match.Panorama]]:
+    """_compared_with for many photos among the same panoramas: where they stand read once."""
+    xs = np.array([p.x for p in near_by])
+    ys = np.array([p.y for p in near_by])
+
+    def compared_with(here: tuple[float, float]) -> list[match.Panorama]:
+        distance = np.hypot(xs - here[0], ys - here[1])
+        within = np.flatnonzero(distance <= MATCH_RADIUS_M)
+        nearest = within[np.argsort(distance[within], kind="stable")][:MATCH_PANORAMAS]
+        return [near_by[i] for i in nearest]
+
+    return compared_with
 
 
 def _nearest(
@@ -1192,11 +1263,10 @@ def _to_width(image: np.ndarray, width: int) -> np.ndarray:
 
 
 class _Run(NamedTuple):
-    """What one `match` run reads (the panoramas' setup, where they stand, the buildings) and
-    keeps (each photo's match, the matchers it was tried with, traces, those placed; the
-    placements the user turned down)."""
+    """What one `match` run reads (the panoramas, where they stand, the buildings) and keeps
+    (each photo's match, the matchers it was tried with, traces, those placed; the placements
+    the user turned down)."""
 
-    setup: str
     near_by: list[match.Panorama]
     then: Callable[[int], Then]
     heights: scene.CameraHeights
@@ -1206,19 +1276,20 @@ class _Run(NamedTuple):
     traces: dict
     run: dict
     placed: set[str]
-    refused: set[tuple[str, str]]
+    judged: "_Judged"
 
 
 def _match_with(matcher: str, photos: list[export.WalkPhoto], at: _Run) -> None:
     """Matches `photos` with one matcher (its own features, observations and points), writing
     each one's match as it goes. A redo that finds nothing leaves a placement made from the
-    same inputs, unless turned down."""
+    same inputs, unless turned down (a placement said yes to is never redone: see
+    match_photos)."""
     views = _views(matcher=matcher)
     store = chain.Store(MATCHERS[matcher].photos, views.matcher)
     for me in photos:
-        inputs = _inputs(me.id, at.setup)
         here = _place_of(me)
         near = _compared_with(at.near_by, here)
+        inputs = _inputs(_scene_of(near, here, _code()), me.id)
         image = cv2.imread(str(_exported(me.id)))
         now = at.then(_then_year(me))
         where = _where(me, at.heights, now)
@@ -1237,7 +1308,7 @@ def _match_with(matcher: str, photos: list[export.WalkPhoto], at: _Run) -> None:
         at.tried[me.id] = [m for m in MATCHERS if m in at.tried[me.id] or m == matcher]
         if camera is None:  # kept, with what it was tried from: not tried again for nothing
             before = at.found.get(me.id)
-            if not (_placed_now(before, inputs) and (me.id, before["inputs"]) not in at.refused):
+            if not _stands(me.id, before, inputs, at.judged):
                 at.found[me.id] = {"inputs": inputs, "tried": at.tried[me.id]}
             typer.echo(f"{me.id} : rien de sûr ({MATCHERS[matcher].label})")
         else:
@@ -1262,6 +1333,27 @@ def _match_with(matcher: str, photos: list[export.WalkPhoto], at: _Run) -> None:
         write_json(MATCHES, at.found)
 
 
+def _checked_in(near_by: list[match.Panorama], force: bool = False) -> dict[str, list[str]]:
+    """For each area, the matchers whose known-answer check passed there for its panoramas as
+    they are (every matcher when `force`d): a photo is matched by those of its area only."""
+    checked: dict[str, list[str]] = {}
+    for name in pilot.AREAS:
+        checked[name] = []
+        for matcher in MATCHERS:
+            check = _per_area(MATCH_CHECK, matcher).get(name, {})
+            if force or (
+                check.get("passed") and check.get("setup") == _check_setup(matcher, name, near_by)
+            ):
+                checked[name].append(matcher)
+            else:
+                typer.echo(
+                    f"{MATCHERS[matcher].label} laissé de côté dans « {name} » : son contrôle à "
+                    f"réponse connue n'y est pas passé pour ces panoramas "
+                    f"(`flaneur match-check --matcher {matcher} --area {name}`)"
+                )
+    return checked
+
+
 @app.command("match")
 def match_photos(
     photo: Annotated[list[str] | None, typer.Option(help="seulement ces photos")] = None,
@@ -1276,36 +1368,30 @@ def match_photos(
     """Situe les photos en les comparant aux panoramas d'aujourd'hui autour d'elles : position,
     direction, champ et horizon, là où des façades d'alors sont encore debout. Avec LoMa-G
     d'abord, puis DISK pour celles qu'il n'a pas situées (la page de confirmation dit lequel)."""
-    setup = _setup()
-    checked = []  # the matchers whose known-answer check passed for these panoramas
-    for matcher in MATCHERS:
-        check = register.load(_of_matcher(MATCH_CHECK, matcher))
-        if force or (check.get("passed") and check.get("setup") == _check_setup(matcher, setup)):
-            checked.append(matcher)
-        else:
-            typer.echo(
-                f"{MATCHERS[matcher].label} laissé de côté : son contrôle à réponse connue n'est "
-                f"pas passé pour ces panoramas (`flaneur match-check --matcher {matcher}`)"
-            )
-    if not checked:
-        raise typer.BadParameter("aucun apparieur contrôlé : lancer `flaneur match-check` d'abord")
     with closing(db.connect(DB_PATH)) as conn:
         walk = export.photos(conn, DATA / "pilot", REVIEWS)
     heights, near_by, then = _matching()
+    checked = _checked_in(near_by, force)
+    if not any(checked.values()):
+        raise typer.BadParameter("aucun apparieur contrôlé : lancer `flaneur match-check` d'abord")
+    scenes = _scenes(walk, near_by)
     blocks = then(date.today().year).blocks
-    found, refused = _matches(), _refused()
+    found, judged, proposed = _matches(), _Judged(), register.load(PROPOSED_CAMERAS)
     chosen = [me for me in _to_match(walk) if not photo or me.id in photo]
     tried, to_try = {}, {}  # the matchers each photo was tried with, and is to be
     for me in chosen:
-        kept, inputs = found.get(me.id), _inputs(me.id, setup)
-        if again or photo:
+        kept, inputs = found.get(me.id), _inputs(scenes[me.id], me.id)
+        if any(p and judged.holds(me.id, p) for p in (kept, proposed.get(me.id))):
+            tried[me.id], to_try[me.id] = _tried(kept, inputs), []  # said yes to: never redone
+        elif again or photo:
             tried[me.id], to_try[me.id] = [], list(MATCHERS)
         else:
-            turned_down = (me.id, (kept or {}).get("inputs")) in refused
+            turned_down = bool(kept) and "x" in kept and judged.turned_down(me.id, kept)
             tried[me.id] = _tried(kept, inputs)
             to_try[me.id] = _left_to_try(kept, inputs, turned_down)
+        area = checked[_area_of(_place_of(me))]  # the matchers checked where it stands
+        to_try[me.id] = [m for m in to_try[me.id] if m in area]
     at = _Run(
-        setup=setup,
         near_by=near_by,
         then=then,
         heights=heights,
@@ -1315,11 +1401,11 @@ def match_photos(
         traces=register.load(MATCH_TRACE),
         run={},
         placed=set(),
-        refused=refused,
+        judged=judged,
     )
 
     chosen = sorted((me for me in chosen if to_try[me.id]), key=_visit)
-    for matcher in checked:  # one model at a time: each let go before the next
+    for matcher in MATCHERS:  # one model at a time: each let go before the next
         if photos := [me for me in chosen if matcher in to_try[me.id] and me.id not in at.placed]:
             _match_with(matcher, photos, at)
             from flaneur import lomag
@@ -1358,9 +1444,117 @@ def _where(me: export.WalkPhoto, heights: scene.CameraHeights, now: "Then") -> m
     return match.Where(heights.streets, now.free, _place_of(me), _sights().get(me.id, ()))
 
 
+def _said_on(placed: list[dict]) -> dict[str, dict]:
+    """For each photo `placed` (id, inputs, camera), the user's word that holds for it as it is
+    placed (see _Judged.on), read anew."""
+    judged = _Judged()
+    return {
+        p["id"]: said
+        for p in placed
+        if (said := judged.on(p["id"], {"inputs": p["inputs"], **p["camera"]}))
+    }
+
+
 def _verdicts() -> dict[str, dict]:
     """The user's last word on each photo placed (ANCHORS: yes, near or no)."""
     return review.latest(ANCHORS, key="photo_id")
+
+
+# A verdict holds for a camera found again this near the one judged, and turned this little:
+# placed from other panoramas, it is the same camera (to the eye, on the confirmation page).
+CARRY_M = 1.0
+CARRY_DEG = 2.0
+CARRY_HORIZON = 0.02  # and its horizon this near (a share of the photo's height): framed alike
+
+
+def _same_camera(camera: dict, other: dict) -> bool:
+    """Whether two cameras (x, y, above_street, heading, fov, horizon) are one found again:
+    within CARRY_M across and up, CARRY_DEG both turned and widened, CARRY_HORIZON tilted. A
+    camera judged without its height, width and horizon (before they were kept) is none: the
+    verdict holds for its inputs only."""
+    if not {"above_street", "fov", "horizon"} <= camera.keys() & other.keys():
+        return False
+    return bool(
+        np.hypot(camera["x"] - other["x"], camera["y"] - other["y"]) <= CARRY_M
+        and abs(camera["above_street"] - other["above_street"]) <= CARRY_M
+        and abs(angle(camera["heading"], other["heading"])) <= CARRY_DEG
+        and abs(camera["fov"] - other["fov"]) <= CARRY_DEG
+        and abs(camera["horizon"] - other["horizon"]) <= CARRY_HORIZON
+    )
+
+
+def _stands(photo_id: str, kept: dict | None, inputs: str, judged: "_Judged") -> bool:
+    """Whether a placement as kept stands as it is now: the user said yes to it and the photo
+    is the same, or it was made from `inputs` (the photo and its panoramas as they are now) and
+    the user did not turn it down (see _Judged)."""
+    if not kept or "x" not in kept:
+        return False
+    return judged.holds(photo_id, kept) or (
+        _placed_now(kept, inputs) and not judged.turned_down(photo_id, kept)
+    )
+
+
+def _photo_of(inputs: str) -> str:
+    """The part of a placement's inputs the photo itself gives (see _inputs): its image, and
+    its landmarks' mark when it has any."""
+    fields = inputs.split(":")
+    if len(fields) > 2 and re.fullmatch(r"[0-9a-f]{8}", fields[2]):
+        return f"{fields[1]}:{fields[2]}"
+    return fields[1] if len(fields) > 1 else ""
+
+
+class _Judged:
+    """Every verdict the user gave (ANCHORS), by photo, in the order given: what each says
+    of a placement."""
+
+    def __init__(self, path: Path | None = None) -> None:
+        self.by_photo: dict[str, list[dict]] = {}
+        for row in jsonl_rows(path or ANCHORS):
+            self.by_photo.setdefault(row["photo_id"], []).append(row)
+
+    def on(self, photo_id: str, placed: dict) -> dict | None:
+        """The user's last word on a placement (`placed`: its inputs, and its camera's x, y and
+        heading when placed): given to it, or to a camera of the same photo found within CARRY_M
+        and CARRY_DEG of it (placed again from other panoramas, or by the other matcher), unless
+        the user since took back a camera that near the one it was given to (a yes followed by
+        a no beside it holds for that very camera only)."""
+        said_since: list[dict] = []
+        for said in reversed(self.by_photo.get(photo_id, [])):
+            if said["inputs"] == placed["inputs"]:
+                return said
+            camera = said.get("camera")  # verdicts older than their camera's record: none
+            if (
+                camera
+                and "x" in placed
+                and _photo_of(said["inputs"]) == _photo_of(placed["inputs"])
+                and _same_camera(camera, placed)
+            ):
+                taken_back = any(
+                    later["verdict"] != said["verdict"]
+                    and "camera" in later
+                    and _same_camera(later["camera"], camera)
+                    for later in said_since
+                )
+                return None if taken_back else said
+            said_since.append(said)
+        return None
+
+    def said_yes(self, photo_id: str, placed: dict) -> bool:
+        return bool(said := self.on(photo_id, placed)) and said["verdict"] == "yes"
+
+    def turned_down(self, photo_id: str, placed: dict) -> bool:
+        """Whether the user did not take a placement as it is (no; or near: the right buildings,
+        the camera off)."""
+        return bool(said := self.on(photo_id, placed)) and said["verdict"] != "yes"
+
+    def holds(self, photo_id: str, placed: dict) -> bool:
+        """Whether a placement the user said yes to stands as it is: the photo is the same (see
+        _photo_part), whatever became of the panoramas (its camera is in the world)."""
+        return (
+            "x" in placed
+            and self.said_yes(photo_id, placed)
+            and _photo_of(placed["inputs"]) == _photo_part(photo_id)
+        )
 
 
 def _chain_setup() -> str:
@@ -1375,7 +1569,7 @@ def _placed_from(inputs: str, parents: list[chain.Anchor]) -> str:
     if not parents:
         return inputs
     from_ = repr(sorted((a.id, a.inputs) for a in parents))
-    return f"{inputs}:{hashlib.sha1(from_.encode()).hexdigest()[:8]}"
+    return f"{inputs}:from-{hashlib.sha1(from_.encode()).hexdigest()[:8]}"
 
 
 class _Chaining:
@@ -1384,11 +1578,12 @@ class _Chaining:
     (round 0) that the user did not turn down."""
 
     def __init__(self) -> None:
-        self.setup, self.key = _setup(), _chain_setup()
+        self.key = _chain_setup()
         with closing(db.connect(DB_PATH)) as conn:
             walk = export.photos(conn, DATA / "pilot", REVIEWS)
             self.negatives = dedup.negatives(conn)
-        self.heights, _, then = _matching()
+        self.heights, near_by, then = _matching()
+        self.scenes = _scenes(walk, near_by)  # what each photo's own match is found from
         # by year: the buildings of a year are built once (a few kept at a time)
         self.walk = sorted((me for me in walk if _exported(me.id).exists()), key=_then_year)
         self.where = {me.id: _where(me, self.heights, then(_then_year(me))) for me in self.walk}
@@ -1434,7 +1629,7 @@ class _Chaining:
         ]
 
     def observed(self, me: export.WalkPhoto) -> match.Observed | None:
-        return self.store.observed(me.id, _inputs(me.id, self.setup))
+        return self.store.observed(me.id, _inputs(self.scenes[me.id], me.id))
 
     def place(
         self,
@@ -1552,7 +1747,7 @@ def _rounds(work: _Chaining, left_out: set[str]) -> tuple[dict[str, dict], dict[
             found = work.place(me, observed, anchors, trace)
             if found.camera is not None:
                 parents = [a for a in anchors if a.id in chain.provenance(found.points)]
-                inputs = _placed_from(_inputs(me.id, work.setup), parents)
+                inputs = _placed_from(_inputs(work.scenes[me.id], me.id), parents)
                 if (me.id, inputs) in work.refused:
                     trace.verdict = "refusée"
                 else:
@@ -1690,15 +1885,19 @@ def match_check(
     tries: int = 20,
     seed: int = 0,
     matcher: Annotated[str, typer.Option(help="lomag ou disk")] = DISK,
+    area: Annotated[str | None, typer.Option(help="un quartier (sinon : chacun)")] = None,
 ) -> None:
     """Contrôle à réponse connue, sur `tries` panoramas. Une vue découpée dans l'un, prise
     pour une vieille photo, est située contre les autres et comparée à sa vraie caméra ; puis
     la même vue dont il ne reste qu'une bande (le reste : une autre rue), vieillie ; puis une
     vue vieillie d'une autre rue, qui ne doit pas être située. La porte (assez de vues
     situées, à moins de CHECK_M et CHECK_DEG en médiane, presque aucune fausse) est gardée pour
-    chaque apparieur (`--matcher`) : `match` n'emploie que ceux dont la porte est passée."""
+    chaque apparieur (`--matcher`) et chaque quartier (`--area`) : `match` n'emploie, pour
+    une photo, que ceux dont la porte est passée dans son quartier."""
     if matcher not in MATCHERS:
         raise typer.BadParameter(f"apparieur : l'un de {', '.join(MATCHERS)}")
+    if area is not None and area not in pilot.AREAS:
+        raise typer.BadParameter(f"quartier : l'un de {', '.join(pilot.AREAS)}")
     heights, near_by, then = _matching()
     year = date.today().year
     today = then(year)
@@ -1710,30 +1909,74 @@ def match_check(
         landmarks=landmarks.among(today.blocks),
     )
     views = _views(matcher=matcher)
-    rng = np.random.default_rng(seed)
-    marking = np.random.default_rng([seed, 1])  # its own: the fakes stay the same
     # only panoramas COLMAP placed: another's place is borrowed from its run, or its phone's
     with closing(db.connect(DB_PATH)) as conn:
         fixed = _fixed_by_colmap(panoramas.load(conn), register.load(FIXES))
-    placed = [p for p in near_by if p.id in fixed]
+    for name in [area] if area else list(pilot.AREAS):
+        _check_area(name, tries, seed, matcher, near_by, fixed, heights, today, shown, views)
+
+
+def _wanting(
+    tries: int, situated: int, metres: float, degrees: float, wrong: int, attempts: int
+) -> list[str]:
+    """What a known-answer check lacks to pass (none: it passes): of its `tries` views,
+    `situated` found (`metres`, `degrees`: their median distance to the truth), `wrong` cameras
+    among all its `attempts` (views, bands and decoys)."""
+    return [
+        need
+        for met, need in [
+            (tries >= CHECK_LEAST, f"au moins {CHECK_LEAST} vues"),
+            (situated >= CHECK_SHARE * tries, f"au moins {CHECK_SHARE:.0%} situées"),
+            (metres < CHECK_M, f"moins de {CHECK_M} m"),
+            (degrees < CHECK_DEG, f"moins de {CHECK_DEG}°"),
+            (wrong <= WRONG_SHARE * attempts, f"au plus {WRONG_SHARE:.0%} de fausses"),
+        ]
+        if not met
+    ]
+
+
+def _check_area(
+    name: str,
+    tries: int,
+    seed: int,
+    matcher: str,
+    near_by: list[match.Panorama],
+    fixed: set[str],
+    heights: scene.CameraHeights,
+    today: "Then",
+    shown: Callable[[match.View], tuple[match.Sight, ...]],
+    views,
+) -> None:
+    """One area's known-answer check (see match_check): its views cut from the panoramas COLMAP
+    placed in it, its decoys from its own streets far from them, its result kept for it alone."""
+    rng = np.random.default_rng(seed)
+    marking = np.random.default_rng([seed, 1])  # its own: the fakes stay the same
+    square = pilot.AREAS[name]
+    in_area = sorted((p for p in near_by if square.contains(Point(p.x, p.y))), key=lambda p: p.id)
+    at = np.array([(p.x, p.y) for p in in_area]).reshape(-1, 2)
+
+    def far_from(p: match.Panorama) -> list[match.Panorama]:  # a decoy: another street
+        return [in_area[i] for i in np.flatnonzero(np.hypot(*(at - (p.x, p.y)).T) > FAR_M)]
+
+    placed = [p for p in in_area if p.id in fixed and far_from(p)]
     tries = min(tries, len(placed))
-    if not tries:
-        raise typer.BadParameter("aucun panorama placé par COLMAP : rien à contrôler")
+    if not tries:  # the other areas are checked all the same
+        typer.echo(f"{name} : aucun panorama placé par COLMAP avec un leurre possible")
+        return
     found: dict[str, list[Off | None]] = {"vue": [], "bande": [], "leurre": []}
     traces: dict[str, list[dict]] = {kind: [] for kind in found}
     for k in rng.choice(len(placed), tries, replace=False):
         me = placed[k]
         heading = float(rng.uniform(0, 360))
-        far = [p for p in near_by if np.hypot(p.x - me.x, p.y - me.y) > FAR_M]
-        if not far:
-            raise typer.BadParameter(f"aucun panorama à plus de {FAR_M} m : pas de leurre")
+        far = far_from(me)
         true = _cut_view(me, heading)
         there, facing = far[rng.integers(len(far))], float(rng.uniform(0, 360))
         elsewhere = _cut_view(there, facing)
         keep = rng.uniform(*CHECK_KEPT)
         span = (0.0, keep) if rng.random() < 0.5 else (1 - keep, 1.0)  # one side or the other
         band = fakes.aged(fakes.mixed(true, elsewhere, span), rng)
-        others = _nearest(near_by, me.x, me.y, but=me.id)[:MATCH_PANORAMAS]
+        # as match compares a photo (see _compared_with): within reach of the area only
+        others = _nearest(near_by, me.x, me.y, MATCH_RADIUS_M, but=me.id)[:MATCH_PANORAMAS]
         # the landmarks each fake shows, marked as by hand (as near): the band's are the true
         # view's inside it (the rest stands for houses rebuilt since, not for another place)
         seen = _marked_by_hand(_check_view(me, heading), shown, marking)
@@ -1774,18 +2017,9 @@ def match_check(
     metres = register.median([off.metres for off in situated])
     degrees = register.median([off.degrees for off in situated])
     bands = sum(right(off) for off in found["bande"])
-    wanting = [
-        need
-        for met, need in [
-            (len(situated) >= CHECK_SHARE * tries, f"au moins {CHECK_SHARE:.0%} situées"),
-            (metres < CHECK_M, f"moins de {CHECK_M} m"),
-            (degrees < CHECK_DEG, f"moins de {CHECK_DEG}°"),
-            (len(wrong) <= WRONG_SHARE * attempts, f"au plus {WRONG_SHARE:.0%} de fausses"),
-        ]
-        if not met
-    ]
+    wanting = _wanting(tries, len(situated), metres, degrees, len(wrong), attempts)
     passed = not wanting
-    write_json(_of_matcher(CHECK_TRACE, matcher), traces)
+    write_json(_of_matcher(CHECK_TRACE, matcher), {**_per_area(CHECK_TRACE, matcher), name: traces})
     for kind, rows in traces.items():
         typer.echo(f"{kind} : {_funnel(rows)}")
         lost = [r for r in rows if r["verdict"] != "située"]
@@ -1801,31 +2035,30 @@ def match_check(
             f"  {kind} non situées : {len(lost)}, dont la juste caméra écartée : "
             f"{thrown.total()} ({', '.join(f'{why} {n}' for why, n in thrown.most_common())})"
         )
-    write_json(
-        _of_matcher(MATCH_CHECK, matcher),
-        {
-            "setup": _check_setup(matcher, _setup()),
-            "situated": len(situated),
-            "tries": tries,
-            "median_m": metres,
-            "median_deg": degrees,
-            "bands_right": bands,
-            "wrong": len(wrong),
-            "passed": passed,
-            # how much better the outlines fit the cameras found right, and the wrong ones
-            "outlines": {
-                "right": sorted(
-                    round(off.outline, 3)
-                    for kind, offs in found.items()
-                    for off in offs
-                    if kind != "leurre" and right(off)
-                ),
-                "wrong": sorted(round(off.outline, 3) for off in wrong),
-            },
+    checks = _per_area(MATCH_CHECK, matcher)
+    checks[name] = {
+        "setup": _check_setup(matcher, name, near_by),
+        "situated": len(situated),
+        "tries": tries,
+        "median_m": metres,
+        "median_deg": degrees,
+        "bands_right": bands,
+        "wrong": len(wrong),
+        "passed": passed,
+        # how much better the outlines fit the cameras found right, and the wrong ones
+        "outlines": {
+            "right": sorted(
+                round(off.outline, 3)
+                for kind, offs in found.items()
+                for off in offs
+                if kind != "leurre" and right(off)
+            ),
+            "wrong": sorted(round(off.outline, 3) for off in wrong),
         },
-    )
+    }
+    write_json(_of_matcher(MATCH_CHECK, matcher), checks)
     typer.echo(
-        f"vues : {len(situated)} situées sur {tries}, écart médian {metres:.1f} m et "
+        f"{name} — vues : {len(situated)} situées sur {tries}, écart médian {metres:.1f} m et "
         f"{degrees:.1f}° ; bandes vieillies justes : {bands} sur {tries} ; fausses : "
         f"{len(wrong)} sur {attempts} : "
         + ("porte passée" if passed else f"porte NON passée (il faut {', '.join(wanting)})")
@@ -2031,8 +2264,8 @@ def confirm_placed(port: int = 8768, open_browser: bool = True) -> None:
         if k in rounds and situated[k].inputs == inputs:
             rounds[k]["doubt"] = f"jugée fausse à l'œil : {why}"
     kept = _matches()  # round 0: each placement as kept, its matcher with it
-    setup = _setup()
-    for k, p in _to_judge(_proposed_now(setup), _verdicts()).items():  # turned down: yes or no?
+    scenes, judged = _scenes_now(), _Judged()
+    for k, p in _proposed_now(scenes, judged).items():  # turned down by matching: yes or no?
         if k in titles and k not in situated:
             situated[k] = _situation(p)
             rounds[k] = {"round": 0, "from": [], "proposed": p["why"]}
@@ -2042,7 +2275,14 @@ def confirm_placed(port: int = 8768, open_browser: bool = True) -> None:
             "title": titles[k],
             "inputs": m.inputs,
             **_origin(m, rounds[k], kept.get(k)),
-            "camera": {"x": round(m.x, 2), "y": round(m.y, 2), "heading": round(m.heading, 2)},
+            "camera": {
+                "x": round(m.x, 2),
+                "y": round(m.y, 2),
+                "heading": round(m.heading, 2),
+                "fov": round(m.fov, 2),
+                "horizon": round(m.horizon, 4),
+                "above_street": round(m.above_street, 2),
+            },
             "agree": m.agree,
             "moved_m": m.moved_m,
             "away_m": _away(near_by, m),
@@ -2064,7 +2304,7 @@ def confirm_placed(port: int = 8768, open_browser: bool = True) -> None:
         return cv2.imencode(".jpg", picture, SHEET_JPEG)[1].tobytes()
 
     _serve_page(
-        lambda: confirming.serve(placed, ANCHORS, _verdicts, frame, port),
+        lambda: confirming.serve(placed, ANCHORS, functools.partial(_said_on, placed), frame, port),
         f"photos situées ({len(placed)})",
         port,
         open_browser,

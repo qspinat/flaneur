@@ -33,9 +33,9 @@ def record(
     reason: str | None = None,
 ) -> dict:
     """Append the user's verdict on a photo placed from `inputs` (see cli._inputs), with the
-    camera judged (`camera`: x, y, heading): recorded so that a verdict can later be carried
-    over to a new placement that hardly moves the camera (not done yet); a "no" with its
-    `reason` when one was given (see REASONS)."""
+    camera judged (`camera`: x, y, heading, fov, horizon), which a verdict follows to a
+    placement that hardly moves it (see cli._Judged); a "no" with its `reason` when one was
+    given (see REASONS)."""
     if verdict not in VERDICTS:
         raise ValueError(f"un verdict est l'un de {VERDICTS}")
     if reason is not None and (verdict != "no" or reason not in REASONS):
@@ -57,11 +57,11 @@ def queue(placed: list[dict], verdicts: dict[str, dict]) -> list[dict]:
     """The photos placed (`placed`: id, title, round, inputs, `doubt` if the others disagree
     with it, `by` the matcher that found it, why to `check` it closely…), those the user has not
     judged for how they are placed now first, those in doubt or to check first among them,
-    round by round; each with its verdict (None: none for this placement)."""
+    round by round; each with its verdict (`verdicts`: the one that holds for each placement as
+    it is, see cli._Judged; none: not judged)."""
     items = []
     for photo in placed:
-        last = verdicts.get(photo["id"])
-        now = last if last and last["inputs"] == photo["inputs"] else {}
+        now = verdicts.get(photo["id"]) or {}
         items.append({**photo, "verdict": now.get("verdict"), "reason": now.get("reason")})
     return sorted(
         items,

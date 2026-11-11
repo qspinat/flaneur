@@ -56,7 +56,7 @@ def test_photos_placed_near_but_not_at_their_camera_are_no_anchors(tmp_path, mon
         confirming.record(path, photo_id, verdict, "1", 2)
     monkeypatch.setattr(cli, "ANCHORS", path)
 
-    assert cli._refused() == {("b", "1"), ("c", "1")}
+    assert cli._turned_down() == {"b", "c"}
 
 
 def test_photos_the_user_turned_down_stay_down_until_a_yes(tmp_path, monkeypatch):
@@ -448,6 +448,37 @@ def _kept(**more) -> dict:
     return {**fields, **more}
 
 
+def _judged(tmp_path, *rows):
+    path = tmp_path / "anchors.jsonl"
+    path.write_text("".join(json.dumps(r) + "\n" for r in rows))
+    return cli._Judged(path)
+
+
+def _camera(x=0.0, y=0.0, heading=90.0, fov=60.0, horizon=0.5, above_street=1.5):
+    return {
+        "x": x,
+        "y": y,
+        "heading": heading,
+        "fov": fov,
+        "horizon": horizon,
+        "above_street": above_street,
+    }
+
+
+def _said(verdict, inputs, x=0.0, y=0.0, heading=90.0, fov=60.0, horizon=0.5):
+    return {
+        "photo_id": "a",
+        "verdict": verdict,
+        "inputs": inputs,
+        "camera": _camera(x, y, heading, fov, horizon),
+    }
+
+
+def _at(inputs, x=0.0, y=0.0, heading=90.0, fov=60.0, horizon=0.5, above_street=1.5):
+    """A placement (its inputs and camera) as a verdict is read on it."""
+    return {"inputs": inputs, **_camera(x, y, heading, fov, horizon, above_street)}
+
+
 def test_a_placement_kept_with_its_matcher_is_read_as_it_was_found():
     situated = cli._situation(_kept(matcher="lomag"))
 
@@ -534,9 +565,10 @@ def test_the_page_tells_which_matcher_placed_a_photo_and_whether_to_check_it(kep
 
 
 def test_lomag_s_check_goes_stale_with_its_code_disk_s_with_the_panoramas_only():
-    assert cli._check_setup("disk", "s") == "s"
-    assert cli._check_setup("lomag", "s").startswith("s:")
-    assert cli._check_setup("lomag", "s") != cli._check_setup("lomag", "t")
+    disk = cli._check_setup("disk", "cite", [])
+
+    assert cli._check_setup("lomag", "cite", []).startswith(f"{disk}:")  # and its own code
+    assert cli._check_setup("disk", "saint-severin", []) != disk  # each area its own
 
 
 def test_the_old_photo_s_outlines_are_drawn_on_today_s_view_in_amber():
@@ -596,13 +628,12 @@ def _match_world(tmp_path, monkeypatch, previous: dict, places) -> None:
     for name, value in {
         "MATCHES": tmp_path / "matches.json",
         "MATCH_TRACE": tmp_path / "trace.json",
-        "_setup": lambda: "s",
+        "ANCHORS": tmp_path / "anchors.jsonl",  # the user's verdicts: none unless a test says
         "_matching": lambda: (heights, [], lambda year: SimpleNamespace(blocks=None)),
         "_matches": lambda: previous,
-        "_refused": lambda: set(),
         "_situated": lambda: {},
         "_exported": lambda photo_id: exported,
-        "_inputs": lambda photo_id, setup: "i",
+        "_inputs": lambda scene, photo_id: "i",
         "_image": lambda photo_id: "h",
         "_place_of": lambda me: (0.0, 0.0),
         "_where": lambda me, heights, now: None,
@@ -658,17 +689,19 @@ def test_a_redo_that_finds_nothing_keeps_the_placement_made_from_these_inputs(
 
 
 @pytest.mark.parametrize(
-    "before, refused",
+    "before, said",
     [
-        (_kept(inputs="other", matcher="disk", tried=["disk"]), set()),  # placed from others
-        (_kept(matcher="disk", tried=["disk"]), {("pm:1", "i")}),  # turned down
+        (_kept(inputs="other", matcher="disk", tried=["disk"]), []),  # placed from others
+        (_kept(matcher="disk", tried=["disk"]), [_said("no", "i", x=1.0, y=2.0)]),  # turned down
     ],
 )
 def test_a_run_that_finds_nothing_replaces_a_stale_or_refused_placement(
-    tmp_path, monkeypatch, before, refused
+    tmp_path, monkeypatch, before, said
 ):
     _match_world(tmp_path, monkeypatch, {"pm:1": dict(before)}, lambda matcher: None)
-    monkeypatch.setattr(cli, "_refused", lambda: refused)
+    (tmp_path / "anchors.jsonl").write_text(
+        "".join(json.dumps({**r, "photo_id": "pm:1"}) + "\n" for r in said)
+    )
 
     cli.match_photos(photo=None, again=False, force=True)
 
@@ -727,19 +760,22 @@ def test_a_proposed_camera_is_a_placement_once_said_yes_to(
     cv2.imwrite(str(photo), np.zeros((8, 8, 3), np.uint8))
     proposal = cli._proposals(
         {"a": {"candidates": [_candidate(60, "position incertaine")]}},
-        {"a": {"inputs": "i", "tried": ["lomag"]}},
+        {"a": {"inputs": "s:i", "tried": ["lomag"]}},
         lambda k: (0.0, 0.0),
-        lambda k: "i",
+        lambda k: "s:i",
         2.4,
     )
     (tmp_path / "proposed.json").write_text(json.dumps(proposal))
     monkeypatch.setattr(cli, "PROPOSED_CAMERAS", tmp_path / "proposed.json")
     monkeypatch.setattr(cli, "_matches", dict)
     monkeypatch.setattr(cli, "_exported", lambda photo_id: photo)
-    monkeypatch.setattr(cli, "_setup", lambda: "s")
-    monkeypatch.setattr(cli, "_inputs", lambda photo_id, setup: inputs_now)
-    said = {"a": {"verdict": verdict, "inputs": proposal["a"]["inputs"]}} if verdict else {}
-    monkeypatch.setattr(cli, "_verdicts", lambda: said)
+    monkeypatch.setattr(cli, "_scenes_now", lambda: {"a": "s"})
+    monkeypatch.setattr(cli, "_photo_part", lambda photo_id: inputs_now)  # the photo now
+    a = proposal["a"]
+    camera = {"x": a["x"], "y": a["y"], "heading": a["heading"]}
+    said = [{"photo_id": "a", "verdict": verdict, "inputs": a["inputs"], "camera": camera}]
+    (tmp_path / "anchors.jsonl").write_text(json.dumps(said[0]) + "\n" if verdict else "")
+    monkeypatch.setattr(cli, "ANCHORS", tmp_path / "anchors.jsonl")
 
     assert ("a" in cli._situated()) == placed
 
@@ -762,18 +798,25 @@ def test_a_yes_is_to_the_camera_proposed_not_to_the_next_one(tmp_path, monkeypat
         lambda k: "i",
         2,
     )
-    (tmp_path / "proposed.json").write_text(json.dumps(later))
     monkeypatch.setattr(cli, "PROPOSED_CAMERAS", tmp_path / "proposed.json")
     monkeypatch.setattr(cli, "_matches", dict)
     monkeypatch.setattr(cli, "_exported", lambda photo_id: photo)
-    monkeypatch.setattr(cli, "_setup", lambda: "s")
-    monkeypatch.setattr(cli, "_inputs", lambda photo_id, setup: "i")
-    monkeypatch.setattr(
-        cli, "_verdicts", lambda: {"a": {"verdict": "yes", "inputs": first["a"]["inputs"]}}
-    )
+    monkeypatch.setattr(cli, "_scenes_now", lambda: {"a": "s"})
+    monkeypatch.setattr(cli, "_inputs", lambda scene, photo_id: "i")
+    a = first["a"]
+    yes = {
+        "photo_id": "a",
+        "verdict": "yes",
+        "inputs": a["inputs"],
+        "camera": {"x": a["x"], "y": a["y"], "heading": a["heading"]},
+    }
+    (tmp_path / "anchors.jsonl").write_text(json.dumps(yes) + "\n")
+    monkeypatch.setattr(cli, "ANCHORS", tmp_path / "anchors.jsonl")
 
-    assert first["a"]["inputs"] != later["a"]["inputs"]
-    assert "a" not in cli._situated()
+    (tmp_path / "proposed.json").write_text(json.dumps(first))
+    assert "a" in cli._situated()  # the camera said yes to
+    (tmp_path / "proposed.json").write_text(json.dumps(later))
+    assert "a" not in cli._situated()  # another, 40 m away
 
 
 def test_a_trace_made_from_another_image_proposes_nothing():
@@ -800,18 +843,22 @@ def test_a_no_to_a_proposed_camera_leaves_the_photo_to_chaining(monkeypatch):
     assert cli._turned_down() == {"b"}
 
 
-def test_a_proposed_camera_judged_already_is_not_offered_again():
-    proposed = {
-        "a": {"inputs": "i:proposed-1"},
-        "b": {"inputs": "i:proposed-2"},
-        "c": {"inputs": "i:proposed-3"},
-    }
-    verdicts = {
-        "a": {"verdict": "no", "inputs": "i:proposed-1"},
-        "b": {"verdict": "no", "inputs": "i:proposed-0"},
-    }
+def test_a_proposed_camera_judged_already_is_not_offered_again(monkeypatch, tmp_path):
+    def camera(n):
+        return {"inputs": f"s:i:proposed-{n}", "matcher": f"proposed-{n}", **_camera(10.0 * n)}
 
-    assert set(cli._to_judge(proposed, verdicts)) == {"b", "c"}
+    proposed = {"a": camera(1), "b": camera(2), "c": camera(3)}
+    (tmp_path / "proposed.json").write_text(json.dumps(proposed))
+    monkeypatch.setattr(cli, "PROPOSED_CAMERAS", tmp_path / "proposed.json")
+    monkeypatch.setattr(cli, "_exported", lambda photo_id: tmp_path / "proposed.json")
+    monkeypatch.setattr(cli, "_inputs", lambda scene, photo_id: "s:i")
+    judged = _judged(
+        tmp_path,
+        {**_said("no", "s:i:proposed-1", x=10.0), "photo_id": "a"},  # that very camera
+        {**_said("no", "s:i:proposed-0", x=0.0), "photo_id": "b"},  # another, 20 m away
+    )
+
+    assert set(cli._proposed_now(dict.fromkeys(proposed, "s"), judged)) == {"b", "c"}
 
 
 def test_a_seeds_image_is_read_where_it_was_kept_and_never_published(monkeypatch, tmp_path):
@@ -826,3 +873,318 @@ def test_a_seeds_image_is_read_where_it_was_kept_and_never_published(monkeypatch
 
     assert cli._exported("pm:shown") == tmp_path / "site" / export.image_name("pm:shown")
     assert cli._exported("pm:seed") == tmp_path / "seeded" / export.image_name("pm:seed")
+
+
+def _panorama(n, x, y=0.0, roll=0.0):
+    from pathlib import Path
+
+    from flaneur import match
+
+    return match.Panorama(f"p{n}", x, y, 0.0, 0.0, Path(f"p{n}.jpg"), roll, 0.0)
+
+
+def _scene(near_by, here=(0.0, 0.0), code="code"):
+    from flaneur import cli
+
+    return cli._scene_of(cli._compared_with(near_by, here), here, code)
+
+
+def test_a_photos_fingerprint_holds_when_panoramas_it_does_not_compare_are_added():
+    from flaneur import cli
+
+    near_by = [_panorama(n, 2.0 * n) for n in range(cli.MATCH_PANORAMAS)]  # all within reach
+
+    assert _scene(near_by) == _scene(near_by + [_panorama(99, 500.0)])  # far away
+    assert _scene(near_by) == _scene(near_by + [_panorama(98, 50.0)])  # in reach, not among 16
+
+
+def test_a_photos_fingerprint_changes_with_what_its_match_is_found_from():
+    near_by = [_panorama(n, 10.0 * n) for n in range(1, 4)]
+    before = _scene(near_by)
+
+    assert _scene(near_by + [_panorama(9, 5.0)]) != before  # a nearer panorama
+    assert _scene([_panorama(1, 10.5), *near_by[1:]]) != before  # one moved
+    assert _scene([_panorama(1, 10.0, roll=1.0), *near_by[1:]]) != before  # one levelled again
+    assert _scene(near_by, here=(0.5, 0.0)) != before  # the photo's place moved
+    assert _scene(near_by, code="other") != before  # the code that finds it changed
+
+
+def test_the_page_shows_only_the_word_that_holds_for_each_photo_as_placed(monkeypatch, tmp_path):
+    _judged(tmp_path, _said("yes", "s:img"))
+    monkeypatch.setattr(cli, "ANCHORS", tmp_path / "anchors.jsonl")
+    here = _camera(x=0.3, heading=90.5)
+
+    def placed(inputs, camera):
+        return [{"id": "a", "inputs": inputs, "camera": camera}]
+
+    assert cli._said_on(placed("t:img", here))["a"]["verdict"] == "yes"  # its camera, hardly moved
+    assert cli._said_on(placed("t:img", {**here, "x": 5.0})) == {}  # placed elsewhere: judge again
+
+
+def test_each_photos_scene_is_found_from_the_panoramas_match_compares_it_with(monkeypatch):
+    from types import SimpleNamespace
+
+    from flaneur import cli
+
+    rng = np.random.default_rng(0)
+    near_by = [_panorama(n, *rng.integers(-60, 60, 2).astype(float)) for n in range(300)]
+    near_by += [_panorama(400 + n, 3.0, 4.0) for n in range(20)]  # ties, more than 16
+    walk = [
+        SimpleNamespace(id=str(n), here=(float(x), float(y)))
+        for n, (x, y) in enumerate([(0.0, 0.0), (3.0, 4.0), (50.0, -50.0), (500.0, 0.0)])
+    ]
+    monkeypatch.setattr(cli, "_place_of", lambda me: me.here)
+    monkeypatch.setattr(cli, "_code", lambda: "code")
+
+    assert cli._scenes(walk, near_by) == {me.id: _scene(near_by, me.here) for me in walk}
+
+
+def test_a_verdict_follows_its_camera_found_again_from_other_panoramas(tmp_path):
+    judged = _judged(tmp_path, _said("yes", "oldscene:img:lomag"))
+
+    assert judged.on("a", _at("newscene:img", 0.6, 0.6, 91.5, 61.5, 0.51))["verdict"] == "yes"
+    assert judged.on("a", _at("newscene:img", x=1.2)) is None  # moved
+    assert judged.on("a", _at("newscene:img", heading=93.0)) is None  # turned
+    assert judged.on("a", _at("newscene:img", fov=63.0)) is None  # wider: framed otherwise
+    assert judged.on("a", _at("newscene:img", horizon=0.53)) is None  # tilted
+    assert judged.on("a", _at("newscene:img", above_street=3.0)) is None  # a floor up
+    assert judged.on("a", _at("newscene:other")) is None  # another crop of the photo
+    assert judged.on("a", _at("newscene:img:ab12cd34")) is None  # landmarks marked since
+    assert judged.on("a", {"inputs": "newscene:img"}) is None  # not placed: its inputs only
+
+
+def test_a_verdict_kept_without_its_cameras_width_holds_for_its_inputs_only(tmp_path):
+    old = _said("yes", "s1:img")
+    old["camera"] = {"x": 0.0, "y": 0.0, "heading": 90.0}  # as kept before 11/11, evening
+    judged = _judged(tmp_path, old)
+
+    assert judged.on("a", _at("s1:img"))["verdict"] == "yes"
+    assert judged.on("a", _at("s2:img")) is None
+
+
+def test_a_chained_placements_anchors_are_not_taken_for_the_landmarks_marked():
+    anchor = SimpleNamespace(id="b", inputs="s:other")
+
+    assert cli._photo_of(cli._placed_from("s:img", [anchor])) == "img"
+    assert cli._photo_of(cli._placed_from("s:img:ab12cd34", [anchor])) == "img:ab12cd34"
+
+
+def test_the_last_word_on_a_camera_holds(tmp_path):
+    judged = _judged(tmp_path, _said("yes", "s1:img"), _said("no", "s2:img", x=0.3))
+
+    assert judged.on("a", _at("s3:img", x=0.1))["verdict"] == "no"
+    assert judged.on("a", _at("s1:img", x=50.0, heading=0.0))["verdict"] == "yes"  # its inputs
+
+
+def test_a_yes_taken_back_beside_its_camera_no_longer_follows_it(tmp_path):
+    judged = _judged(tmp_path, _said("yes", "s1:img"), _said("no", "s2:img", x=0.5))
+
+    assert judged.on("a", _at("s3:img", x=-0.6)) is None  # 0.6 m from the yes, 1.1 from the no
+    assert judged.on("a", _at("s1:img"))["verdict"] == "no"  # the newest word reaching it
+
+
+def test_a_yes_holds_while_the_photo_is_the_same(tmp_path):
+    judged = _judged(tmp_path, _said("yes", "oldscene:img"))
+    placed = _at("oldscene:img")
+
+    with pytest.MonkeyPatch.context() as patched:
+        patched.setattr(cli, "_photo_part", lambda photo_id: "img")
+        assert judged.holds("a", placed)
+        assert not _judged(tmp_path, _said("near", "oldscene:img")).holds("a", placed)
+        patched.setattr(cli, "_photo_part", lambda photo_id: "recropped")
+        assert not judged.holds("a", placed)
+
+
+def _placed_now(monkeypatch, tmp_path, kept, *said, photo="img"):
+    """What is placed now (`_situated`, `_confirmed`) of one photo "a" stored as `kept`, its
+    scene now "new" and the photo itself now `photo`, the user having `said` these."""
+    image = tmp_path / "old.jpg"
+    cv2.imwrite(str(image), np.zeros((8, 8, 3), np.uint8))
+    anchors = tmp_path / "anchors.jsonl"
+    anchors.write_text("".join(json.dumps(r) + "\n" for r in said))
+    monkeypatch.setattr(cli, "_matches", lambda: {"a": kept})
+    monkeypatch.setattr(cli, "_exported", lambda photo_id: image)
+    monkeypatch.setattr(cli, "_scenes_now", lambda: {"a": "new"})
+    monkeypatch.setattr(cli, "_photo_part", lambda photo_id: photo)
+    monkeypatch.setattr(cli, "PROPOSED_CAMERAS", tmp_path / "proposed.json")
+    monkeypatch.setattr(cli, "ANCHORS", anchors)
+    return set(cli._situated()), set(cli._confirmed())
+
+
+def test_a_placement_said_yes_to_stands_while_the_photo_is_the_same(monkeypatch, tmp_path):
+    kept, yes = _kept(inputs="old:img"), _said("yes", "old:img", x=1.0, y=2.0)
+
+    assert _placed_now(monkeypatch, tmp_path, kept, yes) == ({"a"}, {"a"})
+    assert _placed_now(monkeypatch, tmp_path, kept, yes, photo="recropped") == (set(), set())
+    assert _placed_now(monkeypatch, tmp_path, kept) == (set(), set())  # stale, not judged
+
+
+def test_a_verdict_given_to_a_camera_holds_for_it_found_again(monkeypatch, tmp_path):
+    found_again = _kept(inputs="new:img", x=1.3)  # 0.3 m from the camera judged
+
+    no = _said("no", "old:img", x=1.0, y=2.0)
+    yes = _said("yes", "old:img", x=1.0, y=2.0)
+
+    assert _placed_now(monkeypatch, tmp_path, found_again) == ({"a"}, set())  # to judge
+    assert _placed_now(monkeypatch, tmp_path, found_again, no) == (set(), set())
+    assert _placed_now(monkeypatch, tmp_path, found_again, yes) == ({"a"}, {"a"})
+
+
+ELSEWHERE = match.Camera(30.0, 2.0, 1.5, 90.0, 0.5, 60.0, agree=30, panoramas=2)  # 29 m away
+NUDGED = match.Camera(1.9, 2.0, 1.5, 90.0, 0.5, 60.0, agree=30, panoramas=2)  # 0.9 m: one by one
+
+
+@pytest.mark.parametrize(
+    ("photo", "again", "found"),
+    [
+        (None, True, ELSEWHERE),
+        (["pm:1"], False, ELSEWHERE),
+        (["pm:1"], False, NUDGED),
+        (["pm:1"], False, None),
+    ],
+)
+def test_matching_never_takes_away_a_placement_said_yes_to(
+    tmp_path, monkeypatch, photo, again, found
+):
+    before = _kept(inputs="old:h", matcher="disk", tried=["disk"])  # other panoramas then
+    _match_world(tmp_path, monkeypatch, {"pm:1": dict(before)}, lambda matcher: found)
+    yes = {**_said("yes", "old:h", x=1.0, y=2.0), "photo_id": "pm:1"}
+    (tmp_path / "anchors.jsonl").write_text(json.dumps(yes) + "\n")
+
+    cli.match_photos(photo=photo, again=again, force=True)
+
+    written = tmp_path / "matches.json"  # none when nothing was matched
+    assert not written.exists() or json.loads(written.read_text())["pm:1"] == before
+
+
+def test_matching_never_redoes_a_photo_whose_proposed_camera_was_said_yes_to(tmp_path, monkeypatch):
+    unplaced = {"inputs": "old:h", "tried": ["lomag", "disk"]}
+    proposal = _kept(inputs="old:h:proposed-12345678", x=20.0)
+    _match_world(tmp_path, monkeypatch, {"pm:1": dict(unplaced)}, lambda matcher: CAMERA)
+    (tmp_path / "proposed.json").write_text(json.dumps({"pm:1": proposal}))
+    monkeypatch.setattr(cli, "PROPOSED_CAMERAS", tmp_path / "proposed.json")
+    yes = {**_said("yes", proposal["inputs"], x=20.0, y=2.0), "photo_id": "pm:1"}
+    (tmp_path / "anchors.jsonl").write_text(json.dumps(yes) + "\n")
+
+    cli.match_photos(photo=["pm:1", "pm:2"], again=True, force=True)
+
+    kept = json.loads((tmp_path / "matches.json").read_text())
+    assert kept["pm:1"] == unplaced
+    assert kept["pm:2"]["x"] == CAMERA.x  # the other, matched
+
+
+def test_a_proposed_camera_said_yes_to_is_proposed_still_whatever_its_panoramas(
+    tmp_path, monkeypatch
+):
+    held = _kept(inputs="old:img:proposed-12345678")
+    (tmp_path / "proposed.json").write_text(json.dumps({"a": held, "b": _kept(inputs="old:x")}))
+    (tmp_path / "anchors.jsonl").write_text(json.dumps(_said("yes", held["inputs"], 1.0, 2.0)))
+    for name, value in {
+        "PROPOSED_CAMERAS": tmp_path / "proposed.json",
+        "ANCHORS": tmp_path / "anchors.jsonl",
+        "MATCH_TRACE": tmp_path / "trace.json",
+        "_scenes_now": dict,
+        "_matches": dict,
+        "_photo_part": lambda photo_id: "img",
+    }.items():
+        monkeypatch.setattr(cli, name, value)
+    monkeypatch.setattr(cli.db, "connect", lambda path: SimpleNamespace(close=lambda: None))
+    monkeypatch.setattr(cli.export, "photos", lambda *args: [])
+
+    cli.propose_turned_down()  # none proposed anew: the panoramas changed
+
+    assert json.loads((tmp_path / "proposed.json").read_text()) == {"a": held}
+
+
+def test_a_proposed_camera_said_yes_to_wins_over_a_placement_not_judged(monkeypatch, tmp_path):
+    proposal = _kept(inputs="new:img:proposed-12345678", x=20.0)
+    (tmp_path / "proposed.json").write_text(json.dumps({"a": proposal}))
+    yes = _said("yes", proposal["inputs"], x=20.0, y=2.0)
+
+    _placed_now(monkeypatch, tmp_path, _kept(inputs="new:img"), yes)  # found since, not judged
+
+    assert cli._situated()["a"].x == 20.0
+
+
+def test_an_areas_check_passes_only_on_enough_views():
+    assert cli._wanting(10, 10, 0.3, 0.5, 0, 30) == []
+    assert cli._wanting(3, 3, 0.3, 0.5, 0, 9) == [f"au moins {cli.CHECK_LEAST} vues"]
+
+
+def test_an_area_without_decoys_is_left_unchecked_and_the_others_checked(tmp_path, monkeypatch):
+    from flaneur import pilot
+
+    home, other = pilot.AREAS["saint-severin"].centroid, pilot.AREAS["cite"].centroid
+    near_by = [_panorama(n, home.x + n, home.y) for n in range(3)]  # all within FAR_M
+    near_by += [_panorama(10 + n, other.x + 230.0 * (n % 2), other.y + n) for n in range(4)]
+    near_by += [_panorama(20, other.x + 115.0, other.y)]  # between: no decoy, not drawn
+    heights = SimpleNamespace(streets=None, origin_z=0.0)
+    for name, value in {
+        "MATCH_CHECK": tmp_path / "check.json",
+        "CHECK_TRACE": tmp_path / "trace.json",
+        "_matching": lambda: (
+            heights,
+            near_by,
+            lambda year: SimpleNamespace(blocks=None, free=None),
+        ),
+        "_views": lambda matcher="disk": None,
+        "_fixed_by_colmap": lambda pictures, fixes: {p.id for p in near_by},
+        "_cut_view": lambda panorama, heading: np.zeros((2, 2, 3), np.uint8),
+        "_check_view": lambda panorama, heading: None,
+        "_marked_by_hand": lambda view, shown, rng: (),
+    }.items():
+        monkeypatch.setattr(cli, name, value)
+    monkeypatch.setattr(cli.db, "connect", lambda path: SimpleNamespace(close=lambda: None))
+    monkeypatch.setattr(cli.panoramas, "load", lambda conn: [])
+    monkeypatch.setattr(cli.landmarks, "among", lambda blocks: ())
+    monkeypatch.setattr(cli.fakes, "mixed", lambda a, b, span: a)
+    monkeypatch.setattr(cli.fakes, "aged", lambda image, rng: image)
+    monkeypatch.setattr(cli.match, "Where", lambda *args: None)
+    monkeypatch.setattr(cli.match, "locate", lambda *args: (None, None, None))
+
+    cli.match_check(tries=20, seed=0, matcher="disk", area=None)
+
+    assert set(json.loads((tmp_path / "check.json").read_text())) == {"cite"}
+
+
+def test_an_areas_check_holds_while_panoramas_are_added_elsewhere():
+    from flaneur import pilot
+
+    home, other = pilot.AREAS["saint-severin"].centroid, pilot.AREAS["cite"].centroid
+    near_by = [_panorama(n, home.x + 10.0 * n, home.y) for n in range(3)]
+    before = cli._check_setup("disk", "saint-severin", near_by)
+
+    assert (
+        cli._check_setup("disk", "saint-severin", [*near_by, _panorama(9, other.x, other.y)])
+        == before
+    )
+    assert (
+        cli._check_setup("disk", "saint-severin", [*near_by, _panorama(8, home.x, home.y + 5)])
+        != before
+    )
+
+
+def test_a_photo_belongs_to_the_area_it_stands_in_else_the_nearest():
+    from flaneur import pilot
+
+    cite = pilot.AREAS["cite"].centroid
+
+    assert cli._area_of((cite.x, cite.y)) == "cite"
+    assert cli._area_of((cite.x + 2000.0, cite.y)) == "cite"  # east of both: the Cité is nearer
+
+
+@pytest.mark.parametrize(("passed_in", "placed"), [("cite", True), ("saint-severin", False)])
+def test_a_photo_is_matched_only_by_matchers_checked_in_its_area(
+    tmp_path, monkeypatch, passed_in, placed
+):
+    _match_world(tmp_path, monkeypatch, {}, lambda matcher: CAMERA)
+    monkeypatch.setattr(cli, "MATCH_CHECK", tmp_path / "match_check.json")
+    monkeypatch.setattr(cli, "_area_of", lambda here: "cite")  # where the photos stand
+    check = {passed_in: {"passed": True, "setup": cli._check_setup("disk", passed_in, [])}}
+    (tmp_path / "match_check.json").write_text(json.dumps(check))  # DISK's, checked there only
+
+    cli.match_photos(photo=None, again=False, force=False)
+
+    kept = json.loads((tmp_path / "matches.json").read_text()) if placed else {}
+    assert ("x" in kept.get("pm:1", {})) == placed
+    assert kept.get("pm:1", {}).get("matcher", "disk") == "disk"
