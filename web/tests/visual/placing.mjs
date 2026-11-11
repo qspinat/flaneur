@@ -16,6 +16,15 @@ const check = (ok, what) => {
   console.log(`${ok ? 'ok ' : 'NOT'} ${what}`);
   if (!ok) failed++;
 };
+/** Until a picture of `on` is there: a click in it before then would land in nothing (the
+ *  server cuts views on demand, slowly when its cache is cold). */
+const loaded = (on, selector) => on.waitForFunction(
+  (s) => { const image = document.querySelector(s); return image.complete && image.naturalWidth > 0; },
+  selector, { timeout: 120000 });
+/** Until `condition` holds (what the page asked of the server), or `ms` have passed. */
+const until = async (condition, ms = 30000) => {
+  for (const start = Date.now(); !condition() && Date.now() - start < ms;) await new Promise((r) => setTimeout(r, 100));
+};
 await page.route('**/api/answer', (route) => {
   answers.push(JSON.parse(route.request().postData()));
   return route.fulfill({ json: {} });
@@ -45,6 +54,8 @@ await page.goto(url);
 await page.waitForFunction(() => typeof photo !== 'undefined' && photo && proposal, null, { timeout: 30000 });
 await page.keyboard.press('f'); // the proposal looks wrong: place it by points
 await page.waitForTimeout(800);
+await loaded(page, '#photo');
+await loaded(page, '#view');
 const photo = await page.locator('#photo').boundingBox();
 const view = await page.locator('#view').boundingBox();
 const clickPairs = async (points) => {  // each point in the photo, then the same in the view
@@ -93,6 +104,8 @@ async function onPoints(routes) {
   await opened.goto(url);
   await opened.locator('#pair.on').waitFor({ timeout: 15000 });
   await opened.waitForTimeout(1000);
+  await loaded(opened, '#photo');
+  await loaded(opened, '#view');
   const click = async (points) => {  // where the pictures stand now (a third one moves them)
     const shot = await opened.locator('#photo').boundingBox(), seen = await opened.locator('#view').boundingBox();
     for (const [x, y] of points) {
@@ -181,19 +194,23 @@ const overlaid = await overView(deep);
 check(overlaid >= 3, `the walls are drawn over the view too: foot, top, ends (${overlaid})`);
 check(!(await deep.locator('#third-box').isVisible()), 'pairing keeps two large pictures: the photo and the view');
 await pairsAt(SIX);
-await deep.waitForTimeout(1000);
+await until(() => asked.parallax.length > 0 && asked.standingLaid > 0);
+await deep.waitForTimeout(500);  // the dots and plates drawn from the answer
 check(asked.parallax.length > 0 && asked.standingLaid > 0, `six pairs refit by parallax and laid through depth (${asked.parallax.length}, ${asked.standingLaid})`);
 check((await deep.locator('#view-stage .dot.off').count()) >= 1, 'a pair far from the fit shows on its dot');
 check((await deep.locator('#strip button.wall').count()) === 6, 'each pair\'s plate says its depth came from a wall');
 await deep.locator('#strip button').nth(5).click();  // pair 6: its depth by the neighbour's view
 await deep.waitForTimeout(500);
+await loaded(deep, '#third');
 check(await deep.locator('#third-box').isVisible() && !(await deep.locator('#photo-box').isVisible()),
   'a pair\'s plate shows the neighbour\'s view in the photo\'s place');
 check(asked.epipolar > 0 && (await deep.locator('#line').getAttribute('points')).length > 0,
   `the pair's line is drawn in the neighbour's view (${asked.epipolar})`);
 const third = await deep.locator('#third').boundingBox();
+const refits = asked.parallax.length;
 await deep.mouse.click(third.x + third.width * 0.5, third.y + third.height * 0.5);
-await deep.waitForTimeout(1000);
+await until(() => asked.second !== null && asked.parallax.length > refits);
+await deep.waitForTimeout(500);
 check(asked.second?.neighbour === here.neighbour && asked.second?.neighbour_px?.length === 2,
   'a click in the neighbour\'s view asks the last pair\'s depth there');
 check((await deep.locator('#view-stage .dot.click').count()) === 1, 'that pair\'s dot says its depth came from a second click');

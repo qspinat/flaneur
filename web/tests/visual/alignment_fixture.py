@@ -1,7 +1,9 @@
 """Makes what tests/visual/walk3d.mjs checks the 3D walk against: a checkerboard registered on a
 leaning panorama of the pilot, and the pipeline's own drawing of it in a view; written to the
 folder given (nothing in the site's data). Run with the pipeline's environment:
-    cd pipeline && uv run python ../web/tests/visual/alignment_fixture.py <folder> <fov>"""
+    cd pipeline && uv run python ../web/tests/visual/alignment_fixture.py <folder> [fov]
+The view is drawn as the 3D walk opens it: `fov` must be the page's own (72°, see OPENING_FOV);
+another draws the board at another size and the check fails though the page is right."""
 
 import json
 import shutil
@@ -14,7 +16,11 @@ import numpy as np
 
 from flaneur import cli, db, match, panoramas, registration
 
-out, fov = Path(sys.argv[1]), float(sys.argv[2])
+# The 3D walk's opening view: Photo Sphere Viewer's defaultZoomLvl 30 (web/src/sphere/main3d.ts)
+# between its default widest 90° and narrowest 30°: 90 - 0.30 * (90 - 30).
+OPENING_FOV = 72.0
+out = Path(sys.argv[1])
+fov = float(sys.argv[2]) if len(sys.argv) > 2 else OPENING_FOV
 out.mkdir(parents=True, exist_ok=True)
 with closing(db.connect(cli.DB_PATH)) as conn:
     pictures = cli._lined_up(panoramas.load(conn))
