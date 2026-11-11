@@ -50,6 +50,43 @@ def test_albert_kahn_record_keeps_its_camera_position_and_unverified_image(load_
     assert photo.license == "unverified"
 
 
+CC0 = "Librement réutilisable (CC-00) - Domaine Public"
+CC_BY = "Librement réutilisable (CC-BY-4.0)"
+
+
+def _licensed(record: dict, label: str | None, transferable: str | None = None):
+    row = {
+        "identifiant_fakir": record["identifiant_fakir"],
+        "licence_reutilisation_1": label,
+        "droits_cessibles": transferable,
+    }
+    return albert_kahn.parse(record, {record["identifiant_fakir"]: row})
+
+
+def test_albert_kahn_image_takes_the_licence_the_museum_gives_it(load_fixture):
+    record = load_fixture("albert_kahn_passage_du_caire.json")
+
+    assert _licensed(record, CC0).license == "CC0"
+    assert _licensed(record, CC_BY).license == "CC-BY-4.0"
+
+
+def test_albert_kahn_credit_names_the_museum_and_the_inventory_number(load_fixture):
+    photo = _licensed(load_fixture("albert_kahn_passage_du_caire.json"), CC_BY)
+
+    assert (
+        photo.credit == "Département des Hauts-de-Seine, musée départemental Albert-Kahn, A 7 479"
+    )
+
+
+def test_albert_kahn_image_stays_unverified_without_a_transferable_open_licence(load_fixture):
+    record = load_fixture("albert_kahn_passage_du_caire.json")
+
+    assert _licensed(record, CC0, transferable="Non").license == "unverified"
+    assert _licensed({**record, "droits_cessibles": "Non"}, CC0).license == "unverified"
+    assert _licensed(record, "Droits réservés").license == "unverified"
+    assert albert_kahn.parse(record, {}).license == "unverified"
+
+
 def _fake_api(total: int, broken: set[int] = frozenset()) -> httpx.Client:
     """A Paris Musées API with `total` records numbered from 0; `broken` ones answer 500."""
 
