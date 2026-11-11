@@ -671,3 +671,65 @@ def test_a_run_that_finds_nothing_replaces_a_stale_or_refused_placement(
 
     kept = json.loads((tmp_path / "matches.json").read_text())["pm:1"]
     assert kept == {"inputs": "i", "tried": ["lomag", "disk"]}
+
+
+def _candidate(agree, why, x=10.0):
+    return {
+        "x": x,
+        "y": 0.0,
+        "heading": 90.0,
+        "fov": 50.0,
+        "horizon": 0.5,
+        "agree": agree,
+        "spread_m": None,
+        "why": why,
+    }
+
+
+def test_a_camera_turned_down_with_many_points_agreeing_is_proposed():
+    trace = {
+        "a": {"candidates": [_candidate(30, "x"), _candidate(60, "position incertaine")]},
+        "b": {"candidates": [_candidate(40, "position incertaine")]},  # too few agree
+        "c": {"candidates": [_candidate(80, "ne peut se tenir là")]},  # placed already
+    }
+    places = {"a": (10.0, 3.0), "b": (0.0, 0.0), "c": (0.0, 0.0)}
+
+    proposed = cli._proposals(trace, {"c"}, places, {"a": "i", "b": "i", "c": "i"}, 2.4)
+
+    assert set(proposed) == {"a"}
+    a = proposed["a"]
+    assert (a["agree"], a["why"], a["inputs"], a["above_street"], a["moved_m"]) == (
+        60,
+        "position incertaine",
+        "i:proposed",
+        2.4,
+        3.0,
+    )
+
+
+@pytest.mark.parametrize(
+    ("verdict", "inputs_now", "placed"),
+    [("yes", "i", True), ("no", "i", False), (None, "i", False), ("yes", "j", False)],
+)
+def test_a_proposed_camera_is_a_placement_once_said_yes_to(
+    tmp_path, monkeypatch, verdict, inputs_now, placed
+):
+    photo = tmp_path / "old.jpg"
+    cv2.imwrite(str(photo), np.zeros((8, 8, 3), np.uint8))
+    proposal = cli._proposals(
+        {"a": {"candidates": [_candidate(60, "position incertaine")]}},
+        set(),
+        {"a": (0.0, 0.0)},
+        {"a": "i"},
+        2.4,
+    )
+    (tmp_path / "proposed.json").write_text(json.dumps(proposal))
+    monkeypatch.setattr(cli, "PROPOSED_CAMERAS", tmp_path / "proposed.json")
+    monkeypatch.setattr(cli, "_matches", dict)
+    monkeypatch.setattr(cli, "_exported", lambda photo_id: photo)
+    monkeypatch.setattr(cli, "_setup", lambda: "s")
+    monkeypatch.setattr(cli, "_inputs", lambda photo_id, setup: inputs_now)
+    said = {"a": {"verdict": verdict, "inputs": "i:proposed"}} if verdict else {}
+    monkeypatch.setattr(cli, "_verdicts", lambda: said)
+
+    assert ("a" in cli._situated()) == placed

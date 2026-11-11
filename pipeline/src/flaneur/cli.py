@@ -720,6 +720,10 @@ CHECK_TRACE = DATA / "pilot" / "match_check_trace.json"  # the same, for the kno
 MATCH_CHECK = DATA / "pilot" / "match_check.json"  # the known-answer check's last result
 CHAINS = DATA / "pilot" / "chains.json"  # old photos placed from old photos (chain)
 CHAIN_CHECK = DATA / "pilot" / "chain_check.json"  # the chaining's known-answer check
+# Cameras matching turned down although many points agreed with them, proposed to the user
+# (`flaneur presque`): 56 % of those with 50 points agreeing were right by eye (10/11).
+PROPOSED_CAMERAS = DATA / "pilot" / "proposed_cameras.json"
+PROPOSE_AGREE = 50
 ANCHORS = DATA / "overrides" / "anchors.jsonl"  # the user's yes or no to photos placed
 MATCH_RADIUS_M = 60  # a placement from a caption can be 25 m off
 MATCH_PANORAMAS = 16  # ranked by a quick first pass, the best views matched in full
@@ -845,14 +849,80 @@ def _not_chained(matches: dict[str, dict | None], situated: Iterable[str]) -> se
 def _situated() -> dict[str, match.Situated]:
     """The old photos whose camera was found against today's panoramas, from what they are
     now (a match found from other panoramas or another crop of the photo is left out), and
-    not turned down by the user."""
-    setup, refused = _setup(), _refused()
+    not turned down by the user; and those whose camera matching turned down the user said
+    yes to (see _proposals)."""
+    setup, refused, verdicts = _setup(), _refused(), _verdicts()
     found = {}
     for photo_id, m in _matches().items():
         if m and "x" in m and _exported(photo_id).exists():  # cheap checks before the hash
             if _placed_now(m, _inputs(photo_id, setup)) and (photo_id, m["inputs"]) not in refused:
                 found[photo_id] = _situation(m)
+    for photo_id, p in register.load(PROPOSED_CAMERAS).items():
+        said = verdicts.get(photo_id) or {}
+        if photo_id in found or said.get("verdict") != "yes" or said.get("inputs") != p["inputs"]:
+            continue
+        if _exported(photo_id).exists() and p["inputs"] == _proposed_inputs(photo_id, setup):
+            found[photo_id] = _situation(p)
     return found
+
+
+def _proposed_inputs(photo_id: str, setup: str) -> str:
+    """What a camera proposed is made from: the photo's inputs, as a proposal (a yes to it is
+    not a yes to a placement matching finds later)."""
+    return f"{_inputs(photo_id, setup)}:proposed"
+
+
+def _proposals(
+    trace: dict[str, dict],
+    placed: set[str],
+    places: dict[str, tuple[float, float]],
+    inputs: dict[str, str],
+    above: float,
+) -> dict[str, dict]:
+    """For each photo not `placed`, the best camera matching turned down when at least
+    PROPOSE_AGREE points agreed with it (`trace`: each photo's last match), as a placement to
+    say yes or no to, with why it was turned down: `above` the street (a camera turned down
+    keeps no height), from what it is now (`inputs`), no points kept (not an anchor)."""
+    proposed = {}
+    for photo_id, run in trace.items():
+        if photo_id in placed or photo_id not in inputs:
+            continue
+        best = max(run.get("candidates") or [], key=lambda c: c["agree"], default=None)
+        if best is None or best["agree"] < PROPOSE_AGREE:
+            continue
+        x0, y0 = places[photo_id]
+        proposed[photo_id] = {
+            **{k: best[k] for k in ("x", "y", "heading", "horizon", "fov", "agree")},
+            "above_street": above,
+            "panoramas": 0,
+            "moved_m": round(float(np.hypot(best["x"] - x0, best["y"] - y0)), 1),
+            "walls": [],
+            "inputs": f"{inputs[photo_id]}:proposed",
+            "outline": 0.0,
+            "why": best["why"] or "rivale",
+        }
+    return proposed
+
+
+@app.command("presque")
+def propose_turned_down() -> None:
+    """Propose à la page de confirmation les caméras que le contrôle a refusées alors que
+    beaucoup de points s'accordaient avec elles (data/pilot/proposed_cameras.json) : un « oui »
+    en fait une place (sans points gardés : pas une ancre d'enchaînement)."""
+    situated, setup = _situated(), _setup()
+    with closing(db.connect(DB_PATH)) as conn:
+        walk = [me for me in export.photos(conn, DATA / "pilot", REVIEWS)]
+    walk = [me for me in walk if _exported(me.id).exists()]
+    above = float(np.median([m.above_street for m in situated.values()])) if situated else 1.6
+    proposed = _proposals(
+        register.load(MATCH_TRACE),
+        set(situated),
+        {me.id: _place_of(me) for me in walk},
+        {me.id: _inputs(me.id, setup) for me in walk},
+        above,
+    )
+    write_json(PROPOSED_CAMERAS, proposed)
+    typer.echo(f"{len(proposed)} caméras refusées proposées à la confirmation ({PROPOSED_CAMERAS})")
 
 
 def _confirmed() -> dict[str, match.Situated]:
@@ -1899,12 +1969,26 @@ def confirm_placed(port: int = 8768, open_browser: bool = True) -> None:
         if k in rounds and situated[k].inputs == inputs:
             rounds[k]["doubt"] = f"jugée fausse à l'œil : {why}"
     kept = _matches()  # round 0: each placement as kept, its matcher with it
+    setup = _setup()
+    for k, p in register.load(PROPOSED_CAMERAS).items():  # cameras turned down, to say yes or no to
+        if k in titles and k not in situated and p["inputs"] == _proposed_inputs(k, setup):
+            situated[k] = _situation(p)
+            rounds[k] = {"round": 0, "from": [], "proposed": p["why"]}
     placed = [
         {
             "id": k,
             "title": titles[k],
             "inputs": m.inputs,
-            **(_found_by(kept[k]) if rounds[k]["round"] == 0 else {}),
+            **(
+                {
+                    "by": "proposée",
+                    "check": f"caméra refusée par le contrôle ({rounds[k]['proposed']})",
+                }
+                if "proposed" in rounds[k]
+                else _found_by(kept[k])
+                if rounds[k]["round"] == 0 and "x" in (kept.get(k) or {})
+                else {}
+            ),
             "camera": {"x": round(m.x, 2), "y": round(m.y, 2), "heading": round(m.heading, 2)},
             "agree": m.agree,
             "moved_m": m.moved_m,
