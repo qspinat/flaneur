@@ -454,18 +454,29 @@ def _judged(tmp_path, *rows):
     return cli._Judged(path)
 
 
+def _camera(x=0.0, y=0.0, heading=90.0, fov=60.0, horizon=0.5, above_street=1.5):
+    return {
+        "x": x,
+        "y": y,
+        "heading": heading,
+        "fov": fov,
+        "horizon": horizon,
+        "above_street": above_street,
+    }
+
+
 def _said(verdict, inputs, x=0.0, y=0.0, heading=90.0, fov=60.0, horizon=0.5):
     return {
         "photo_id": "a",
         "verdict": verdict,
         "inputs": inputs,
-        "camera": {"x": x, "y": y, "heading": heading, "fov": fov, "horizon": horizon},
+        "camera": _camera(x, y, heading, fov, horizon),
     }
 
 
-def _at(inputs, x=0.0, y=0.0, heading=90.0, fov=60.0, horizon=0.5):
+def _at(inputs, x=0.0, y=0.0, heading=90.0, fov=60.0, horizon=0.5, above_street=1.5):
     """A placement (its inputs and camera) as a verdict is read on it."""
-    return {"inputs": inputs, "x": x, "y": y, "heading": heading, "fov": fov, "horizon": horizon}
+    return {"inputs": inputs, **_camera(x, y, heading, fov, horizon, above_street)}
 
 
 def test_a_placement_kept_with_its_matcher_is_read_as_it_was_found():
@@ -832,18 +843,22 @@ def test_a_no_to_a_proposed_camera_leaves_the_photo_to_chaining(monkeypatch):
     assert cli._turned_down() == {"b"}
 
 
-def test_a_proposed_camera_judged_already_is_not_offered_again(tmp_path):
+def test_a_proposed_camera_judged_already_is_not_offered_again(monkeypatch, tmp_path):
     def camera(n):
-        return {"inputs": f"s:i:proposed-{n}", "x": 10.0 * n, "y": 0.0, "heading": 90.0}
+        return {"inputs": f"s:i:proposed-{n}", "matcher": f"proposed-{n}", **_camera(10.0 * n)}
 
     proposed = {"a": camera(1), "b": camera(2), "c": camera(3)}
+    (tmp_path / "proposed.json").write_text(json.dumps(proposed))
+    monkeypatch.setattr(cli, "PROPOSED_CAMERAS", tmp_path / "proposed.json")
+    monkeypatch.setattr(cli, "_exported", lambda photo_id: tmp_path / "proposed.json")
+    monkeypatch.setattr(cli, "_inputs", lambda scene, photo_id: "s:i")
     judged = _judged(
         tmp_path,
         {**_said("no", "s:i:proposed-1", x=10.0), "photo_id": "a"},  # that very camera
         {**_said("no", "s:i:proposed-0", x=0.0), "photo_id": "b"},  # another, 20 m away
     )
 
-    assert set(cli._to_judge(proposed, judged)) == {"b", "c"}
+    assert set(cli._proposed_now(dict.fromkeys(proposed, "s"), judged)) == {"b", "c"}
 
 
 def test_a_seeds_image_is_read_where_it_was_kept_and_never_published(monkeypatch, tmp_path):
@@ -897,7 +912,7 @@ def test_a_photos_fingerprint_changes_with_what_its_match_is_found_from():
 def test_the_page_shows_only_the_word_that_holds_for_each_photo_as_placed(monkeypatch, tmp_path):
     _judged(tmp_path, _said("yes", "s:img"))
     monkeypatch.setattr(cli, "ANCHORS", tmp_path / "anchors.jsonl")
-    here = {"x": 0.3, "y": 0.0, "heading": 90.5, "fov": 60.0, "horizon": 0.5}
+    here = _camera(x=0.3, heading=90.5)
 
     def placed(inputs, camera):
         return [{"id": "a", "inputs": inputs, "camera": camera}]
@@ -932,6 +947,7 @@ def test_a_verdict_follows_its_camera_found_again_from_other_panoramas(tmp_path)
     assert judged.on("a", _at("newscene:img", heading=93.0)) is None  # turned
     assert judged.on("a", _at("newscene:img", fov=63.0)) is None  # wider: framed otherwise
     assert judged.on("a", _at("newscene:img", horizon=0.53)) is None  # tilted
+    assert judged.on("a", _at("newscene:img", above_street=3.0)) is None  # a floor up
     assert judged.on("a", _at("newscene:other")) is None  # another crop of the photo
     assert judged.on("a", _at("newscene:img:ab12cd34")) is None  # landmarks marked since
     assert judged.on("a", {"inputs": "newscene:img"}) is None  # not placed: its inputs only
@@ -939,7 +955,7 @@ def test_a_verdict_follows_its_camera_found_again_from_other_panoramas(tmp_path)
 
 def test_a_verdict_kept_without_its_cameras_width_holds_for_its_inputs_only(tmp_path):
     old = _said("yes", "s1:img")
-    old["camera"] = {"x": 0.0, "y": 0.0, "heading": 90.0}  # as kept before 12/11
+    old["camera"] = {"x": 0.0, "y": 0.0, "heading": 90.0}  # as kept before 11/11, evening
     judged = _judged(tmp_path, old)
 
     assert judged.on("a", _at("s1:img"))["verdict"] == "yes"
@@ -958,6 +974,13 @@ def test_the_last_word_on_a_camera_holds(tmp_path):
 
     assert judged.on("a", _at("s3:img", x=0.1))["verdict"] == "no"
     assert judged.on("a", _at("s1:img", x=50.0, heading=0.0))["verdict"] == "yes"  # its inputs
+
+
+def test_a_yes_taken_back_beside_its_camera_no_longer_follows_it(tmp_path):
+    judged = _judged(tmp_path, _said("yes", "s1:img"), _said("no", "s2:img", x=0.5))
+
+    assert judged.on("a", _at("s3:img", x=-0.6)) is None  # 0.6 m from the yes, 1.1 from the no
+    assert judged.on("a", _at("s1:img"))["verdict"] == "no"  # the newest word reaching it
 
 
 def test_a_yes_holds_while_the_photo_is_the_same(tmp_path):
@@ -1094,6 +1117,7 @@ def test_an_area_without_decoys_is_left_unchecked_and_the_others_checked(tmp_pat
     home, other = pilot.AREAS["saint-severin"].centroid, pilot.AREAS["cite"].centroid
     near_by = [_panorama(n, home.x + n, home.y) for n in range(3)]  # all within FAR_M
     near_by += [_panorama(10 + n, other.x + 230.0 * (n % 2), other.y + n) for n in range(4)]
+    near_by += [_panorama(20, other.x + 115.0, other.y)]  # between: no decoy, not drawn
     heights = SimpleNamespace(streets=None, origin_z=0.0)
     for name, value in {
         "MATCH_CHECK": tmp_path / "check.json",

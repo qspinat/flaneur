@@ -940,17 +940,13 @@ def _situated() -> dict[str, match.Situated]:
 
 def _proposed_now(scenes: dict[str, str], judged: "_Judged") -> dict[str, dict]:
     """The cameras proposed (see _proposals) for photos as they are now (`scenes`: each one's,
-    see _scene_of), or said yes to while the photo is the same (see _Judged.holds)."""
+    see _scene_of) the user did not turn down, or said yes to while the photo is the same (see
+    _stands)."""
     return {
         k: p
         for k, p in register.load(PROPOSED_CAMERAS).items()
         if k in scenes and _exported(k).exists() and _stands(k, p, _inputs(scenes[k], k), judged)
     }
-
-
-def _to_judge(proposed: dict[str, dict], judged: "_Judged") -> dict[str, dict]:
-    """The cameras proposed the user has not turned down (no or near to that camera)."""
-    return {k: p for k, p in proposed.items() if not judged.turned_down(k, p)}
 
 
 def _fingerprint(camera: dict) -> str:
@@ -1472,13 +1468,15 @@ CARRY_HORIZON = 0.02  # and its horizon this near (a share of the photo's height
 
 
 def _same_camera(camera: dict, other: dict) -> bool:
-    """Whether two cameras (x, y, heading, fov, horizon) are one found again: within CARRY_M,
-    and CARRY_DEG both turned and widened, CARRY_HORIZON tilted. A camera judged without its
-    width and horizon (before they were kept) is none: the verdict holds for its inputs only."""
-    if not {"fov", "horizon"} <= camera.keys() & other.keys():
+    """Whether two cameras (x, y, above_street, heading, fov, horizon) are one found again:
+    within CARRY_M across and up, CARRY_DEG both turned and widened, CARRY_HORIZON tilted. A
+    camera judged without its height, width and horizon (before they were kept) is none: the
+    verdict holds for its inputs only."""
+    if not {"above_street", "fov", "horizon"} <= camera.keys() & other.keys():
         return False
     return bool(
         np.hypot(camera["x"] - other["x"], camera["y"] - other["y"]) <= CARRY_M
+        and abs(camera["above_street"] - other["above_street"]) <= CARRY_M
         and abs(angle(camera["heading"], other["heading"])) <= CARRY_DEG
         and abs(camera["fov"] - other["fov"]) <= CARRY_DEG
         and abs(camera["horizon"] - other["horizon"]) <= CARRY_HORIZON
@@ -1517,7 +1515,10 @@ class _Judged:
     def on(self, photo_id: str, placed: dict) -> dict | None:
         """The user's last word on a placement (`placed`: its inputs, and its camera's x, y and
         heading when placed): given to it, or to a camera of the same photo found within CARRY_M
-        and CARRY_DEG of it (placed again from other panoramas, or by the other matcher)."""
+        and CARRY_DEG of it (placed again from other panoramas, or by the other matcher), unless
+        the user since took back a camera that near the one it was given to (a yes followed by
+        a no beside it holds for that very camera only)."""
+        said_since: list[dict] = []
         for said in reversed(self.by_photo.get(photo_id, [])):
             if said["inputs"] == placed["inputs"]:
                 return said
@@ -1528,7 +1529,14 @@ class _Judged:
                 and _photo_of(said["inputs"]) == _photo_of(placed["inputs"])
                 and _same_camera(camera, placed)
             ):
-                return said
+                taken_back = any(
+                    later["verdict"] != said["verdict"]
+                    and "camera" in later
+                    and _same_camera(later["camera"], camera)
+                    for later in said_since
+                )
+                return None if taken_back else said
+            said_since.append(said)
         return None
 
     def said_yes(self, photo_id: str, placed: dict) -> bool:
@@ -1945,20 +1953,22 @@ def _check_area(
     marking = np.random.default_rng([seed, 1])  # its own: the fakes stay the same
     square = pilot.AREAS[name]
     in_area = sorted((p for p in near_by if square.contains(Point(p.x, p.y))), key=lambda p: p.id)
-    placed = [p for p in in_area if p.id in fixed]
+    at = np.array([(p.x, p.y) for p in in_area]).reshape(-1, 2)
+
+    def far_from(p: match.Panorama) -> list[match.Panorama]:  # a decoy: another street
+        return [in_area[i] for i in np.flatnonzero(np.hypot(*(at - (p.x, p.y)).T) > FAR_M)]
+
+    placed = [p for p in in_area if p.id in fixed and far_from(p)]
     tries = min(tries, len(placed))
-    if not tries:
-        typer.echo(f"{name} : aucun panorama placé par COLMAP, rien à contrôler")
+    if not tries:  # the other areas are checked all the same
+        typer.echo(f"{name} : aucun panorama placé par COLMAP avec un leurre possible")
         return
     found: dict[str, list[Off | None]] = {"vue": [], "bande": [], "leurre": []}
     traces: dict[str, list[dict]] = {kind: [] for kind in found}
     for k in rng.choice(len(placed), tries, replace=False):
         me = placed[k]
         heading = float(rng.uniform(0, 360))
-        far = [p for p in in_area if np.hypot(p.x - me.x, p.y - me.y) > FAR_M]
-        if not far:  # the other areas are checked all the same
-            typer.echo(f"{name} : aucun panorama à plus de {FAR_M} m de {me.id} : pas de leurre")
-            return
+        far = far_from(me)
         true = _cut_view(me, heading)
         there, facing = far[rng.integers(len(far))], float(rng.uniform(0, 360))
         elsewhere = _cut_view(there, facing)
@@ -2255,7 +2265,7 @@ def confirm_placed(port: int = 8768, open_browser: bool = True) -> None:
             rounds[k]["doubt"] = f"jugée fausse à l'œil : {why}"
     kept = _matches()  # round 0: each placement as kept, its matcher with it
     scenes, judged = _scenes_now(), _Judged()
-    for k, p in _to_judge(_proposed_now(scenes, judged), judged).items():  # turned down: yes or no?
+    for k, p in _proposed_now(scenes, judged).items():  # turned down by matching: yes or no?
         if k in titles and k not in situated:
             situated[k] = _situation(p)
             rounds[k] = {"round": 0, "from": [], "proposed": p["why"]}
@@ -2271,6 +2281,7 @@ def confirm_placed(port: int = 8768, open_browser: bool = True) -> None:
                 "heading": round(m.heading, 2),
                 "fov": round(m.fov, 2),
                 "horizon": round(m.horizon, 4),
+                "above_street": round(m.above_street, 2),
             },
             "agree": m.agree,
             "moved_m": m.moved_m,
