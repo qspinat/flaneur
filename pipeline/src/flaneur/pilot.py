@@ -48,7 +48,6 @@ AREAS = {
     "saint-severin": _square(2.3459, 48.8518),
     "cite": _square(2.35251, 48.85467),
 }
-CENTRE = AREAS["saint-severin"].centroid  # the pilot's
 AREA = unary_union(list(AREAS.values()))
 # A street belongs to the pilot when at least this share of its footprint is inside.
 INSIDE_SHARE = 0.5

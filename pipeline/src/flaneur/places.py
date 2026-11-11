@@ -13,6 +13,7 @@ from difflib import SequenceMatcher
 from shapely.geometry import Point
 from shapely.ops import nearest_points
 
+from flaneur import db
 from flaneur.gazetteer import Gazetteer, Street, bearing, key, to_degrees, to_metres
 from flaneur.geocode import choose
 from flaneur.read import PLACE_KINDS, StreetMention, place_of
@@ -106,9 +107,9 @@ def entrance_of(
     points = [
         (r["lon"], r["lat"])
         for r in conn.execute(
-            "SELECT lon, lat FROM placements WHERE lon IS NOT NULL "
-            "AND photo_id IN (SELECT value FROM json_each(?))",
-            [ids],
+            "SELECT lon, lat FROM placements WHERE lon IS NOT NULL AND confidence IS NOT ? "
+            "AND photo_id IN (SELECT value FROM json_each(?))",  # people's placements, no seed
+            [db.SEED, ids],
         )
     ]
     if not points:

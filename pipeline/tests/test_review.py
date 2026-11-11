@@ -215,3 +215,12 @@ def test_a_photo_whose_crop_is_in_doubt_comes_first_with_why(pilot):
     assert [i.id for i in items] == ["photo:pm:1", "photo:pm:2"]
     assert items[0].crop_doubts == ["tirage coupé : haut"]
     assert items[1].crop_doubts is None
+
+
+def test_a_seed_is_never_offered_to_review(pilot):
+    conn, pilot_dir, reviews = pilot
+    conn.execute("UPDATE placements SET confidence = 'seed' WHERE photo_id = 'pm:2'")
+
+    queued = [item.id for item in review.queue(conn, pilot_dir, Gazetteer([]), reviews)]
+
+    assert "photo:pm:1" in queued and "photo:pm:2" not in queued

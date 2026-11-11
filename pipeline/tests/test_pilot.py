@@ -44,7 +44,7 @@ def test_a_photo_placed_at_a_door_of_a_street_no_longer_known_is_in_the_pilot(tm
                 "status": "address",
                 "label": "5 rue des Prouvaires",
                 "street_id": None,
-                "point": to_geojson(pilot.CENTRE),
+                "point": to_geojson(pilot.AREAS["saint-severin"].centroid),
                 "precision_m": 50,
             }
         ],

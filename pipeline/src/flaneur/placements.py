@@ -21,8 +21,7 @@ from flaneur.gazetteer import from_geojson, to_degrees, to_metres
 from flaneur.pilot import safe_name, sheet_of
 
 CONFIDENCES = ("high", "medium", "low")
-# A placement no one made: where a photo's camera is first looked for (see seeds).
-SEED = "seed"
+SEED = db.SEED
 
 
 def load(pilot_dir: Path) -> list[dict]:
@@ -67,7 +66,9 @@ def distances_to_truth(conn: sqlite3.Connection) -> list[tuple[str, float]]:
     rows = conn.execute(
         "SELECT pl.confidence, pl.lon, pl.lat, p.camera_lon, p.camera_lat "
         "FROM placements pl JOIN photos p ON p.id = pl.photo_id "
-        "WHERE pl.is_street_view AND pl.lon IS NOT NULL AND p.camera_lat IS NOT NULL"
+        "WHERE pl.is_street_view AND pl.lon IS NOT NULL AND p.camera_lat IS NOT NULL "
+        "AND pl.confidence IS NOT ?",  # a seed of the museum's camera: 0 m, by construction
+        (SEED,),
     ).fetchall()
     return [
         (
@@ -81,11 +82,15 @@ def distances_to_truth(conn: sqlite3.Connection) -> list[tuple[str, float]]:
 
 
 def publishable(
-    conn: sqlite3.Connection, pilot_dir: Path, negatives: dict[str, list[str]]
+    conn: sqlite3.Connection,
+    pilot_dir: Path,
+    negatives: dict[str, list[str]],
+    seeded: bool = False,
 ) -> list[sqlite3.Row]:
     """The pilot's placed street views that may be published, one per negative (see
     dedup.one_per_negative), with their photo's text and street; those with no matched
-    picture of today first (the least certain)."""
+    picture of today first (the least certain). Seeds (no one's placement) only when
+    `seeded`: for what matches or exports them, never for what a person decided on."""
     rows = [
         r
         for r in conn.execute(
@@ -95,8 +100,9 @@ def publishable(
             "LEFT JOIN locations l ON l.photo_id = pl.photo_id "
             "LEFT JOIN streets s ON s.id = l.street_id "
             "WHERE pl.is_street_view AND pl.lon IS NOT NULL "
-            f"AND p.license IN {db.OPEN_LICENSES_SQL} "
-            "ORDER BY pl.match IS NOT NULL, pl.photo_id"
+            f"AND p.license IN {db.OPEN_LICENSES_SQL} AND (? OR pl.confidence IS NOT ?) "
+            "ORDER BY pl.match IS NOT NULL, pl.photo_id",
+            (seeded, SEED),
         )
         if (pilot_dir / "photos" / safe_name(r["photo_id"]) / "info.json").exists()
     ]
@@ -118,19 +124,20 @@ def seeds(conn: sqlite3.Connection, pilot_dir: Path, area: BaseGeometry) -> list
     street within `area` (Lambert-93); none for what the caption reading says is not a street
     view. A seed is never shown on the walk until a camera found from it is confirmed
     (export.build)."""
+    unplaced = [  # the prepared photos (a few hundred), not the whole collection
+        json.loads((f / "info.json").read_text())["photo_id"]
+        for f in sorted((pilot_dir / "photos").glob("*"))
+        if (f / "info.json").exists() and not (f / "placement.json").exists()
+    ]
     started = []
     for r in conn.execute(
         "SELECT p.id, p.camera_lon, p.camera_lat, l.point, s.geometry, g.kind "
         "FROM photos p LEFT JOIN locations l ON l.photo_id = p.id "
         "LEFT JOIN streets s ON s.id = l.street_id LEFT JOIN readings g ON g.photo_id = p.id "
-        f"WHERE p.license IN {db.OPEN_LICENSES_SQL}"
+        f"WHERE p.license IN {db.OPEN_LICENSES_SQL} AND p.id IN (SELECT value FROM json_each(?))",
+        [json.dumps(unplaced)],
     ):
-        folder = pilot_dir / "photos" / safe_name(r["id"])
-        if (
-            not (folder / "info.json").exists()
-            or (folder / "placement.json").exists()
-            or r["kind"] in read.NOT_A_STREET_VIEW
-        ):
+        if r["kind"] in read.NOT_A_STREET_VIEW:
             continue
         if r["camera_lon"] is not None:
             lon, lat = r["camera_lon"], r["camera_lat"]
@@ -143,11 +150,9 @@ def seeds(conn: sqlite3.Connection, pilot_dir: Path, area: BaseGeometry) -> list
             {
                 "photo_id": r["id"],
                 "is_street_view": True,
-                "match": None,
-                "match_panoramax_id": None,
                 "lon": lon,
                 "lat": lat,
-                "heading": 0.0,
+                "heading": None,  # no one has seen which way it looked
                 "confidence": SEED,
                 "reason": "amorce : la place que la source ou la légende donne",
             }

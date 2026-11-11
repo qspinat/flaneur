@@ -188,7 +188,7 @@ def _photo(
         )
     folder = pilot_dir / "photos" / safe_name(photo_id)
     folder.mkdir(parents=True)
-    (folder / "info.json").write_text("{}")
+    (folder / "info.json").write_text(json.dumps({"photo_id": photo_id}))
     return folder
 
 

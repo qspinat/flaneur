@@ -113,6 +113,8 @@ class Photo:
 COLUMNS = ["id"] + [f.name for f in fields(Photo)]
 # The licences under which a photo may be shown on the site; any other ("unverified") never is.
 OPEN_LICENSES = ("CC0", "CC-BY-4.0")
+# A placement no one made: where a photo's camera is first looked for (see placements.seeds).
+SEED = "seed"
 OPEN_LICENSES_SQL = "(" + ", ".join(f"'{name}'" for name in OPEN_LICENSES) + ")"
 
 

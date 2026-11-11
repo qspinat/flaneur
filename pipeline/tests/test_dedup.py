@@ -98,3 +98,20 @@ def test_a_public_domain_print_is_preferred_to_one_that_asks_for_credit(tmp_path
     dedup.save(conn, [{"ak:0", "ak:1"}])
 
     assert {r[0] for r in conn.execute("SELECT negative FROM copies")} == {"ak:1"}
+
+
+def test_a_print_a_person_placed_is_preferred_to_one_only_seeded(tmp_path):
+    conn = db.connect(tmp_path / "f.sqlite")
+    for photo_id, confidence in (("ak:0", "seed"), ("ak:1", "low")):
+        conn.execute(
+            "INSERT INTO photos (id, source, source_id, license, credit, raw) "
+            f"VALUES ('{photo_id}', 'ak', '{photo_id}', 'CC0', 'x', '{{}}')"
+        )
+        conn.execute(
+            "INSERT INTO placements (photo_id, is_street_view, lon, lat, confidence) "
+            f"VALUES ('{photo_id}', 1, 2.35, 48.85, '{confidence}')"
+        )
+
+    dedup.save(conn, [{"ak:0", "ak:1"}])
+
+    assert {r[0] for r in conn.execute("SELECT negative FROM copies")} == {"ak:1"}

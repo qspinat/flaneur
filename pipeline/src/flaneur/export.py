@@ -21,6 +21,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 import httpx
+from PIL import Image
 from shapely.geometry import Point
 
 from flaneur import crop, dedup, panoramax, placements, review
@@ -194,7 +195,7 @@ def photos(
     negatives = dedup.negatives(conn)
     decisions = review.decisions_by_photo(reviews_path, negatives)
     walk = []
-    for r in placements.publishable(conn, pilot_dir, negatives):
+    for r in placements.publishable(conn, pilot_dir, negatives, seeded=True):
         info = json.loads(
             (pilot_dir / "photos" / safe_name(r["photo_id"]) / "info.json").read_text()
         )
@@ -375,15 +376,25 @@ def sized(image: str, side: int) -> str:
     return image.removesuffix(".webp") + f"-{side}.webp"
 
 
+def _framed(me: WalkPhoto, client: httpx.Client, cache_dir: Path) -> Image.Image:
+    """A photo's image as shown, cropped; OSError when it is not an image, or a truncated one,
+    then dropped from the cache to be fetched again next time."""
+    cached = cache_dir / "archive" / f"{safe_name(me.id)}.jpg"
+    try:
+        image = cached_image(client, me.image_url, cached)
+        image.draft("RGB", (PHOTO_SIDE * 2, PHOTO_SIDE * 2))  # decode no larger than needed
+        return crop.apply(image, me.crop) if me.crop else image
+    except OSError:
+        cached.unlink(missing_ok=True)
+        raise
+
+
 def _write_one(me: WalkPhoto, client: httpx.Client, cache_dir: Path, out_dir: Path) -> bool:
     """Write one photo's image and its view of today; False when the photo cannot be had
     (its view of today is dropped alone when only that fails)."""
     name = safe_name(me.id)
-    cached = cache_dir / "archive" / f"{name}.jpg"
     try:
-        image = cached_image(client, me.image_url, cached)
-        image.draft("RGB", (PHOTO_SIDE * 2, PHOTO_SIDE * 2))  # decode no larger than needed
-        framed = crop.apply(image, me.crop) if me.crop else image
+        framed = _framed(me, client, cache_dir)
         me.image = image_name(me.id)
         me.aspect = round(framed.height / framed.width, 4)
         me.widths = {PHOTO_SIDE: _save(framed, PHOTO_SIDE, out_dir / me.image)}
@@ -391,8 +402,7 @@ def _write_one(me: WalkPhoto, client: httpx.Client, cache_dir: Path, out_dir: Pa
             me.widths[side] = _save(framed, side, out_dir / sized(me.image, side))
     except httpx.HTTPError:
         return False
-    except OSError:  # not an image, or a truncated one: fetched again next time
-        cached.unlink(missing_ok=True)
+    except OSError:  # not an image, or a truncated one (see _framed)
         return False
     if me.today:
         try:
@@ -406,9 +416,18 @@ def _write_one(me: WalkPhoto, client: httpx.Client, cache_dir: Path, out_dir: Pa
 def write_seeds(
     seeds: list[WalkPhoto], client: httpx.Client, cache_dir: Path, out_dir: Path
 ) -> int:
-    """Write the images of photos only seeded, apart from the site's: what matching reads,
-    never published. Returns how many could be written."""
-    return sum(_write_one(me, client, cache_dir, out_dir) for me in seeds)
+    """Write the images of photos only seeded, apart from the site's: the one size matching
+    reads, once, never published. Returns how many are there."""
+    there = 0
+    for me in seeds:
+        path = out_dir / image_name(me.id)
+        if not path.exists():
+            try:
+                _save(_framed(me, client, cache_dir), PHOTO_SIDE, path)
+            except (httpx.HTTPError, OSError):
+                continue
+        there += 1
+    return there
 
 
 def mark_3d(

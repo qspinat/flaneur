@@ -138,7 +138,8 @@ def queue(
         r["photo_id"]
         for r in conn.execute(
             "SELECT pl.photo_id FROM placements pl JOIN photos p ON p.id = pl.photo_id "
-            f"WHERE p.license IN {db.OPEN_LICENSES_SQL}"
+            f"WHERE p.license IN {db.OPEN_LICENSES_SQL} AND pl.confidence IS NOT ?",
+            (placements.SEED,),
         )
     ]
     for name, photos in places.group(conn, publishable).items():
