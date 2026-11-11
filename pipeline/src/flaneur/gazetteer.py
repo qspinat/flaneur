@@ -25,7 +25,7 @@ from pyproj import Transformer
 from shapely.geometry import Point, shape
 from shapely.geometry.base import BaseGeometry
 
-from flaneur.read import ABBREVIATIONS, STREET_TYPES
+from flaneur.read import ABBREVIATIONS, STREET_TYPES, StreetMention
 from flaneur.sources import cached_json
 
 DATASETS = {
@@ -87,6 +87,28 @@ PARTICLES = {"de", "du", "des", "la", "le", "les", "l", "d"}
 # Lowercase words a caption may add after the name ("jardin du Luxembourg enneigé"); a
 # capitalised word is part of the name and is never dropped.
 MAX_TRAILING_WORDS = 2
+# Where what a caption says of the place starts, after its name: "boulevard Malesherbes entre
+# l'église de la Madeleine", "quai X le 14 juillet 1888", "rue Y pendant la crue". Cut here,
+# not by the reader: it applies to the readings kept and to the City's notes ("Actuellement
+# partie de la rue X entre les rues…"). Not "ou" ("rue Saint-Martin ou Saint-Denis" does not
+# say which), nor "du 4" ("rue du 4 Septembre" is a name), nor a year ("place du 18 Juin
+# 1940"): a year after the name goes as a trailing word (see _variants).
+DESCRIBED = re.compile(
+    r"\s+(?:(?:entre|depuis|pendant|lors|avec|devant|derrière)\b|(?:le|la|les)\s+\d)",
+    re.IGNORECASE,
+)
+# The longest street name looked for in a title, in words (see Gazetteer.named_in), and the
+# words a street's name starts with, as keys write them: a title names a street only with one
+# of them first (its "Grande Galerie" is a room).
+MOST_WORDS = 7
+TITLE_TYPES = frozenset(
+    "rue ruelle boulevard avenue place quai impasse passage pont carrefour faubourg cour cite "
+    "square villa allee chaussee port porte barriere parvis rond galerie marche cul sentier "
+    "chemin route butte montee esplanade jardin voie promenade passerelle cours terrasse sente "
+    "poterne".split()
+)
+# A house number written just before a street: "24", "11 bis", "101,", "11-13" (its first).
+NUMBER_BEFORE = re.compile(r"(\d+(?:\s?(?:bis|ter))?)(?:\s?[-–]\s?\d+)?\s*,?\s*$", re.IGNORECASE)
 
 _TYPE = rf"(?i:{STREET_TYPES}|{ABBREVIATIONS})"
 # Where an obsolete name went, anywhere in the City's note: "Actuellement rue de Condé",
@@ -110,6 +132,15 @@ def key(label: str) -> str:
     return " ".join(ABBREVIATED.get(w, w) for w in words if w not in PARTICLES)
 
 
+def _written(span: str, before: str) -> StreetMention:
+    """A street as a title writes it (its elided article off: "l'avenue Victoria"), with the
+    house number written just before it ("24 rue…", "11 bis rue…", "101, rue…", "11-13 rue…")."""
+    span = re.sub(r"^[A-Za-z]['’]", "", span).strip("-'’ ")
+    kind, name = re.split(r"[\s-]", span, maxsplit=1)
+    number = found[1] if (found := NUMBER_BEFORE.search(before)) else None
+    return StreetMention(kind.lower(), name.strip("-'’ "), number)
+
+
 def _usable(k: str) -> bool:
     """A key names a street only with a word besides the type ("rue L" alone would match
     every caption reduced to "rue de …")."""
@@ -129,18 +160,22 @@ def lambert(lon, lat):
 
 def _variants(label: str) -> list[str]:
     """Forms of a caption's street name to try, most literal first: the name itself (the
-    part before " - "), "faubourg X" as "rue du Faubourg X", then the name without up to
-    MAX_TRAILING_WORDS trailing lowercase words."""
+    part before " - "), then cut where what is said of the place starts (see DESCRIBED); each
+    as written, "faubourg X" as "rue du Faubourg X", then without up to MAX_TRAILING_WORDS
+    trailing lowercase words or years."""
     label = label.split(" - ")[0].strip()
-    variants = [label]
-    if label.lower().startswith("faubourg "):
-        variants.append(f"rue du {label}")
-    words = label.split()
-    for _ in range(MAX_TRAILING_WORDS):
-        if len(words) <= 2 or not words[-1][:1].islower() or words[-1] in PARTICLES:
-            break
-        words = words[:-1]
-        variants.append(" ".join(words))
+    variants = []
+    for name in dict.fromkeys([label, DESCRIBED.split(label, maxsplit=1)[0].strip()]):
+        variants.append(name)
+        if name.lower().startswith("faubourg "):
+            variants.append(f"rue du {name}")
+        words = name.split()
+        for _ in range(MAX_TRAILING_WORDS):
+            last = words[-1] if words else ""
+            if len(words) <= 2 or last in PARTICLES or not (last[:1].islower() or last.isdigit()):
+                break
+            words = words[:-1]
+            variants.append(" ".join(words))
     return variants
 
 
@@ -186,6 +221,35 @@ class Gazetteer:
             inside = [s for s in found if set(s.arrondissements) & set(arrondissements)]
             found = inside or found
         return found
+
+    def named_in(self, text: str) -> Iterator[StreetMention]:
+        """The streets of the gazetteer a title names, in its order, as it writes them (the
+        longest name starting at each place), with the house number written before each: a
+        type first ("Le Pont-Neuf, 1er arrondissement" names the pont Neuf; "la Grande
+        Galerie" is a room), words whole and to the end of a hyphenated name ("rue
+        Saint-Louis-en-l'Isle" does not name the rue Saint-Louis), never across punctuation,
+        nor in a part giving alternatives ("Cour X ou Y", "Passage X [ou Y]")."""
+        text = re.sub(r"[\[(]\s*(?=ou\b)", " ", text, flags=re.IGNORECASE)
+        for part in re.finditer(r"[\w\s'’-]+", text):
+            tokens = list(re.finditer(r"\S+", part.group()))
+            if "ou" in (t.group().lower() for t in tokens):
+                continue
+            words = [(w, n) for n, t in enumerate(tokens) for w in key(t.group()).split()]
+            i = 0
+            while i < len(words):
+                word, first = words[i]
+                if word in TITLE_TYPES and not (i and words[i - 1][1] == first):
+                    for j in range(min(len(words), i + MOST_WORDS), i + 1, -1):
+                        last = words[j - 1][1]
+                        whole = j == len(words) or words[j][1] != last
+                        if whole and " ".join(w for w, _ in words[i:j]) in self.by_key:
+                            start = part.start() + tokens[first].start()
+                            yield _written(
+                                text[start : part.start() + tokens[last].end()], text[:start]
+                            )
+                            i = j - 1
+                            break
+                i += 1
 
     @classmethod
     def from_records(cls, current: list[dict], obsolete: list[dict]) -> "Gazetteer":
