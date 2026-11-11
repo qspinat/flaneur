@@ -490,7 +490,7 @@ def test_only_current_placements_by_lomag_are_left_out_of_chaining():
     }
 
     situated = {k: SimpleNamespace(inputs="i") for k in ("a", "b", "c")}
-    situated["d"] = SimpleNamespace(inputs="i:proposed")  # said yes to: no points to chain by
+    situated["d"] = SimpleNamespace(inputs="i:proposed-abc")  # said yes to: no points to chain by
 
     assert cli._not_chained(matches, situated) == {"c", "d"}
 
@@ -707,13 +707,13 @@ def test_a_camera_turned_down_with_many_points_agreeing_is_proposed():
 
     assert set(proposed) == {"a"}
     a = proposed["a"]
-    assert (a["agree"], a["why"], a["inputs"], a["above_street"], a["moved_m"]) == (
+    assert (a["agree"], a["why"], a["above_street"], a["moved_m"]) == (
         60,
         "position incertaine",
-        "i:proposed",
         2.4,
         3.0,
     )
+    assert a["inputs"].startswith("i:proposed-")
 
 
 @pytest.mark.parametrize(
@@ -738,7 +738,77 @@ def test_a_proposed_camera_is_a_placement_once_said_yes_to(
     monkeypatch.setattr(cli, "_exported", lambda photo_id: photo)
     monkeypatch.setattr(cli, "_setup", lambda: "s")
     monkeypatch.setattr(cli, "_inputs", lambda photo_id, setup: inputs_now)
-    said = {"a": {"verdict": verdict, "inputs": "i:proposed"}} if verdict else {}
+    said = {"a": {"verdict": verdict, "inputs": proposal["a"]["inputs"]}} if verdict else {}
     monkeypatch.setattr(cli, "_verdicts", lambda: said)
 
     assert ("a" in cli._situated()) == placed
+
+
+def test_a_yes_is_to_the_camera_proposed_not_to_the_next_one(tmp_path, monkeypatch):
+    photo = tmp_path / "old.jpg"
+    photo.write_bytes(b"x")
+    run = {"a": {"inputs": "i", "tried": ["lomag"]}}
+    first = cli._proposals(
+        {"a": {"candidates": [_candidate(60, "rivale", x=10.0)]}},
+        run,
+        lambda k: (0, 0),
+        lambda k: "i",
+        2,
+    )
+    later = cli._proposals(
+        {"a": {"candidates": [_candidate(70, "rivale", x=50.0)]}},
+        run,
+        lambda k: (0, 0),
+        lambda k: "i",
+        2,
+    )
+    (tmp_path / "proposed.json").write_text(json.dumps(later))
+    monkeypatch.setattr(cli, "PROPOSED_CAMERAS", tmp_path / "proposed.json")
+    monkeypatch.setattr(cli, "_matches", dict)
+    monkeypatch.setattr(cli, "_exported", lambda photo_id: photo)
+    monkeypatch.setattr(cli, "_setup", lambda: "s")
+    monkeypatch.setattr(cli, "_inputs", lambda photo_id, setup: "i")
+    monkeypatch.setattr(
+        cli, "_verdicts", lambda: {"a": {"verdict": "yes", "inputs": first["a"]["inputs"]}}
+    )
+
+    assert first["a"]["inputs"] != later["a"]["inputs"]
+    assert "a" not in cli._situated()
+
+
+def test_a_trace_made_from_another_image_proposes_nothing():
+    trace = {"a": {"inputs": "old", "candidates": [_candidate(60, "rivale")]}}
+
+    assert (
+        cli._proposals(
+            trace, {"a": {"inputs": "i", "tried": []}}, lambda k: (0, 0), lambda k: "i", 2
+        )
+        == {}
+    )
+
+
+def test_a_no_to_a_proposed_camera_leaves_the_photo_to_chaining(monkeypatch):
+    monkeypatch.setattr(
+        cli,
+        "_verdicts",
+        lambda: {
+            "a": {"verdict": "no", "inputs": "i:proposed-abc"},
+            "b": {"verdict": "no", "inputs": "i"},
+        },
+    )
+
+    assert cli._turned_down() == {"b"}
+
+
+def test_a_proposed_camera_judged_already_is_not_offered_again():
+    proposed = {
+        "a": {"inputs": "i:proposed-1"},
+        "b": {"inputs": "i:proposed-2"},
+        "c": {"inputs": "i:proposed-3"},
+    }
+    verdicts = {
+        "a": {"verdict": "no", "inputs": "i:proposed-1"},
+        "b": {"verdict": "no", "inputs": "i:proposed-0"},
+    }
+
+    assert set(cli._to_judge(proposed, verdicts)) == {"b", "c"}
