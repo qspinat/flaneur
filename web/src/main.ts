@@ -9,6 +9,7 @@ import {
   erasOf,
   fitting,
   hashOf,
+  setAddress,
   offerOf3d,
   photo3d,
   json,
@@ -231,8 +232,8 @@ class Walker {
   private toPlan(event?: Event): void {
     event?.preventDefault();
     if (!$('home').hidden) return;
-    history.pushState(null, '', '#/');
-    this.route();
+    setAddress('#/', true);
+    void this.showPlan(this.here); // not from the address: the browser may have refused it
   }
 
   /** The plan, with `photo` chosen on it (none: the welcome, until set aside). */
@@ -287,7 +288,7 @@ class Walker {
 
   /** Into a photograph from the plan: its print grows into it. */
   private enter(photo: Photo): void {
-    history.pushState(null, '', hashOf(photo.id));
+    setAddress(hashOf(photo.id), true);
     morph($('print-img'), $('photo'), () => this.showPhoto(photo));
   }
 
@@ -333,18 +334,19 @@ class Walker {
   }
 
   private go(photo: Photo): void {
-    history.pushState(null, '', hashOf(photo.id));
+    setAddress(hashOf(photo.id), true);
     this.arrive(photo);
   }
 
   private arrive(photo: Photo): void {
     this.here = photo;
     this.showingToday = false;
-    history.replaceState(null, '', hashOf(photo.id));
     const img = $<HTMLImageElement>('photo');
     img.classList.add('loading');
     img.onload = () => {
       img.classList.remove('loading');
+      // which old photo is on screen, once it is (not today's picture, shown in the same place)
+      if (!this.showingToday) img.dataset.photo = photo.id;
       // the photograph ahead, once this one is shown (the very file it will be shown with); the
       // other ways once one lingers here (looking around, one turns), or points at them
       this.fetchAhead(photo.links.forward?.id);
@@ -362,6 +364,7 @@ class Walker {
     }
     this.drawAbout();
     this.maps?.show(photo);
+    setAddress(hashOf(photo.id), false); // last: the address never stands in the way of the photo
   }
 
   private drawSteps(photo: Photo): void {

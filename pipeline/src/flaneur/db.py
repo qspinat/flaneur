@@ -19,7 +19,7 @@ CREATE TABLE IF NOT EXISTS photos (
     year_start INTEGER,
     year_end INTEGER,
     image_url TEXT,
-    license TEXT NOT NULL,        -- "CC0", "Etalab-2.0", ... or "unverified"
+    license TEXT NOT NULL,        -- "CC0", "CC-BY-4.0", ... or "unverified"
     credit TEXT NOT NULL,
     camera_lat REAL,              -- camera position, when the source already knows it
     camera_lon REAL,
@@ -111,6 +111,9 @@ class Photo:
 
 
 COLUMNS = ["id"] + [f.name for f in fields(Photo)]
+# The licences under which a photo may be shown on the site; any other ("unverified") never is.
+OPEN_LICENSES = ("CC0", "CC-BY-4.0")
+OPEN_LICENSES_SQL = "(" + ", ".join(f"'{name}'" for name in OPEN_LICENSES) + ")"
 
 
 def connect(path: Path) -> sqlite3.Connection:

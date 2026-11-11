@@ -92,7 +92,8 @@ def publishable(
             "FROM placements pl JOIN photos p ON p.id = pl.photo_id "
             "LEFT JOIN locations l ON l.photo_id = pl.photo_id "
             "LEFT JOIN streets s ON s.id = l.street_id "
-            "WHERE pl.is_street_view AND pl.lon IS NOT NULL AND p.license = 'CC0' "
+            "WHERE pl.is_street_view AND pl.lon IS NOT NULL "
+            f"AND p.license IN {db.OPEN_LICENSES_SQL} "
             "ORDER BY pl.match IS NOT NULL, pl.photo_id"
         )
         if (pilot_dir / "photos" / safe_name(r["photo_id"]) / "info.json").exists()

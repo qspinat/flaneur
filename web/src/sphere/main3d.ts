@@ -13,6 +13,7 @@ import {
   fitting,
   format3d,
   hashOf,
+  setAddress,
   json,
   parse3d,
   parsePhoto3d,
@@ -208,7 +209,7 @@ class Walk3d {
     window.clearTimeout(this.restTimer);
     this.restTimer = window.setTimeout(() => {
       this.maps?.show(this.spot);
-      history.replaceState(null, '', this.hash());
+      setAddress(this.hash(), false);
     }, URL_AFTER_MS);
   }
 

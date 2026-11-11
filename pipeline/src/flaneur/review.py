@@ -15,7 +15,7 @@ from pathlib import Path
 
 from PIL import Image
 
-from flaneur import dedup, localpage, placements, places
+from flaneur import db, dedup, localpage, placements, places
 from flaneur.gazetteer import Gazetteer
 from flaneur.pilot import safe_name, tile_box
 from flaneur.sources import append_row, rows, seconds_taken
@@ -138,7 +138,7 @@ def queue(
         r["photo_id"]
         for r in conn.execute(
             "SELECT pl.photo_id FROM placements pl JOIN photos p ON p.id = pl.photo_id "
-            "WHERE p.license = 'CC0'"
+            f"WHERE p.license IN {db.OPEN_LICENSES_SQL}"
         )
     ]
     for name, photos in places.group(conn, publishable).items():

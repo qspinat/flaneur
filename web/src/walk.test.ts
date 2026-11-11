@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   arrondissementLabel,
   offerOf3d,
@@ -8,6 +8,7 @@ import {
   erasOf,
   fitting,
   hashOf,
+  setAddress,
   httpsUrl,
   largest,
   photoIdFrom,
@@ -143,5 +144,41 @@ describe('the 3D walk, opened on a photo', () => {
 
     expect(parsePhoto3d(link)).toEqual({ id: 'paris_musees:171285', range: [1855, 1878] });
     expect(parsePhoto3d('#2.3466,48.852,40,1850-2026')).toBeNull();
+  });
+});
+
+describe('setAddress', () => {
+  const browser = (hash: string, pushState = vi.fn()) => ({
+    history: { pushState, replaceState: vi.fn() },
+    location: { hash },
+  });
+
+  it('writes a new entry, or this one', () => {
+    const b = browser('#/a');
+    setAddress('#/b', true, b.history, b.location);
+    setAddress('#/c', false, b.history, b.location);
+    expect(b.history.pushState).toHaveBeenCalledWith(null, '', '#/b');
+    expect(b.history.replaceState).toHaveBeenCalledWith(null, '', '#/c');
+  });
+
+  it('leaves the address alone when it already says so', () => {
+    const b = browser('#/a');
+    setAddress('#/a', false, b.history, b.location);
+    setAddress('#/a', true, b.history, b.location);
+    expect(b.history.replaceState).not.toHaveBeenCalled();
+    expect(b.history.pushState).not.toHaveBeenCalled();
+  });
+
+  it('lets a browser that refuses be: the photo still shows', () => {
+    const refuse = () => {
+      throw new DOMException('The operation is insecure.', 'SecurityError');
+    };
+    const b = browser('#/a', vi.fn(refuse));
+    expect(() => setAddress('#/b', true, b.history, b.location)).not.toThrow();
+  });
+
+  it('lets any other error through', () => {
+    const b = browser('#/a', vi.fn(() => { throw new TypeError('broken'); }));
+    expect(() => setAddress('#/b', true, b.history, b.location)).toThrow(TypeError);
   });
 });

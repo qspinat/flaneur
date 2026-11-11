@@ -18,7 +18,7 @@ def test_stats_count_decades_streets_and_camera_positions(tmp_path, load_fixture
         conn,
         [
             paris_musees.parse(load_fixture("paris_musees_menilmontant.json")),
-            albert_kahn.parse(load_fixture("albert_kahn_passage_du_caire.json")),
+            albert_kahn.parse(load_fixture("albert_kahn_passage_du_caire.json"), {}),
         ],
     )
 

@@ -303,3 +303,31 @@ def test_a_print_placed_flipped_is_shown_the_right_way_round_and_says_so(tmp_pat
 
     me = next(p for p in walk if p.id == "pm:1")
     assert me.for_site()["flipped"] is True and "image retournée" in me.for_site()["credit"]
+
+
+def test_a_cc_by_photo_is_published_with_its_credit_and_an_unverified_one_is_not(tmp_path):
+    conn = two_photos(tmp_path)
+    conn.execute("UPDATE photos SET license = 'CC-BY-4.0', credit = 'Musée, A 1' WHERE id = 'pm:1'")
+    conn.execute("UPDATE photos SET license = 'unverified' WHERE id = 'pm:2'")
+
+    (walk,) = export.photos(conn, tmp_path / "pilot", tmp_path / "reviews.jsonl")
+
+    assert (walk.id, walk.credit) == ("pm:1", "Musée, A 1, CC BY 4.0; image recadrée")
+
+
+def test_every_licence_that_may_be_published_is_named_under_the_photo():
+    from flaneur import db
+
+    assert set(db.OPEN_LICENSES) <= set(export.LICENSES)
+
+
+def test_a_cropped_cc_by_photo_says_it_was_cropped_and_a_cc0_one_need_not(tmp_path):
+    conn = two_photos(tmp_path)  # both shown cut to their suggested crop
+    conn.execute("UPDATE photos SET license = 'CC-BY-4.0', credit = 'Musée' WHERE id = 'pm:1'")
+
+    credits = {w.id: w.credit for w in export.photos(conn, tmp_path / "pilot", tmp_path / "r")}
+
+    assert credits == {
+        "pm:1": "Musée, CC BY 4.0; image recadrée",
+        "pm:2": "x, domaine public (CC0)",
+    }
