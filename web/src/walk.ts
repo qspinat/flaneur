@@ -92,7 +92,7 @@ export function hashOf(id: string): string {
   return `#/${encodeURIComponent(id)}`;
 }
 
-/** Writes `hash` into the address: as a new entry (`push`), or into this one unless it already
+/** Writes `hash` into the address, as a new entry (`push`) or into this one, unless it already
  *  says so. A browser may refuse (Firefox, after very many changes in a few seconds): the photo
  *  must still show, so the refusal is let be. */
 export function setAddress(
@@ -101,7 +101,7 @@ export function setAddress(
   history: Pick<History, 'pushState' | 'replaceState'> = window.history,
   location: Pick<Location, 'hash'> = window.location,
 ): void {
-  if (!push && location.hash === hash) return;
+  if (location.hash === hash) return;
   try {
     if (push) history.pushState(null, '', hash);
     else history.replaceState(null, '', hash);

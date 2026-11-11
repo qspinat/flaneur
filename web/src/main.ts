@@ -233,7 +233,7 @@ class Walker {
     event?.preventDefault();
     if (!$('home').hidden) return;
     setAddress('#/', true);
-    this.route();
+    void this.showPlan(this.here); // not from the address: the browser may have refused it
   }
 
   /** The plan, with `photo` chosen on it (none: the welcome, until set aside). */
@@ -345,7 +345,8 @@ class Walker {
     img.classList.add('loading');
     img.onload = () => {
       img.classList.remove('loading');
-      img.dataset.photo = photo.id; // which photo is on screen, once it is
+      // which old photo is on screen, once it is (not today's picture, shown in the same place)
+      if (!this.showingToday) img.dataset.photo = photo.id;
       // the photograph ahead, once this one is shown (the very file it will be shown with); the
       // other ways once one lingers here (looking around, one turns), or points at them
       this.fetchAhead(photo.links.forward?.id);

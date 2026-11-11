@@ -183,8 +183,15 @@ const page = await browser.newPage({ viewport: { width: 1440, height: 900 }, red
 let shown = 0;
 for (const photo of walk.photos) {
   await page.goto(`${base}#/${encodeURIComponent(photo.id)}`);
-  // this photo on screen, not the previous one still there (the hash changes, not the page)
-  await page.waitForFunction((id) => document.getElementById('photo').dataset.photo === id, photo.id);
+  // this photo on screen, not the previous one still there (the hash changes, not the page); one
+  // whose image never comes is counted as not shown, and named
+  const on = await page
+    .waitForFunction((id) => document.getElementById('photo').dataset.photo === id, photo.id, { timeout: 15000 })
+    .then(() => true, () => false);
+  if (!on) {
+    console.log(`NOT shown: ${photo.id}`);
+    continue;
+  }
   const credit = await page.textContent('#credit');
   if (credit.includes(photo.credit) && OPEN_LICENCE.test(credit)) shown += 1;
 }

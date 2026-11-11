@@ -161,10 +161,12 @@ describe('setAddress', () => {
     expect(b.history.replaceState).toHaveBeenCalledWith(null, '', '#/c');
   });
 
-  it('leaves this entry alone when it already says so', () => {
+  it('leaves the address alone when it already says so', () => {
     const b = browser('#/a');
     setAddress('#/a', false, b.history, b.location);
+    setAddress('#/a', true, b.history, b.location);
     expect(b.history.replaceState).not.toHaveBeenCalled();
+    expect(b.history.pushState).not.toHaveBeenCalled();
   });
 
   it('lets a browser that refuses be: the photo still shows', () => {
