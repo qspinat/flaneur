@@ -331,3 +331,21 @@ def test_a_cropped_cc_by_photo_says_it_was_cropped_and_a_cc0_one_need_not(tmp_pa
         "pm:1": "Musée, CC BY 4.0; image recadrée",
         "pm:2": "x, domaine public (CC0)",
     }
+
+
+def test_a_seed_is_matched_but_not_shown_until_its_camera_is_confirmed(tmp_path):
+    conn = two_photos(tmp_path)
+    conn.execute("UPDATE placements SET confidence = 'seed' WHERE photo_id = 'pm:1'")
+    pilot_dir, reviews = tmp_path / "pilot", tmp_path / "reviews.jsonl"
+
+    seen = {me.id: me.seeded for me in export.photos(conn, pilot_dir, reviews)}
+    shown = [me.id for me in export.build(conn, pilot_dir, export.photos(conn, pilot_dir, reviews))]
+    confirmed = {"pm:1": {"lon": 2.347, "lat": 48.853, "heading": 100}}
+    then = {
+        me.id: (me.lon, me.heading)
+        for me in export.build(conn, pilot_dir, export.photos(conn, pilot_dir, reviews, confirmed))
+    }
+
+    assert seen == {"pm:1": True, "pm:2": False}  # matching sees it
+    assert shown == ["pm:2"]  # the walk does not
+    assert then["pm:1"] == (2.347, 100)  # until its camera is confirmed

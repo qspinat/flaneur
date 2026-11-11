@@ -77,6 +77,8 @@ ROOT = Path(__file__).resolve().parents[3]
 DATA = ROOT / "data"
 DB_PATH = DATA / "flaneur.sqlite"
 WEB_DATA = ROOT / "web" / "public" / "data"  # the walk, as the site reads it (not versioned)
+# the images of photos only seeded (placements.SEED): matched, never published until confirmed
+SEEDED = DATA / "pilot" / "seeded"
 REVIEWS = DATA / "overrides" / "reviews.jsonl"
 SIGHTS = DATA / "overrides" / "sights.jsonl"  # the landmarks marked in photos, by hand
 CORRECTIONS = DATA / "pilot" / "panorama_corrections.json"  # on the buildings (register): unused
@@ -193,9 +195,10 @@ def import_placements() -> None:
     """Enregistre les placements fins du quartier pilote et les compare aux positions connues."""
     with closing(db.connect(DB_PATH)) as conn:
         found = placements.inherit(placements.load(DATA / "pilot"), dedup.negatives(conn))
-        placements.save(conn, found)
+        seeded = placements.seeds(conn, DATA / "pilot", pilot.AREA)
+        placements.save(conn, found + seeded)
         distances = placements.distances_to_truth(conn)
-    typer.echo(f"{len(found)} placements enregistrés")
+    typer.echo(f"{len(found)} placements enregistrés, et {len(seeded)} amorces (à situer)")
     for confidence in placements.CONFIDENCES:
         d = [m for c, m in distances if c == confidence]
         if d:
@@ -275,7 +278,8 @@ def export_walk(images: bool = True) -> None:
     """Écrit la balade (photos relues appliquées, liens, vue d'aujourd'hui) pour le site."""
     places, in_3d, no_3d = _placing_answers()
     with closing(db.connect(DB_PATH)) as conn:
-        walk = export.build(conn, DATA / "pilot", _walk(conn, places))
+        every = _walk(conn, places)
+        walk = export.build(conn, DATA / "pilot", every)
     elsewhere = len(in_3d) - len(_on_image_now(in_3d))
     if elsewhere:  # their image changed since: the placing page asks for them again
         typer.echo(f"{elsewhere} photos placées sur une image qu'elles n'ont plus : à revoir")
@@ -283,6 +287,9 @@ def export_walk(images: bool = True) -> None:
         placed_on = {i: r["inputs"] for i, r in in_3d.items()}
         with httpx.Client(timeout=120, follow_redirects=True) as client:
             walk = export.write(walk, client, DATA / "raw" / "images", WEB_DATA, placed_on, no_3d)
+            seeds = [me for me in every if me.seeded]  # for matching only, kept apart
+            kept = export.write_seeds(seeds, client, DATA / "raw" / "images", SEEDED)
+        typer.echo(f"{kept} images d'amorces gardées à part ({SEEDED})")
         typer.echo(f"écrit dans {WEB_DATA}")
     s = export.summary(walk)
     typer.echo(
@@ -768,8 +775,10 @@ def _setup() -> str:
 
 
 def _exported(photo_id: str) -> Path:
-    """A photo's image as the walk shows it and the matcher reads it (cropped)."""
-    return WEB_DATA / export.image_name(photo_id)
+    """A photo's image as the walk shows it and the matcher reads it (cropped): the site's,
+    else, for a photo only seeded, the one kept apart from it."""
+    shown = WEB_DATA / export.image_name(photo_id)
+    return shown if shown.exists() else SEEDED / export.image_name(photo_id)
 
 
 @functools.cache  # for one run: an export while it runs would not be seen

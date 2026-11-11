@@ -100,6 +100,8 @@ class WalkPhoto:
     in_3d: bool = False  # shown in the 3D walk (placed in its panorama by the user)
     flipped: bool = False  # the print turned the right way round (it was mirrored)
     no_3d: bool = False  # no panorama sees it (answered so on the placing page)
+    # only a start (placements.SEED): matched, not shown until its camera is confirmed
+    seeded: bool = False
     image: str | None = None  # path of the exported image, relative to the data folder
     # each size's width as written, by its side
     widths: dict[int, int] = field(default_factory=dict)
@@ -210,6 +212,7 @@ def photos(
             by_hand = decided if reviewed else None
         found = None if by_hand else situated.get(r["photo_id"])
         place = by_hand or found or r
+        seeded = place is r and r["confidence"] == placements.SEED
         flipped = bool(set_here and by_hand is set_here and set_here.get("flipped"))
         # the crop drawn or accepted by hand on this very print, else the one proposed
         own = decided if decided and decided["id"] == f"photo:{r['photo_id']}" else {}
@@ -236,6 +239,7 @@ def photos(
                 reviewed=by_hand is not None,
                 moved_by_review=bool(by_hand) and _moved(r, by_hand),
                 flipped=flipped,
+                seeded=seeded,
             )
         )
     return walk
@@ -324,7 +328,8 @@ def build(
     walk: list[WalkPhoto],
 ) -> list[WalkPhoto]:
     """The walk (its photos where each is best known: see photos), linked, each photo with its
-    view of today chosen (images not yet written)."""
+    view of today chosen (images not yet written); a seed not confirmed is left out."""
+    walk = [me for me in walk if not me.seeded]
     link(walk)
     tiles = _tiles(pilot_dir)
     matched = dict(conn.execute("SELECT photo_id, match_panoramax_id FROM placements"))
@@ -396,6 +401,14 @@ def _write_one(me: WalkPhoto, client: httpx.Client, cache_dir: Path, out_dir: Pa
         except (httpx.HTTPError, IndexError, KeyError, OSError):
             me.today = None
     return True
+
+
+def write_seeds(
+    seeds: list[WalkPhoto], client: httpx.Client, cache_dir: Path, out_dir: Path
+) -> int:
+    """Write the images of photos only seeded, apart from the site's: what matching reads,
+    never published. Returns how many could be written."""
+    return sum(_write_one(me, client, cache_dir, out_dir) for me in seeds)
 
 
 def mark_3d(

@@ -812,3 +812,17 @@ def test_a_proposed_camera_judged_already_is_not_offered_again():
     }
 
     assert set(cli._to_judge(proposed, verdicts)) == {"b", "c"}
+
+
+def test_a_seeds_image_is_read_where_it_was_kept_and_never_published(monkeypatch, tmp_path):
+    from flaneur import cli, export
+
+    monkeypatch.setattr(cli, "WEB_DATA", tmp_path / "site")
+    monkeypatch.setattr(cli, "SEEDED", tmp_path / "seeded")
+    for folder, photo_id in (("site", "pm:shown"), ("seeded", "pm:seed")):
+        path = tmp_path / folder / export.image_name(photo_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"x")
+
+    assert cli._exported("pm:shown") == tmp_path / "site" / export.image_name("pm:shown")
+    assert cli._exported("pm:seed") == tmp_path / "seeded" / export.image_name("pm:seed")

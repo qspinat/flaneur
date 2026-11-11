@@ -16,11 +16,13 @@ from pathlib import Path
 from shapely.geometry import MultiPoint, Point
 from shapely.geometry.base import BaseGeometry
 
-from flaneur import db, dedup
-from flaneur.gazetteer import to_metres
+from flaneur import db, dedup, read
+from flaneur.gazetteer import from_geojson, to_degrees, to_metres
 from flaneur.pilot import safe_name, sheet_of
 
 CONFIDENCES = ("high", "medium", "low")
+# A placement no one made: where a photo's camera is first looked for (see seeds).
+SEED = "seed"
 
 
 def load(pilot_dir: Path) -> list[dict]:
@@ -108,3 +110,64 @@ def area(conn: sqlite3.Connection, margin_m: float) -> BaseGeometry:
     ).fetchall()
     points = to_metres(MultiPoint([(r["lon"], r["lat"]) for r in placed]))
     return points.envelope.buffer(margin_m).envelope
+
+
+def seeds(conn: sqlite3.Connection, pilot_dir: Path, area: BaseGeometry) -> list[dict]:
+    """A start for each prepared photo with no placement of its own and an open licence: the
+    museum's camera position, else the door or corner its caption names, else the middle of its
+    street within `area` (Lambert-93); none for what the caption reading says is not a street
+    view. A seed is never shown on the walk until a camera found from it is confirmed
+    (export.build)."""
+    started = []
+    for r in conn.execute(
+        "SELECT p.id, p.camera_lon, p.camera_lat, l.point, s.geometry, g.kind "
+        "FROM photos p LEFT JOIN locations l ON l.photo_id = p.id "
+        "LEFT JOIN streets s ON s.id = l.street_id LEFT JOIN readings g ON g.photo_id = p.id "
+        f"WHERE p.license IN {db.OPEN_LICENSES_SQL}"
+    ):
+        folder = pilot_dir / "photos" / safe_name(r["id"])
+        if (
+            not (folder / "info.json").exists()
+            or (folder / "placement.json").exists()
+            or r["kind"] in read.NOT_A_STREET_VIEW
+        ):
+            continue
+        if r["camera_lon"] is not None:
+            lon, lat = r["camera_lon"], r["camera_lat"]
+        else:
+            start = _start(r["point"], r["geometry"], area)
+            if start is None:
+                continue
+            lon, lat = start
+        started.append(
+            {
+                "photo_id": r["id"],
+                "is_street_view": True,
+                "match": None,
+                "match_panoramax_id": None,
+                "lon": lon,
+                "lat": lat,
+                "heading": 0.0,
+                "confidence": SEED,
+                "reason": "amorce : la place que la source ou la légende donne",
+            }
+        )
+    return started
+
+
+def _start(point: str | None, street: str | None, area: BaseGeometry) -> tuple[float, float] | None:
+    """Where a caption puts a photo, in degrees: its point, else the middle of its street's
+    stretch within `area` (none outside it)."""
+    if point:
+        at = from_geojson(point)
+    elif street:
+        stretch = from_geojson(street).intersection(area)
+        if stretch.is_empty:
+            return None
+        if hasattr(stretch, "geoms"):  # in pieces: the longest
+            stretch = max(stretch.geoms, key=lambda piece: piece.length)
+        at = stretch.interpolate(0.5, normalized=True) if stretch.length else stretch.centroid
+    else:
+        return None
+    at = to_degrees(at)
+    return at.x, at.y
