@@ -1104,9 +1104,20 @@ def _matching() -> tuple[scene.CameraHeights, list[match.Panorama], Callable[[in
     return heights, _panoramas(pictures, heights), then
 
 
-def _check_setup(matcher: str, setup: str) -> str:
-    """What a matcher's known-answer check depends on: the panoramas' setup (see _setup), and
-    for LoMa-G its own code and LoMa's revision."""
+def _area_of(here: tuple[float, float]) -> str:
+    """The area a place belongs to (see pilot.AREAS): the one it stands in, else the nearest."""
+    point = Point(*here)
+    return min(pilot.AREAS, key=lambda name: pilot.AREAS[name].distance(point))
+
+
+def _check_setup(matcher: str, area: str, near_by: list[match.Panorama]) -> str:
+    """What a matcher's known-answer check in an `area` depends on: the panoramas within reach
+    of it (where each stands, faces and leans: see _scene_of), the code, and for LoMa-G its own
+    code and LoMa's revision. Panoramas added or moved elsewhere leave it be."""
+    reach = pilot.AREAS[area].buffer(MATCH_RADIUS_M)
+    inside = sorted((p for p in near_by if reach.contains(Point(p.x, p.y))), key=lambda p: p.id)
+    centre = pilot.AREAS[area].centroid
+    setup = f"{area}:{_scene_of(inside, (centre.x, centre.y), _code())}"
     if matcher == DISK:
         return setup
     from importlib import metadata
@@ -1329,6 +1340,27 @@ def _match_with(matcher: str, photos: list[export.WalkPhoto], at: _Run) -> None:
         write_json(MATCHES, at.found)
 
 
+def _checked_in(near_by: list[match.Panorama], force: bool = False) -> dict[str, list[str]]:
+    """For each area, the matchers whose known-answer check passed there for its panoramas as
+    they are (every matcher when `force`d): a photo is matched by those of its area only."""
+    checked: dict[str, list[str]] = {}
+    for name in pilot.AREAS:
+        checked[name] = []
+        for matcher in MATCHERS:
+            check = register.load(_of_matcher(MATCH_CHECK, matcher)).get(name, {})
+            if force or (
+                check.get("passed") and check.get("setup") == _check_setup(matcher, name, near_by)
+            ):
+                checked[name].append(matcher)
+            else:
+                typer.echo(
+                    f"{MATCHERS[matcher].label} laissé de côté dans « {name} » : son contrôle à "
+                    f"réponse connue n'y est pas passé pour ces panoramas "
+                    f"(`flaneur match-check --matcher {matcher} --area {name}`)"
+                )
+    return checked
+
+
 @app.command("match")
 def match_photos(
     photo: Annotated[list[str] | None, typer.Option(help="seulement ces photos")] = None,
@@ -1343,22 +1375,12 @@ def match_photos(
     """Situe les photos en les comparant aux panoramas d'aujourd'hui autour d'elles : position,
     direction, champ et horizon, là où des façades d'alors sont encore debout. Avec LoMa-G
     d'abord, puis DISK pour celles qu'il n'a pas situées (la page de confirmation dit lequel)."""
-    setup = _setup()
-    checked = []  # the matchers whose known-answer check passed for these panoramas
-    for matcher in MATCHERS:
-        check = register.load(_of_matcher(MATCH_CHECK, matcher))
-        if force or (check.get("passed") and check.get("setup") == _check_setup(matcher, setup)):
-            checked.append(matcher)
-        else:
-            typer.echo(
-                f"{MATCHERS[matcher].label} laissé de côté : son contrôle à réponse connue n'est "
-                f"pas passé pour ces panoramas (`flaneur match-check --matcher {matcher}`)"
-            )
-    if not checked:
-        raise typer.BadParameter("aucun apparieur contrôlé : lancer `flaneur match-check` d'abord")
     with closing(db.connect(DB_PATH)) as conn:
         walk = export.photos(conn, DATA / "pilot", REVIEWS)
     heights, near_by, then = _matching()
+    checked = _checked_in(near_by, force)
+    if not any(checked.values()):
+        raise typer.BadParameter("aucun apparieur contrôlé : lancer `flaneur match-check` d'abord")
     scenes = _scenes(walk, near_by)
     blocks = then(date.today().year).blocks
     found, judged = _matches(), _Judged()
@@ -1378,6 +1400,8 @@ def match_photos(
             turned_down = bool(said) and said["verdict"] != "yes"
             tried[me.id] = _tried(kept, inputs)
             to_try[me.id] = _left_to_try(kept, inputs, turned_down)
+        area = checked[_area_of(_place_of(me))]  # the matchers checked where it stands
+        to_try[me.id] = [m for m in to_try[me.id] if m in area]
     at = _Run(
         near_by=near_by,
         then=then,
@@ -1392,7 +1416,7 @@ def match_photos(
     )
 
     chosen = sorted((me for me in chosen if to_try[me.id]), key=_visit)
-    for matcher in checked:  # one model at a time: each let go before the next
+    for matcher in MATCHERS:  # one model at a time: each let go before the next
         if photos := [me for me in chosen if matcher in to_try[me.id] and me.id not in at.placed]:
             _match_with(matcher, photos, at)
             from flaneur import lomag
@@ -1848,15 +1872,19 @@ def match_check(
     tries: int = 20,
     seed: int = 0,
     matcher: Annotated[str, typer.Option(help="lomag ou disk")] = DISK,
+    area: Annotated[str | None, typer.Option(help="un quartier (sinon : chacun)")] = None,
 ) -> None:
     """Contrôle à réponse connue, sur `tries` panoramas. Une vue découpée dans l'un, prise
     pour une vieille photo, est située contre les autres et comparée à sa vraie caméra ; puis
     la même vue dont il ne reste qu'une bande (le reste : une autre rue), vieillie ; puis une
     vue vieillie d'une autre rue, qui ne doit pas être située. La porte (assez de vues
     situées, à moins de CHECK_M et CHECK_DEG en médiane, presque aucune fausse) est gardée pour
-    chaque apparieur (`--matcher`) : `match` n'emploie que ceux dont la porte est passée."""
+    chaque apparieur (`--matcher`) et chaque quartier (`--area`) : `match` n'emploie, pour
+    une photo, que ceux dont la porte est passée dans son quartier."""
     if matcher not in MATCHERS:
         raise typer.BadParameter(f"apparieur : l'un de {', '.join(MATCHERS)}")
+    if area is not None and area not in pilot.AREAS:
+        raise typer.BadParameter(f"quartier : l'un de {', '.join(pilot.AREAS)}")
     heights, near_by, then = _matching()
     year = date.today().year
     today = then(year)
@@ -1868,21 +1896,42 @@ def match_check(
         landmarks=landmarks.among(today.blocks),
     )
     views = _views(matcher=matcher)
-    rng = np.random.default_rng(seed)
-    marking = np.random.default_rng([seed, 1])  # its own: the fakes stay the same
     # only panoramas COLMAP placed: another's place is borrowed from its run, or its phone's
     with closing(db.connect(DB_PATH)) as conn:
         fixed = _fixed_by_colmap(panoramas.load(conn), register.load(FIXES))
-    placed = [p for p in near_by if p.id in fixed]
+    for name in [area] if area else list(pilot.AREAS):
+        _check_area(name, tries, seed, matcher, near_by, fixed, heights, today, shown, views)
+
+
+def _check_area(
+    name: str,
+    tries: int,
+    seed: int,
+    matcher: str,
+    near_by: list[match.Panorama],
+    fixed: set[str],
+    heights: scene.CameraHeights,
+    today: "Then",
+    shown: Callable[[match.View], tuple[match.Sight, ...]],
+    views,
+) -> None:
+    """One area's known-answer check (see match_check): its views cut from the panoramas COLMAP
+    placed in it, its decoys from its own streets far from them, its result kept for it alone."""
+    rng = np.random.default_rng(seed)
+    marking = np.random.default_rng([seed, 1])  # its own: the fakes stay the same
+    square = pilot.AREAS[name]
+    in_area = sorted((p for p in near_by if square.contains(Point(p.x, p.y))), key=lambda p: p.id)
+    placed = [p for p in in_area if p.id in fixed]
     tries = min(tries, len(placed))
     if not tries:
-        raise typer.BadParameter("aucun panorama placé par COLMAP : rien à contrôler")
+        typer.echo(f"{name} : aucun panorama placé par COLMAP, rien à contrôler")
+        return
     found: dict[str, list[Off | None]] = {"vue": [], "bande": [], "leurre": []}
     traces: dict[str, list[dict]] = {kind: [] for kind in found}
     for k in rng.choice(len(placed), tries, replace=False):
         me = placed[k]
         heading = float(rng.uniform(0, 360))
-        far = [p for p in near_by if np.hypot(p.x - me.x, p.y - me.y) > FAR_M]
+        far = [p for p in in_area if np.hypot(p.x - me.x, p.y - me.y) > FAR_M]
         if not far:
             raise typer.BadParameter(f"aucun panorama à plus de {FAR_M} m : pas de leurre")
         true = _cut_view(me, heading)
@@ -1943,7 +1992,12 @@ def match_check(
         if not met
     ]
     passed = not wanting
-    write_json(_of_matcher(CHECK_TRACE, matcher), traces)
+    kept = {
+        k: v
+        for k, v in register.load(_of_matcher(CHECK_TRACE, matcher)).items()
+        if k in pilot.AREAS
+    }
+    write_json(_of_matcher(CHECK_TRACE, matcher), {**kept, name: traces})
     for kind, rows in traces.items():
         typer.echo(f"{kind} : {_funnel(rows)}")
         lost = [r for r in rows if r["verdict"] != "située"]
@@ -1959,31 +2013,34 @@ def match_check(
             f"  {kind} non situées : {len(lost)}, dont la juste caméra écartée : "
             f"{thrown.total()} ({', '.join(f'{why} {n}' for why, n in thrown.most_common())})"
         )
-    write_json(
-        _of_matcher(MATCH_CHECK, matcher),
-        {
-            "setup": _check_setup(matcher, _setup()),
-            "situated": len(situated),
-            "tries": tries,
-            "median_m": metres,
-            "median_deg": degrees,
-            "bands_right": bands,
-            "wrong": len(wrong),
-            "passed": passed,
-            # how much better the outlines fit the cameras found right, and the wrong ones
-            "outlines": {
-                "right": sorted(
-                    round(off.outline, 3)
-                    for kind, offs in found.items()
-                    for off in offs
-                    if kind != "leurre" and right(off)
-                ),
-                "wrong": sorted(round(off.outline, 3) for off in wrong),
-            },
+    checks = {
+        k: v
+        for k, v in register.load(_of_matcher(MATCH_CHECK, matcher)).items()
+        if k in pilot.AREAS
+    }
+    checks[name] = {
+        "setup": _check_setup(matcher, name, near_by),
+        "situated": len(situated),
+        "tries": tries,
+        "median_m": metres,
+        "median_deg": degrees,
+        "bands_right": bands,
+        "wrong": len(wrong),
+        "passed": passed,
+        # how much better the outlines fit the cameras found right, and the wrong ones
+        "outlines": {
+            "right": sorted(
+                round(off.outline, 3)
+                for kind, offs in found.items()
+                for off in offs
+                if kind != "leurre" and right(off)
+            ),
+            "wrong": sorted(round(off.outline, 3) for off in wrong),
         },
-    )
+    }
+    write_json(_of_matcher(MATCH_CHECK, matcher), checks)
     typer.echo(
-        f"vues : {len(situated)} situées sur {tries}, écart médian {metres:.1f} m et "
+        f"{name} — vues : {len(situated)} situées sur {tries}, écart médian {metres:.1f} m et "
         f"{degrees:.1f}° ; bandes vieillies justes : {bands} sur {tries} ; fausses : "
         f"{len(wrong)} sur {attempts} : "
         + ("porte passée" if passed else f"porte NON passée (il faut {', '.join(wanting)})")

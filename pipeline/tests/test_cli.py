@@ -549,9 +549,10 @@ def test_the_page_tells_which_matcher_placed_a_photo_and_whether_to_check_it(kep
 
 
 def test_lomag_s_check_goes_stale_with_its_code_disk_s_with_the_panoramas_only():
-    assert cli._check_setup("disk", "s") == "s"
-    assert cli._check_setup("lomag", "s").startswith("s:")
-    assert cli._check_setup("lomag", "s") != cli._check_setup("lomag", "t")
+    disk = cli._check_setup("disk", "cite", [])
+
+    assert cli._check_setup("lomag", "cite", []).startswith(f"{disk}:")  # and its own code
+    assert cli._check_setup("disk", "saint-severin", []) != disk  # each area its own
 
 
 def test_the_old_photo_s_outlines_are_drawn_on_today_s_view_in_amber():
@@ -962,3 +963,46 @@ def test_matching_never_takes_away_a_placement_said_yes_to(
     cli.match_photos(photo=photo, again=again, force=True)
 
     assert json.loads((tmp_path / "matches.json").read_text())["pm:1"] == before
+
+
+def test_an_areas_check_holds_while_panoramas_are_added_elsewhere():
+    from flaneur import pilot
+
+    home, other = pilot.AREAS["saint-severin"].centroid, pilot.AREAS["cite"].centroid
+    near_by = [_panorama(n, home.x + 10.0 * n, home.y) for n in range(3)]
+    before = cli._check_setup("disk", "saint-severin", near_by)
+
+    assert (
+        cli._check_setup("disk", "saint-severin", [*near_by, _panorama(9, other.x, other.y)])
+        == before
+    )
+    assert (
+        cli._check_setup("disk", "saint-severin", [*near_by, _panorama(8, home.x, home.y + 5)])
+        != before
+    )
+
+
+def test_a_photo_belongs_to_the_area_it_stands_in_else_the_nearest():
+    from flaneur import pilot
+
+    cite = pilot.AREAS["cite"].centroid
+
+    assert cli._area_of((cite.x, cite.y)) == "cite"
+    assert cli._area_of((cite.x + 2000.0, cite.y)) == "cite"  # east of both: the Cité is nearer
+
+
+@pytest.mark.parametrize(("passed_in", "placed"), [("cite", True), ("saint-severin", False)])
+def test_a_photo_is_matched_only_by_matchers_checked_in_its_area(
+    tmp_path, monkeypatch, passed_in, placed
+):
+    _match_world(tmp_path, monkeypatch, {}, lambda matcher: CAMERA)
+    monkeypatch.setattr(cli, "MATCH_CHECK", tmp_path / "match_check.json")
+    monkeypatch.setattr(cli, "_area_of", lambda here: "cite")  # where the photos stand
+    check = {passed_in: {"passed": True, "setup": cli._check_setup("disk", passed_in, [])}}
+    (tmp_path / "match_check.json").write_text(json.dumps(check))  # DISK's, checked there only
+
+    cli.match_photos(photo=None, again=False, force=False)
+
+    kept = json.loads((tmp_path / "matches.json").read_text()) if placed else {}
+    assert ("x" in kept.get("pm:1", {})) == placed
+    assert kept.get("pm:1", {}).get("matcher", "disk") == "disk"
