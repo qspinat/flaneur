@@ -489,7 +489,10 @@ def test_only_current_placements_by_lomag_are_left_out_of_chaining():
         "e": _kept(matcher="lomag"),  # stale or turned down: not situated
     }
 
-    assert cli._not_chained(matches, {"a", "b", "c"}) == {"c"}
+    situated = {k: SimpleNamespace(inputs="i") for k in ("a", "b", "c")}
+    situated["d"] = SimpleNamespace(inputs="i:proposed")  # said yes to: no points to chain by
+
+    assert cli._not_chained(matches, situated) == {"c", "d"}
 
 
 def test_a_photo_placed_against_today_is_shown_so_rather_than_as_last_chained():
@@ -690,11 +693,17 @@ def test_a_camera_turned_down_with_many_points_agreeing_is_proposed():
     trace = {
         "a": {"candidates": [_candidate(30, "x"), _candidate(60, "position incertaine")]},
         "b": {"candidates": [_candidate(40, "position incertaine")]},  # too few agree
-        "c": {"candidates": [_candidate(80, "ne peut se tenir là")]},  # placed already
+        "c": {"candidates": [_candidate(80, "ne peut se tenir là")]},  # placed by a matcher
+        "d": {"candidates": [_candidate(80, "rivale")]},  # traced from another image
     }
-    places = {"a": (10.0, 3.0), "b": (0.0, 0.0), "c": (0.0, 0.0)}
+    matches = {
+        "a": {"inputs": "i", "tried": ["lomag"]},
+        "b": {"inputs": "i", "tried": ["lomag"]},
+        "c": {"x": 0.0, "inputs": "i:lomag", "matcher": "lomag"},
+        "d": {"inputs": "old", "tried": ["lomag"]},
+    }
 
-    proposed = cli._proposals(trace, {"c"}, places, {"a": "i", "b": "i", "c": "i"}, 2.4)
+    proposed = cli._proposals(trace, matches, lambda k: (10.0, 3.0), lambda k: "i", 2.4)
 
     assert set(proposed) == {"a"}
     a = proposed["a"]
@@ -718,9 +727,9 @@ def test_a_proposed_camera_is_a_placement_once_said_yes_to(
     cv2.imwrite(str(photo), np.zeros((8, 8, 3), np.uint8))
     proposal = cli._proposals(
         {"a": {"candidates": [_candidate(60, "position incertaine")]}},
-        set(),
-        {"a": (0.0, 0.0)},
-        {"a": "i"},
+        {"a": {"inputs": "i", "tried": ["lomag"]}},
+        lambda k: (0.0, 0.0),
+        lambda k: "i",
         2.4,
     )
     (tmp_path / "proposed.json").write_text(json.dumps(proposal))

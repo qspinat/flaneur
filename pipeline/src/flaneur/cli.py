@@ -724,6 +724,8 @@ CHAIN_CHECK = DATA / "pilot" / "chain_check.json"  # the chaining's known-answer
 # (`flaneur presque`): 56 % of those with 50 points agreeing were right by eye (10/11).
 PROPOSED_CAMERAS = DATA / "pilot" / "proposed_cameras.json"
 PROPOSE_AGREE = 50
+PROPOSAL = "proposed"  # what a proposed camera's inputs end with (see _placed_inputs)
+PROPOSED_ABOVE_M = 1.6  # a proposed camera's height above the street when no placement gives one
 ANCHORS = DATA / "overrides" / "anchors.jsonl"  # the user's yes or no to photos placed
 MATCH_RADIUS_M = 60  # a placement from a caption can be 25 m off
 MATCH_PANORAMAS = 16  # ranked by a quick first pass, the best views matched in full
@@ -840,10 +842,15 @@ def _left_to_try(kept: dict | None, inputs: str, refused: bool = False) -> list[
     return [m for m in MATCHERS if m not in tried]
 
 
-def _not_chained(matches: dict[str, dict | None], situated: Iterable[str]) -> set[str]:
-    """The `situated` photos placed by a matcher other than DISK: chaining pairs old photos by
-    DISK's features, which their observations and points do not refer to."""
-    return {k for k in situated if (matches.get(k) or {}).get("matcher", DISK) != DISK}
+def _not_chained(matches: dict[str, dict | None], situated: dict[str, match.Situated]) -> set[str]:
+    """The `situated` photos placed by a matcher other than DISK (chaining pairs old photos by
+    DISK's features, which their observations and points do not refer to), or proposed and
+    said yes to (no points kept)."""
+    return {
+        k
+        for k, m in situated.items()
+        if (matches.get(k) or {}).get("matcher", DISK) != DISK or m.inputs.endswith(f":{PROPOSAL}")
+    }
 
 
 def _situated() -> dict[str, match.Situated]:
@@ -851,7 +858,8 @@ def _situated() -> dict[str, match.Situated]:
     now (a match found from other panoramas or another crop of the photo is left out), and
     not turned down by the user; and those whose camera matching turned down the user said
     yes to (see _proposals)."""
-    setup, refused, verdicts = _setup(), _refused(), _verdicts()
+    setup, verdicts = _setup(), _verdicts()
+    refused = _refused(verdicts)
     found = {}
     for photo_id, m in _matches().items():
         if m and "x" in m and _exported(photo_id).exists():  # cheap checks before the hash
@@ -861,43 +869,41 @@ def _situated() -> dict[str, match.Situated]:
         said = verdicts.get(photo_id) or {}
         if photo_id in found or said.get("verdict") != "yes" or said.get("inputs") != p["inputs"]:
             continue
-        if _exported(photo_id).exists() and p["inputs"] == _proposed_inputs(photo_id, setup):
+        if _exported(photo_id).exists() and _placed_now(p, _inputs(photo_id, setup)):
             found[photo_id] = _situation(p)
     return found
 
 
-def _proposed_inputs(photo_id: str, setup: str) -> str:
-    """What a camera proposed is made from: the photo's inputs, as a proposal (a yes to it is
-    not a yes to a placement matching finds later)."""
-    return f"{_inputs(photo_id, setup)}:proposed"
-
-
 def _proposals(
     trace: dict[str, dict],
-    placed: set[str],
-    places: dict[str, tuple[float, float]],
-    inputs: dict[str, str],
+    matches: dict[str, dict | None],
+    place_of: Callable[[str], tuple[float, float]],
+    inputs_of: Callable[[str], str],
     above: float,
 ) -> dict[str, dict]:
-    """For each photo not `placed`, the best camera matching turned down when at least
-    PROPOSE_AGREE points agreed with it (`trace`: each photo's last match), as a placement to
-    say yes or no to, with why it was turned down: `above` the street (a camera turned down
-    keeps no height), from what it is now (`inputs`), no points kept (not an anchor)."""
+    """For each photo matching did not place (`matches`: the walk's, as kept), the best camera
+    it turned down when at least PROPOSE_AGREE points agreed with it (`trace`: each photo's
+    last match, made from what it is now: `inputs_of`), as a placement to say yes or no to
+    (matcher PROPOSAL: a yes to it is not a yes to a placement found later), with why it was
+    turned down; `above` the street (a camera turned down keeps no height), `place_of` its
+    caption, no points kept (not an anchor)."""
     proposed = {}
     for photo_id, run in trace.items():
-        if photo_id in placed or photo_id not in inputs:
-            continue
         best = max(run.get("candidates") or [], key=lambda c: c["agree"], default=None)
-        if best is None or best["agree"] < PROPOSE_AGREE:
+        kept = matches.get(photo_id)
+        if best is None or best["agree"] < PROPOSE_AGREE or not kept or "x" in kept:
             continue
-        x0, y0 = places[photo_id]
+        if kept["inputs"] != (inputs := inputs_of(photo_id)):  # traced from another image
+            continue
+        x0, y0 = place_of(photo_id)
         proposed[photo_id] = {
             **{k: best[k] for k in ("x", "y", "heading", "horizon", "fov", "agree")},
             "above_street": above,
             "panoramas": 0,
             "moved_m": round(float(np.hypot(best["x"] - x0, best["y"] - y0)), 1),
             "walls": [],
-            "inputs": f"{inputs[photo_id]}:proposed",
+            "inputs": _placed_inputs(inputs, PROPOSAL),
+            "matcher": PROPOSAL,
             "outline": 0.0,
             "why": best["why"] or "rivale",
         }
@@ -909,17 +915,16 @@ def propose_turned_down() -> None:
     """Propose à la page de confirmation les caméras que le contrôle a refusées alors que
     beaucoup de points s'accordaient avec elles (data/pilot/proposed_cameras.json) : un « oui »
     en fait une place (sans points gardés : pas une ancre d'enchaînement)."""
-    situated, setup = _situated(), _setup()
+    setup, kept = _setup(), _matches()
     with closing(db.connect(DB_PATH)) as conn:
-        walk = [me for me in export.photos(conn, DATA / "pilot", REVIEWS)]
-    walk = [me for me in walk if _exported(me.id).exists()]
-    above = float(np.median([m.above_street for m in situated.values()])) if situated else 1.6
+        walk = {me.id: me for me in export.photos(conn, DATA / "pilot", REVIEWS)}
+    heights = [m["above_street"] for m in kept.values() if m and "x" in m]
     proposed = _proposals(
         register.load(MATCH_TRACE),
-        set(situated),
-        {me.id: _place_of(me) for me in walk},
-        {me.id: _inputs(me.id, setup) for me in walk},
-        above,
+        {k: m for k, m in kept.items() if k in walk and _exported(k).exists()},
+        lambda k: _place_of(walk[k]),
+        lambda k: _inputs(k, setup),
+        float(np.median(heights)) if heights else PROPOSED_ABOVE_M,
     )
     write_json(PROPOSED_CAMERAS, proposed)
     typer.echo(f"{len(proposed)} caméras refusées proposées à la confirmation ({PROPOSED_CAMERAS})")
@@ -939,10 +944,12 @@ def _confirmed() -> dict[str, match.Situated]:
     }
 
 
-def _refused() -> set[tuple[str, str]]:
+def _refused(verdicts: dict[str, dict] | None = None) -> set[tuple[str, str]]:
     """The placements the user did not take as they are (no, or near: the right buildings,
-    the camera off): the photo, and what it was placed from."""
-    return {(k, v["inputs"]) for k, v in _verdicts().items() if v["verdict"] != "yes"}
+    the camera off): the photo, and what it was placed from (`verdicts`: read when not
+    given)."""
+    verdicts = _verdicts() if verdicts is None else verdicts
+    return {(k, v["inputs"]) for k, v in verdicts.items() if v["verdict"] != "yes"}
 
 
 def _turned_down() -> set[str]:
@@ -1042,6 +1049,17 @@ def _views(kept: int | None = None, matcher: str = DISK) -> match.Views:
             found = match.Matcher(match.fetch_models(client, DATA / "raw" / "models"))
     matching = MATCHERS[matcher]
     return match.Views(found, matching.views, matching.kept if kept is None else kept)
+
+
+def _origin(m: match.Situated, round_: dict, kept: dict | None) -> dict:
+    """Who placed a photo, as the confirmation page says it, and why to check it closely: a
+    camera proposed (`round_` carries why it was turned down; said yes to: its inputs say
+    so), the matcher that found it against today, nothing for chaining."""
+    if "proposed" in round_:
+        return {"by": "proposée", "check": f"caméra refusée par le contrôle ({round_['proposed']})"}
+    if m.inputs.endswith(f":{PROPOSAL}"):
+        return {"by": "proposée, dite juste"}
+    return _found_by(kept) if round_["round"] == 0 and kept and "x" in kept else {}
 
 
 def _found_by(kept: dict) -> dict:
@@ -1971,7 +1989,7 @@ def confirm_placed(port: int = 8768, open_browser: bool = True) -> None:
     kept = _matches()  # round 0: each placement as kept, its matcher with it
     setup = _setup()
     for k, p in register.load(PROPOSED_CAMERAS).items():  # cameras turned down, to say yes or no to
-        if k in titles and k not in situated and p["inputs"] == _proposed_inputs(k, setup):
+        if k in titles and k not in situated and _placed_now(p, _inputs(k, setup)):
             situated[k] = _situation(p)
             rounds[k] = {"round": 0, "from": [], "proposed": p["why"]}
     placed = [
@@ -1979,16 +1997,7 @@ def confirm_placed(port: int = 8768, open_browser: bool = True) -> None:
             "id": k,
             "title": titles[k],
             "inputs": m.inputs,
-            **(
-                {
-                    "by": "proposée",
-                    "check": f"caméra refusée par le contrôle ({rounds[k]['proposed']})",
-                }
-                if "proposed" in rounds[k]
-                else _found_by(kept[k])
-                if rounds[k]["round"] == 0 and "x" in (kept.get(k) or {})
-                else {}
-            ),
+            **_origin(m, rounds[k], kept.get(k)),
             "camera": {"x": round(m.x, 2), "y": round(m.y, 2), "heading": round(m.heading, 2)},
             "agree": m.agree,
             "moved_m": m.moved_m,
