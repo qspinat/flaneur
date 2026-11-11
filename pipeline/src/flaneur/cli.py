@@ -750,6 +750,15 @@ CHECK_LEAST = 10  # views, for an area's check to pass: fewer tell nothing
 CHECK_KEPT = (0.25, 0.35)  # the share of the true view a band keeps
 FAR_M = 200  # a decoy: a view of a street this far away
 CHECK_FOV = 60  # its views' width (and height: they are square)
+CHECK_SIDE = 800  # pixels
+# A camera found is right when the buildings its view shows land where the true one shows them,
+# however far it stands (the scene's walls 200 m off, a camera 6 m aside still lines them up):
+# the mean gap between their projections, a share of the view's diagonal (DCRE, Wald et al.,
+# ECCV 2020; map-free relocalization's 5 %). 5° at the centre of a check's view is 5.4 %, 2° 2.1 %.
+DCRE_RIGHT = 0.05
+DCRE_MEDIAN = 0.02  # the check's median, as CHECK_DEG
+SCENE_GRID = 24  # rays across and down a view, for the walls it shows
+SCENE_SHARE = 0.1  # of them meeting a wall, for its scene to be known (the rest: sky, street)
 MARKED_TO = 0.015  # a landmark's column, marked by hand: off by this (a share of the width)
 RIGHT_M, RIGHT_DEG = 3.0, 5.0  # a camera found farther off than this is a wrong one
 WRONG_SHARE = 0.05  # of all the views, bands and decoys: at most this share wrong
@@ -1917,18 +1926,30 @@ def match_check(
 
 
 def _wanting(
-    tries: int, situated: int, metres: float, degrees: float, wrong: int, attempts: int
+    tries: int,
+    situated: int,
+    metres: float,
+    degrees: float,
+    wrong: int,
+    attempts: int,
+    dcre: float | None = None,
 ) -> list[str]:
     """What a known-answer check lacks to pass (none: it passes): of its `tries` views,
-    `situated` found (`metres`, `degrees`: their median distance to the truth), `wrong` cameras
-    among all its `attempts` (views, bands and decoys)."""
+    `situated` found (`metres`, `degrees`: their median distance to the truth; `dcre`: their
+    median gap on the scene, see _dcre), `wrong` cameras among all its `attempts` (views, bands
+    and decoys)."""
+    near = metres < CHECK_M and degrees < CHECK_DEG
+    lined_up = dcre is not None and dcre < DCRE_MEDIAN
     return [
         need
         for met, need in [
             (tries >= CHECK_LEAST, f"au moins {CHECK_LEAST} vues"),
             (situated >= CHECK_SHARE * tries, f"au moins {CHECK_SHARE:.0%} situées"),
-            (metres < CHECK_M, f"moins de {CHECK_M} m"),
-            (degrees < CHECK_DEG, f"moins de {CHECK_DEG}°"),
+            (
+                near or lined_up,
+                f"en médiane, moins de {CHECK_M} m et {CHECK_DEG}°, ou la scène à moins de "
+                f"{DCRE_MEDIAN:.0%} de la diagonale",
+            ),
             (wrong <= WRONG_SHARE * attempts, f"au plus {WRONG_SHARE:.0%} de fausses"),
         ]
         if not met
@@ -1970,6 +1991,7 @@ def _check_area(
         heading = float(rng.uniform(0, 360))
         far = far_from(me)
         true = _cut_view(me, heading)
+        truth = _Truth.of(me, heading, today.blocks)
         there, facing = far[rng.integers(len(far))], float(rng.uniform(0, 360))
         elsewhere = _cut_view(there, facing)
         keep = rng.uniform(*CHECK_KEPT)
@@ -1990,21 +2012,22 @@ def _check_area(
             camera, _, _ = match.locate(
                 fake, others, today.blocks, views, where, trace, heights.origin_z
             )
-            traces[kind].append(_traced(trace, None if kind == "leurre" else (me, heading)))
+            traces[kind].append(_traced(trace, None if kind == "leurre" else truth))
             if camera is None:
                 found[kind].append(None)
                 line.append(f"{kind} rien")
                 continue
-            off = Off(
-                *_off(me, heading, camera.x, camera.y, camera.heading),
-                outlines.contrast(_grey(fake), camera, today.blocks),
+            metres, degrees, dcre = truth.off(
+                camera.x, camera.y, camera.heading, camera.fov, camera.horizon
             )
+            off = Off(metres, degrees, outlines.contrast(_grey(fake), camera, today.blocks), dcre)
             found[kind].append(off)
-            line.append(f"{kind} {off.metres:.1f} m {off.degrees:.1f}° contours {off.outline:.2f}")
+            scene = "" if dcre is None else f" scène {dcre:.1%}"
+            line.append(f"{kind} {metres:.1f} m {degrees:.1f}°{scene} contours {off.outline:.2f}")
         typer.echo(f"{me.id[:8]} : " + ", ".join(line))
 
     def right(off: Off | None) -> bool:
-        return off is not None and _right(off.metres, off.degrees)
+        return off is not None and _right(off.metres, off.degrees, off.dcre)
 
     attempts = len(found) * tries
     wrong = [
@@ -2016,8 +2039,10 @@ def _check_area(
     situated = [off for off in found["vue"] if off is not None]
     metres = register.median([off.metres for off in situated])
     degrees = register.median([off.degrees for off in situated])
+    # a view whose scene is not known lines up with nothing
+    dcre = register.median([np.inf if off.dcre is None else off.dcre for off in situated])
     bands = sum(right(off) for off in found["bande"])
-    wanting = _wanting(tries, len(situated), metres, degrees, len(wrong), attempts)
+    wanting = _wanting(tries, len(situated), metres, degrees, len(wrong), attempts, dcre)
     passed = not wanting
     write_json(_of_matcher(CHECK_TRACE, matcher), {**_per_area(CHECK_TRACE, matcher), name: traces})
     for kind, rows in traces.items():
@@ -2042,6 +2067,7 @@ def _check_area(
         "tries": tries,
         "median_m": metres,
         "median_deg": degrees,
+        "median_dcre": round(dcre, 4),
         "bands_right": bands,
         "wrong": len(wrong),
         "passed": passed,
@@ -2059,35 +2085,93 @@ def _check_area(
     write_json(_of_matcher(MATCH_CHECK, matcher), checks)
     typer.echo(
         f"{name} — vues : {len(situated)} situées sur {tries}, écart médian {metres:.1f} m et "
-        f"{degrees:.1f}° ; bandes vieillies justes : {bands} sur {tries} ; fausses : "
-        f"{len(wrong)} sur {attempts} : "
+        f"{degrees:.1f}° (scène : {dcre:.1%} de la diagonale) ; bandes vieillies justes : "
+        f"{bands} sur {tries} ; fausses : {len(wrong)} sur {attempts} : "
         + ("porte passée" if passed else f"porte NON passée (il faut {', '.join(wanting)})")
     )
 
 
-def _traced(trace: match.Trace, truth: tuple[match.Panorama, float] | None = None) -> dict:
-    """A photo's trace, as kept on disk; with its true camera (a panorama and the heading the
-    view was cut at), how far each camera checked is from it, and whether it is right."""
+def _traced(trace: match.Trace, truth: "_Truth | None" = None) -> dict:
+    """A photo's trace, as kept on disk; with its true camera (`truth`, kept with it), how far
+    each camera checked is from it, and whether it is right."""
     row = asdict(trace)
-    for candidate in row["candidates"] if truth is not None else []:
-        metres, degrees = _off(*truth, candidate["x"], candidate["y"], candidate["heading"])
-        candidate.update(
-            off_m=round(metres, 2), off_deg=round(degrees, 2), right=_right(metres, degrees)
+    if truth is None:
+        return row
+    for c in row["candidates"]:
+        metres, degrees, dcre = truth.off(c["x"], c["y"], c["heading"], c["fov"], c["horizon"])
+        c.update(
+            off_m=round(metres, 2),
+            off_deg=round(degrees, 2),
+            dcre=None if dcre is None else round(dcre, 4),
+            right=_right(metres, degrees, dcre),
         )
+    row["truth"] = {
+        "panorama": truth.panorama,
+        "heading": round(truth.view.heading, 3),
+        "scene": truth.seen is not None,
+    }
     return row
 
 
-def _off(
-    panorama: match.Panorama, heading: float, x: float, y: float, found: float
-) -> tuple[float, float]:
-    """How far a camera found at `x`, `y`, facing `found`, is from the true one: a panorama,
-    with the heading a view of it was cut at (metres, degrees)."""
-    return float(np.hypot(x - panorama.x, y - panorama.y)), abs(angle(heading, found))
+class _Truth(NamedTuple):
+    """The true camera of a view of the known-answer check (cut from a panorama, see
+    _check_view), and the walls it shows (None: too few to judge by, see SCENE_SHARE)."""
+
+    panorama: str
+    view: match.View
+    seen: np.ndarray | None
+
+    @classmethod
+    def of(cls, panorama: match.Panorama, heading: float, blocks) -> "_Truth":
+        view = _check_view(panorama, heading)
+        seen, share = _seen_points(view, blocks)
+        return cls(panorama.id, view, seen if share >= SCENE_SHARE else None)
+
+    def off(
+        self, x: float, y: float, heading: float, fov: float, horizon: float
+    ) -> tuple[float, float, float | None]:
+        """How far a camera found is from it (metres, degrees) and how far off it shows its
+        scene (see _dcre; None: not known); at its height (the check does not judge it)."""
+        true = self.view
+        metres = float(np.hypot(x - true.x, y - true.y))
+        degrees = abs(angle(true.heading, heading))
+        if self.seen is None:
+            return metres, degrees, None
+        found = match.View(x, y, true.z, heading, horizon, fov)
+        return metres, degrees, _dcre(true, found, self.seen)
 
 
-def _right(metres: float, degrees: float) -> bool:
-    """Whether a camera this far from the true one counts as right."""
-    return bool(metres <= RIGHT_M and degrees <= RIGHT_DEG)
+def _right(metres: float, degrees: float, dcre: float | None = None) -> bool:
+    """Whether a camera this far from the true one counts as right: near it, or seeing the
+    scene where it does (`dcre`: see _dcre; None: its scene not known)."""
+    near = metres <= RIGHT_M and degrees <= RIGHT_DEG
+    return bool(near or (dcre is not None and dcre <= DCRE_RIGHT))
+
+
+def _seen_points(view: match.View, blocks) -> tuple[np.ndarray, float]:
+    """The walls a check's view shows (east, north, up; one point per ray of a SCENE_GRID
+    across and down that meets one), and the share of the rays that do."""
+    across = (np.arange(SCENE_GRID) + 0.5) * CHECK_SIDE / SCENE_GRID
+    pixels = np.stack(np.meshgrid(across, across), axis=-1).reshape(-1, 2)
+    size = (CHECK_SIDE, CHECK_SIDE)
+    directions = match.rays(pixels, size, view.fov, view.horizon, view.heading)
+    walls, _ = blocks.hit(np.array([view.x, view.y, view.z]), directions)
+    met = np.isfinite(walls).all(axis=1)
+    return walls[met], float(met.mean())
+
+
+def _dcre(true: match.View, found: match.View, seen: np.ndarray) -> float:
+    """How far from where the `true` view shows them a camera `found` shows the points `seen`:
+    the mean gap, a share of the diagonal (a point outside its picture taken to the edge, as
+    map-free does; one behind it, a whole diagonal)."""
+    size = (CHECK_SIDE, CHECK_SIDE)
+    diagonal = float(np.hypot(*size))
+    there = match.project(true, seen, size)
+    here = match.project(found, seen, size)
+    behind = ~np.isfinite(here).all(axis=1)
+    edge = np.clip(np.where(behind[:, None], 0.0, here), 0, CHECK_SIDE)
+    gaps = np.where(behind, diagonal, np.hypot(*(edge - there).T))
+    return float(gaps.mean() / diagonal) if len(gaps) else float("nan")
 
 
 def _funnel(rows: Iterable[dict]) -> str:
@@ -2103,6 +2187,7 @@ class Off(NamedTuple):
     metres: float
     degrees: float
     outline: float
+    dcre: float | None = None  # how far off it shows the scene (see _dcre; None: not known)
 
 
 def _grey(photo: np.ndarray) -> np.ndarray:
@@ -2127,7 +2212,9 @@ def _check_view(panorama: match.Panorama, heading: float) -> match.View:
 def _cut_view(panorama: match.Panorama, heading: float) -> np.ndarray:
     """A level view of a panorama, as the known-answer check takes for an old photo."""
     picture = cv2.imread(str(panorama.path))
-    return match.perspective(picture, panorama.axes, heading, fov=CHECK_FOV, side=800, pitch=0)
+    return match.perspective(
+        picture, panorama.axes, heading, fov=CHECK_FOV, side=CHECK_SIDE, pitch=0
+    )
 
 
 class Framed(NamedTuple):

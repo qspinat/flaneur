@@ -1,5 +1,6 @@
 import json
 import threading
+from dataclasses import replace
 from types import SimpleNamespace
 
 import cv2
@@ -8,7 +9,7 @@ import pytest
 import typer
 from typer.testing import CliRunner
 
-from flaneur import cli, confirming, depth, facades, match, poses, segment
+from flaneur import blocks, cli, confirming, depth, facades, match, poses, segment
 from flaneur.cli import app
 
 
@@ -22,16 +23,20 @@ def test_help_lists_the_pipeline():
 def test_a_trace_tells_which_camera_turned_down_was_the_right_one():
     trace = match.Trace(points=40, verdict="aucune caméra")
     trace.candidates += [
-        match.Candidate(1.0, 0.5, 92.0, 60.0, 0.5, 30, 0.9, "position incertaine"),
+        match.Candidate(0.5, 1.0, 2.0, 60.0, 0.5, 30, 0.9, "position incertaine"),
+        match.Candidate(6.0, 0.0, 0.0, 60.0, 0.5, 25, 2.0, "position incertaine"),
         match.Candidate(40.0, 0.0, 10.0, 60.0, 0.5, 22, None, "ne peut se tenir là"),
     ]
-    truth = (match.Panorama("p", 0.0, 0.0, 2.5, 0.0, path=None), 90.0)
+    panorama = match.Panorama("p", 0.0, 0.0, 2.5, 0.0, path=None)
+    truth = cli._Truth.of(panorama, 0.0, _wall_north(200.0))  # facing a wall 200 m off
 
     row = cli._traced(trace, truth)
 
-    right, wrong = row["candidates"]
-    assert right["right"] and right["off_m"] == pytest.approx(1.12, abs=0.01)
+    near, aside, wrong = row["candidates"]
+    assert near["right"] and near["off_m"] == pytest.approx(1.12, abs=0.01)
+    assert aside["right"] and aside["off_m"] == 6.0 and aside["dcre"] < cli.DCRE_RIGHT
     assert not wrong["right"] and wrong["spread_m"] is None
+    assert row["truth"] == {"panorama": "p", "heading": 0.0, "scene": True}
     assert cli._funnel([row, row, {"verdict": "située"}]) == "aucune caméra 2 ; située 1"
 
 
@@ -1125,12 +1130,12 @@ def test_an_area_without_decoys_is_left_unchecked_and_the_others_checked(tmp_pat
         "_matching": lambda: (
             heights,
             near_by,
-            lambda year: SimpleNamespace(blocks=None, free=None),
+            lambda year: SimpleNamespace(blocks=blocks.Blocks.of([]), free=None),
         ),
         "_views": lambda matcher="disk": None,
         "_fixed_by_colmap": lambda pictures, fixes: {p.id for p in near_by},
         "_cut_view": lambda panorama, heading: np.zeros((2, 2, 3), np.uint8),
-        "_check_view": lambda panorama, heading: None,
+        "_check_view": lambda p, heading: match.View(p.x, p.y, 0.0, heading, 0.5, 60.0),
         "_marked_by_hand": lambda view, shown, rng: (),
     }.items():
         monkeypatch.setattr(cli, name, value)
@@ -1188,3 +1193,51 @@ def test_a_photo_is_matched_only_by_matchers_checked_in_its_area(
     kept = json.loads((tmp_path / "matches.json").read_text()) if placed else {}
     assert ("x" in kept.get("pm:1", {})) == placed
     assert kept.get("pm:1", {}).get("matcher", "disk") == "disk"
+
+
+def _wall_north(distance: float, height: float = 100.0):
+    """A long building whose south wall stands `distance` m north of the origin."""
+    from flaneur import blocks
+
+    footprint = [
+        (-500.0, distance),
+        (500.0, distance),
+        (500.0, distance + 10),
+        (-500.0, distance + 10),
+    ]
+    return blocks.Blocks.of([(footprint, 0.0, height)])
+
+
+TRUE_VIEW = match.View(0.0, 0.0, 2.5, 0.0, 0.5, 60.0)  # facing north, as a check's views
+
+
+def test_a_check_view_sees_the_wall_ahead_and_nothing_else():
+    seen, share = cli._seen_points(TRUE_VIEW, _wall_north(50.0, height=10.0))
+
+    assert np.allclose(seen[:, 1], 50.0)  # on the wall
+    assert 0.1 < share < 0.6  # the sky above it, the street below: left out
+
+
+def test_a_camera_found_aside_lines_up_with_a_far_scene_not_with_a_near_one():
+    def dcre(distance, **off):
+        seen, _ = cli._seen_points(TRUE_VIEW, _wall_north(distance))
+        return cli._dcre(TRUE_VIEW, replace(TRUE_VIEW, **off), seen)
+
+    assert dcre(200.0) == 0.0
+    assert dcre(200.0, x=5.0) < cli.DCRE_RIGHT  # 5 m aside, 200 m away: 1.4°
+    assert dcre(10.0, x=5.0) > cli.DCRE_RIGHT  # 5 m aside, 10 m away
+    assert dcre(200.0, heading=6.0) > cli.DCRE_RIGHT  # turned: far or near alike
+    assert dcre(200.0, fov=80.0) > cli.DCRE_RIGHT  # zoomed out a third
+
+
+def test_a_camera_far_off_counts_right_when_the_scene_lines_up():
+    assert cli._right(2.0, 3.0)  # near enough, as before
+    assert not cli._right(6.5, 0.3)
+    assert cli._right(6.5, 0.3, dcre=0.02)  # 6.5 m off, the scene 2 % of the diagonal off
+    assert not cli._right(6.5, 0.3, dcre=0.08)
+
+
+def test_an_areas_check_takes_the_scenes_median_when_metres_say_no():
+    assert cli._wanting(20, 20, 3.0, 0.5, 0, 60) != []  # 3 m median: wanting
+    assert cli._wanting(20, 20, 3.0, 0.5, 0, 60, dcre=0.01) == []  # yet the scene lines up
+    assert cli._wanting(20, 20, 3.0, 0.5, 0, 60, dcre=0.03) != []
