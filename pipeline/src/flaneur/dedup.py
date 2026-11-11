@@ -170,7 +170,8 @@ def places(conn: sqlite3.Connection) -> dict[str, BaseGeometry]:
 
 def save(conn: sqlite3.Connection, found: list[set[str]]) -> int:
     """Replace the stored groups with these. Each negative is named after the print that
-    stands for it, on which it is placed and shown: an openly licensed print first, then one already
+    stands for it, on which it is placed and shown: an openly licensed print first (public domain
+    first), then one a person placed rather than only seeded, then one already
     placed as a street view, then one matched to a picture of today, then one whose caption
     says where the camera stood."""
     ids = json.dumps(sorted(i for g in found for i in g))
@@ -178,13 +179,15 @@ def save(conn: sqlite3.Connection, found: list[set[str]]) -> int:
         r["id"]: (
             r["license"] not in db.OPEN_LICENSES,
             r["license"] != "CC0",  # public domain rather than a print that asks for credit
+            r["confidence"] in (None, db.SEED),  # placed by a person, rather than seeded or not
             not r["is_street_view"],
             r["match"] is None,
             r["viewpoint"] is None,
             r["id"],
         )
         for r in conn.execute(
-            "SELECT p.id, p.license, pl.is_street_view, pl.match, r.viewpoint FROM photos p "
+            "SELECT p.id, p.license, pl.confidence, pl.is_street_view, pl.match, r.viewpoint "
+            "FROM photos p "
             "LEFT JOIN placements pl ON pl.photo_id = p.id "
             "LEFT JOIN readings r ON r.photo_id = p.id "
             "WHERE p.id IN (SELECT value FROM json_each(?))",
@@ -195,7 +198,7 @@ def save(conn: sqlite3.Connection, found: list[set[str]]) -> int:
         conn,
         "copies",
         (
-            {"photo_id": i, "negative": min(g, key=lambda j: rank.get(j, (True,) * 5 + (j,)))}
+            {"photo_id": i, "negative": min(g, key=lambda j: rank.get(j, (True,) * 6 + (j,)))}
             for g in found
             for i in g
         ),

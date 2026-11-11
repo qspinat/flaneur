@@ -152,3 +152,146 @@ def test_a_negative_placed_once_gives_its_placement_to_its_other_prints():
     assert by_photo["b"] == placed | {"photo_id": "b"}
     assert by_photo["d"]["is_street_view"] is False
     assert len(found) == 4
+
+
+def _photo(
+    conn, pilot_dir, photo_id, license="CC0", camera=None, kind="unknown", door=None, street=None
+):
+    """A prepared photo of the areas: its record, its reading, where its caption puts it."""
+    from flaneur.gazetteer import to_geojson
+    from flaneur.pilot import safe_name
+
+    lon, lat = camera or (None, None)
+    conn.execute(
+        "INSERT INTO photos (id, source, source_id, license, credit, camera_lon, camera_lat, raw) "
+        "VALUES (?, 'x', ?, ?, 'x', ?, ?, '{}')",
+        (photo_id, photo_id, license, lon, lat),
+    )
+    conn.execute(
+        "INSERT INTO readings (photo_id, method, kind, streets, arrondissements) "
+        "VALUES (?, 'rules', ?, '[]', '[4]')",
+        (photo_id, kind),
+    )
+    if door or street:
+        db.save_locations(
+            conn,
+            [
+                {
+                    "photo_id": photo_id,
+                    "status": "address" if door else "street",
+                    "label": "x",
+                    "street_id": street,
+                    "point": to_geojson(door) if door else None,
+                    "precision_m": 50,
+                }
+            ],
+        )
+    folder = pilot_dir / "photos" / safe_name(photo_id)
+    folder.mkdir(parents=True)
+    (folder / "info.json").write_text(json.dumps({"photo_id": photo_id}))
+    return folder
+
+
+def test_a_photo_with_no_placement_of_its_own_starts_where_its_source_or_caption_puts_it(tmp_path):
+    from shapely.geometry import LineString, Point
+
+    from flaneur import pilot
+    from flaneur.gazetteer import to_degrees, to_geojson, to_metres
+
+    conn = db.connect(tmp_path / "f.sqlite")
+    cite = pilot.AREAS["cite"]
+    door = Point(cite.centroid.x + 20, cite.centroid.y)
+    line = LineString(
+        [
+            (cite.centroid.x - 400, cite.centroid.y + 50),
+            (cite.centroid.x + 400, cite.centroid.y + 50),
+        ]
+    )  # crosses the square
+    conn.execute(
+        "INSERT INTO streets (id, label, status, arrondissements, geometry) "
+        "VALUES ('quai', 'quai aux Fleurs', 'current', '[4]', ?)",
+        (to_geojson(line),),
+    )
+    pilot_dir = tmp_path / "pilot"
+    _photo(conn, pilot_dir, "ak:1", camera=(2.3525, 48.8547))
+    _photo(conn, pilot_dir, "pm:door", door=door)
+    _photo(conn, pilot_dir, "pm:street", street="quai")
+
+    seeds = {s["photo_id"]: s for s in placements.seeds(conn, pilot_dir, pilot.AREA)}
+
+    assert {s["confidence"] for s in seeds.values()} == {placements.SEED}
+    assert all(s["is_street_view"] for s in seeds.values())
+    assert (seeds["ak:1"]["lon"], seeds["ak:1"]["lat"]) == (2.3525, 48.8547)
+    at = to_degrees(door)
+    assert (seeds["pm:door"]["lon"], seeds["pm:door"]["lat"]) == pytest.approx((at.x, at.y))
+    middle = to_metres(Point(seeds["pm:street"]["lon"], seeds["pm:street"]["lat"]))
+    assert middle.within(pilot.AREA) and middle.distance(line) < 0.01
+
+
+def test_no_start_for_an_unverified_image_an_interior_or_a_photo_placed_by_hand(tmp_path):
+    from flaneur import pilot
+
+    conn = db.connect(tmp_path / "f.sqlite")
+    pilot_dir = tmp_path / "pilot"
+    _photo(conn, pilot_dir, "ak:2", license="unverified", camera=(2.3525, 48.8547))
+    _photo(conn, pilot_dir, "pm:inside", kind="interior", door=pilot.AREAS["cite"].centroid)
+    placed = _photo(conn, pilot_dir, "pm:placed", door=pilot.AREAS["cite"].centroid)
+    (placed / "placement.json").write_text("{}")
+
+    assert placements.seeds(conn, pilot_dir, pilot.AREA) == []
+
+
+def test_a_street_known_by_its_footprint_starts_its_photos_on_it(tmp_path):
+    from shapely.geometry import box
+
+    from flaneur import pilot
+    from flaneur.gazetteer import to_geojson
+
+    conn = db.connect(tmp_path / "f.sqlite")
+    centre = pilot.AREAS["cite"].centroid
+    footprint = box(centre.x - 400, centre.y + 40, centre.x + 400, centre.y + 60)  # as stored
+    conn.execute(
+        "INSERT INTO streets (id, label, status, arrondissements, geometry) "
+        "VALUES ('quai', 'quai aux Fleurs', 'current', '[4]', ?)",
+        (to_geojson(footprint),),
+    )
+    _photo(conn, tmp_path / "pilot", "pm:street", street="quai")
+
+    (seed,) = placements.seeds(conn, tmp_path / "pilot", pilot.AREA)
+
+    at = to_metres(Point(seed["lon"], seed["lat"]))
+    assert at.within(footprint) and at.within(pilot.AREA)
+
+
+def test_a_print_given_its_negatives_placement_gets_no_seed(tmp_path):
+    from flaneur import pilot
+
+    conn = db.connect(tmp_path / "f.sqlite")
+    _photo(conn, tmp_path / "pilot", "pm:other", door=pilot.AREAS["cite"].centroid)
+
+    assert placements.seeds(conn, tmp_path / "pilot", pilot.AREA, placed={"pm:other"}) == []
+
+
+def test_a_negative_is_shown_by_the_print_a_person_placed_rather_than_one_only_seeded(tmp_path):
+    from flaneur import dedup
+
+    conn = db.connect(tmp_path / "f.sqlite")
+    for photo_id, confidence in (("pm:a", "seed"), ("pm:b", "high")):
+        conn.execute(
+            "INSERT INTO photos (id, source, source_id, license, credit, raw) "
+            f"VALUES ('{photo_id}', 'pm', '{photo_id}', 'CC0', 'x', '{{}}')"
+        )
+        conn.execute(
+            "INSERT INTO placements (photo_id, is_street_view, lon, lat, confidence) "
+            f"VALUES ('{photo_id}', 1, 2.35, 48.85, '{confidence}')"
+        )
+        folder = tmp_path / "pilot" / "photos" / photo_id.replace(":", "_")
+        folder.mkdir(parents=True)
+        (folder / "info.json").write_text("{}")
+    conn.execute(
+        "INSERT INTO copies (photo_id, negative) VALUES ('pm:a', 'pm:a'), ('pm:b', 'pm:a')"
+    )
+
+    rows = placements.publishable(conn, tmp_path / "pilot", dedup.negatives(conn), seeded=True)
+
+    assert [r["photo_id"] for r in rows] == ["pm:b"]
