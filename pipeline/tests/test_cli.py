@@ -36,7 +36,7 @@ def test_a_trace_tells_which_camera_turned_down_was_the_right_one():
     assert near["right"] and near["off_m"] == pytest.approx(1.12, abs=0.01)
     assert aside["right"] and aside["off_m"] == 6.0 and aside["dcre"] < cli.DCRE_RIGHT
     assert not wrong["right"] and wrong["spread_m"] is None
-    assert row["truth"] == {"panorama": "p", "heading": 0.0}
+    assert row["truth"] == {"panorama": "p", "heading": 0.0, "walls_m": pytest.approx(208, abs=1)}
     assert cli._funnel([row, row, {"verdict": "située"}]) == "aucune caméra 2 ; située 1"
 
 
@@ -1112,8 +1112,8 @@ def test_a_proposed_camera_said_yes_to_wins_over_a_placement_not_judged(monkeypa
 
 
 def test_an_areas_check_passes_only_on_enough_views():
-    assert cli._wanting(10, 10, 10, 0, 30) == []
-    assert cli._wanting(3, 3, 3, 0, 9) == [f"au moins {cli.CHECK_LEAST} vues"]
+    assert cli._wanting(10, 10, 10, 0.3, 0.5, 0, 30) == []
+    assert cli._wanting(3, 3, 3, 0.3, 0.5, 0, 9) == [f"au moins {cli.CHECK_LEAST} vues"]
 
 
 def test_an_area_without_decoys_is_left_unchecked_and_the_others_checked(tmp_path, monkeypatch):
@@ -1152,17 +1152,35 @@ def test_an_area_without_decoys_is_left_unchecked_and_the_others_checked(tmp_pat
     assert set(json.loads((tmp_path / "check.json").read_text())) == {"cite"}
 
 
-def test_an_areas_check_is_stale_once_a_panorama_in_reach_is_segmented(tmp_path, monkeypatch):
+def test_an_areas_check_depends_on_the_segmentation_its_views_were_judged_by(monkeypatch):
+    from flaneur import pilot
+
+    home = pilot.AREAS["saint-severin"].centroid
+    near_by = [_panorama(n, home.x + 10.0 * n, home.y) for n in range(3)]
+    before = cli._check_setup("disk", "saint-severin", near_by, [])
+
+    assert cli._check_setup("disk", "saint-severin", near_by, ["p1"]) != before
+    monkeypatch.setattr(cli, "DCRE_RIGHT", 0.06)  # the rule changed
+    assert cli._check_setup("disk", "saint-severin", near_by, []) != before
+
+
+def test_an_areas_check_is_stale_once_a_view_it_drew_is_segmented(tmp_path, monkeypatch):
     from flaneur import pilot
 
     home = pilot.AREAS["saint-severin"].centroid
     near_by = [_panorama(n, home.x + 10.0 * n, home.y) for n in range(3)]
     monkeypatch.setattr(cli, "VIEW_STRUCTURE", tmp_path)
-    before = cli._check_setup("disk", "saint-severin", near_by)
+    monkeypatch.setattr(cli, "MATCH_CHECK", tmp_path / "match_check.json")
+    setup = cli._check_setup("disk", "saint-severin", near_by, [])
+    check = {"saint-severin": {"passed": True, "setup": setup, "drawn": ["p1"]}}
+    (tmp_path / "match_check.json").write_text(json.dumps(check))
+    assert "disk" in cli._checked_in(near_by)["saint-severin"]
 
-    (tmp_path / f"{cli._levelled_name(near_by[1])}.npz").write_bytes(b"")  # `flaneur segmenter`
-
-    assert cli._check_setup("disk", "saint-severin", near_by) != before
+    kept = tmp_path / f"{cli._levelled_name(near_by[2])}.npz"  # a neighbour, not drawn
+    np.savez(kept, model=segment.MODEL)
+    assert "disk" in cli._checked_in(near_by)["saint-severin"]
+    np.savez(tmp_path / f"{cli._levelled_name(near_by[1])}.npz", model=segment.MODEL)
+    assert "disk" not in cli._checked_in(near_by)["saint-severin"]
 
 
 def test_an_areas_check_holds_while_panoramas_are_added_elsewhere():
@@ -1198,7 +1216,7 @@ def test_a_photo_is_matched_only_by_matchers_checked_in_its_area(
     _match_world(tmp_path, monkeypatch, {}, lambda matcher: CAMERA)
     monkeypatch.setattr(cli, "MATCH_CHECK", tmp_path / "match_check.json")
     monkeypatch.setattr(cli, "_area_of", lambda here: "cite")  # where the photos stand
-    check = {passed_in: {"passed": True, "setup": cli._check_setup("disk", passed_in, [])}}
+    check = {passed_in: {"passed": True, "setup": cli._check_setup("disk", passed_in, [], [])}}
     (tmp_path / "match_check.json").write_text(json.dumps(check))  # DISK's, checked there only
 
     cli.match_photos(photo=None, again=False, force=False)
@@ -1251,24 +1269,40 @@ def test_a_camera_found_aside_lines_up_with_a_far_scene_not_with_a_near_one():
     assert dcre(200.0, fov=80.0) > cli.DCRE_RIGHT  # zoomed out a third
 
 
-def test_a_camera_far_off_counts_right_when_the_scene_lines_up():
+def test_a_camera_far_off_counts_right_when_the_scene_lines_up_far_off():
     assert cli._right(2.0, 3.0)  # near enough, as before
     assert not cli._right(6.5, 0.3)
-    assert cli._right(6.5, 0.3, dcre=0.02)  # 6.5 m off, the scene 2 % of the diagonal off
-    assert not cli._right(6.5, 0.3, dcre=0.08)
+    assert cli._right(6.5, 0.3, dcre=0.02, distance=200.0)  # walls 200 m off: 10 m allowed
+    assert not cli._right(6.5, 0.3, dcre=0.08, distance=200.0)  # the scene off
+    assert not cli._right(6.5, 0.3, dcre=0.02, distance=60.0)  # walls 60 m off: 3 m, as before
+    assert not cli._right(20.0, 10.5, dcre=0.014, distance=100.0)  # aside and turned back to it
 
 
-def test_a_view_is_found_precisely_near_its_camera_or_lined_up_with_its_scene():
+def test_a_camera_far_back_with_a_narrower_view_is_wrong_though_it_lines_a_wall_up():
+    panorama = match.Panorama("p", 0.0, 0.0, 2.5, 0.0, path=None)
+    truth = cli._Truth.of(panorama, 0.0, _wall_north(200.0), None)
+    narrow = float(np.degrees(2 * np.arctan(np.tan(np.radians(30)) * 200 / 250)))
+    metres, degrees, dcre = truth.off(match.View(0.0, -50.0, 2.5, 0.0, 0.5, narrow))
+
+    assert dcre < 0.001  # a flat wall far off cannot tell
+    assert not cli._right(metres, degrees, dcre, truth.distance)
+    assert not cli._precise(metres, degrees, dcre, truth.distance)
+
+
+def test_a_view_is_found_precisely_near_its_camera_or_lined_up_with_its_scene_far_off():
     assert cli._precise(0.3, 0.5)  # a street: decimetres
     assert not cli._precise(3.0, 0.5)
-    assert cli._precise(3.0, 0.5, dcre=0.01)  # across the river: the scene lines up
-    assert not cli._precise(3.0, 0.5, dcre=0.03)
+    assert cli._precise(3.0, 0.5, dcre=0.01, distance=200.0)  # across the river: 4 m allowed
+    assert not cli._precise(3.0, 0.5, dcre=0.03, distance=200.0)
+    assert not cli._precise(5.0, 0.5, dcre=0.01, distance=200.0)
+    assert not cli._precise(3.0, 2.5, dcre=0.01, distance=200.0)  # turned
 
 
 def test_an_area_of_near_and_far_views_passes_when_half_are_precise_either_way():
-    near = [cli._precise(0.3, 0.2, dcre=0.031)] * 10  # a street: 0.3 m, yet 3 % of a near wall
-    far = [cli._precise(5.0, 0.3, dcre=0.01)] * 10  # a quay 200 m off: 5 m, 1 %
+    near = [cli._precise(0.3, 0.2, dcre=0.031, distance=10.0)] * 10  # 0.3 m, 3 % of a near wall
+    far = [cli._precise(3.5, 0.3, dcre=0.01, distance=200.0)] * 10  # a quay 200 m off: 3.5 m
     precise = sum(near + far)
 
-    assert cli._wanting(20, 20, precise, 0, 60) == []
-    assert cli._wanting(20, 20, 9, 0, 60) != []  # fewer than half
+    assert cli._wanting(20, 20, precise, 2.0, 0.3, 0, 60) == []  # the median: 2 m
+    assert cli._wanting(20, 20, 9, 2.0, 0.3, 0, 60) != []  # fewer than half
+    assert cli._wanting(20, 20, 0, 0.5, 1.0, 0, 60) == []  # the medians, as before
