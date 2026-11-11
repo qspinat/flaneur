@@ -21,15 +21,35 @@ from pathlib import Path
 
 import httpx
 from PIL import Image, ImageDraw
-from shapely.geometry import Point, box
+from shapely.geometry import Point, Polygon, box
+from shapely.ops import unary_union
 
 from flaneur import crop, db, dedup, panoramax
 from flaneur.gazetteer import from_geojson, to_metres
 from flaneur.sources import write_json
 
-# 500 m square around the densest point measured (48.8518 N, 2.3459 E).
-CENTRE = to_metres(Point(2.3459, 48.8518))
-AREA = box(CENTRE.x - 250, CENTRE.y - 250, CENTRE.x + 250, CENTRE.y + 250)
+HALF_SIDE_M = 250  # each area: a 500 m square
+
+
+def _square(lon: float, lat: float) -> Polygon:
+    centre = to_metres(Point(lon, lat))
+    return box(
+        centre.x - HALF_SIDE_M,
+        centre.y - HALF_SIDE_M,
+        centre.x + HALF_SIDE_M,
+        centre.y + HALF_SIDE_M,
+    )
+
+
+# The areas walked, each a square around the densest point measured in it: Saint-Séverin (the
+# pilot, 5e), then the Île de la Cité (4e, 11/11: next to the pilot by the Petit-Pont, with 195
+# Albert-Kahn photos whose camera position is known).
+AREAS = {
+    "saint-severin": _square(2.3459, 48.8518),
+    "cite": _square(2.35251, 48.85467),
+}
+CENTRE = AREAS["saint-severin"].centroid  # the pilot's
+AREA = unary_union(list(AREAS.values()))
 # A street belongs to the pilot when at least this share of its footprint is inside.
 INSIDE_SHARE = 0.5
 # Photos with a camera position from the caption: around it, not along the whole street.

@@ -51,3 +51,48 @@ def test_a_photo_placed_at_a_door_of_a_street_no_longer_known_is_in_the_pilot(tm
     )
 
     assert [r["id"] for r in pilot.select(conn)] == ["pm:1"]
+
+
+def _at_a_door(tmp_path, point):
+    from flaneur import db
+    from flaneur.gazetteer import to_geojson
+
+    conn = db.connect(tmp_path / "f.sqlite")
+    conn.execute(
+        "INSERT INTO photos (id, source, source_id, title, license, credit, image_url, raw) "
+        "VALUES ('pm:1', 'pm', '1', 'Rue', 'CC0', 'x', 'http://img/1', '{}')"
+    )
+    db.save_locations(
+        conn,
+        [
+            {
+                "photo_id": "pm:1",
+                "status": "address",
+                "label": "1 rue",
+                "street_id": None,
+                "point": to_geojson(point),
+                "precision_m": 50,
+            }
+        ],
+    )
+    return conn
+
+
+def test_a_photo_on_the_ile_de_la_cite_is_in_the_walk_too(tmp_path):
+    from shapely.geometry import Point
+
+    from flaneur.gazetteer import to_metres
+
+    conn = _at_a_door(tmp_path, to_metres(Point(2.35251, 48.85467)))  # the Cité's square
+
+    assert [r["id"] for r in pilot.select(conn)] == ["pm:1"]
+
+
+def test_a_photo_outside_every_area_is_not(tmp_path):
+    from shapely.geometry import Point
+
+    from flaneur.gazetteer import to_metres
+
+    conn = _at_a_door(tmp_path, to_metres(Point(2.3300, 48.8700)))  # by the Opéra
+
+    assert pilot.select(conn) == []
