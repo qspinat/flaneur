@@ -85,3 +85,16 @@ def test_a_negative_is_named_after_an_openly_licensed_print_first(tmp_path):
     dedup.save(conn, [{"ak:0", "ak:1"}])
 
     assert {r[0] for r in conn.execute("SELECT negative FROM copies")} == {"ak:1"}
+
+
+def test_a_public_domain_print_is_preferred_to_one_that_asks_for_credit(tmp_path):
+    conn = db.connect(tmp_path / "f.sqlite")
+    for photo_id, license in (("ak:0", "CC-BY-4.0"), ("ak:1", "CC0")):
+        conn.execute(
+            "INSERT INTO photos (id, source, source_id, license, credit, raw) "
+            f"VALUES ('{photo_id}', 'ak', '{photo_id}', '{license}', 'x', '{{}}')"
+        )
+
+    dedup.save(conn, [{"ak:0", "ak:1"}])
+
+    assert {r[0] for r in conn.execute("SELECT negative FROM copies")} == {"ak:1"}

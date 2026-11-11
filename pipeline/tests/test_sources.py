@@ -54,13 +54,18 @@ CC0 = "Librement réutilisable (CC-00) - Domaine Public"
 CC_BY = "Librement réutilisable (CC-BY-4.0)"
 
 
-def _licensed(record: dict, label: str | None, transferable: str | None = None):
-    row = {
+def _row(record: dict, label: str | None, transferable: str | None = None) -> dict:
+    return {
         "identifiant_fakir": record["identifiant_fakir"],
         "licence_reutilisation_1": label,
         "droits_cessibles": transferable,
     }
-    return albert_kahn.parse(record, {record["identifiant_fakir"]: row})
+
+
+def _licensed(record: dict, label: str | None, transferable: str | None = None):
+    return albert_kahn.parse(
+        record, albert_kahn.licences_by_id([_row(record, label, transferable)])
+    )
 
 
 def test_albert_kahn_image_takes_the_licence_the_museum_gives_it(load_fixture):
@@ -83,6 +88,7 @@ def test_albert_kahn_credit_names_the_museum_and_the_inventory_number(load_fixtu
     [
         (None, CC0, "Non"),  # not transferable, said on the licence row
         ("Non", CC0, None),  # said on the Paris record
+        (None, CC0, "non cessible "),  # however it is spelt
         (None, "Droits réservés", None),  # another licence
     ],
 )
@@ -92,6 +98,16 @@ def test_albert_kahn_image_stays_unverified_without_a_transferable_open_licence(
     record = {**load_fixture("albert_kahn_passage_du_caire.json"), "droits_cessibles": on_record}
 
     assert _licensed(record, label, transferable=on_licence).license == "unverified"
+
+
+def test_an_image_listed_twice_keeps_its_most_restrictive_row(load_fixture):
+    record = load_fixture("albert_kahn_passage_du_caire.json")
+    rows = [_row(record, CC_BY), _row(record, CC0, "Non")]
+
+    assert albert_kahn.parse(record, albert_kahn.licences_by_id(rows)).license == "unverified"
+    assert albert_kahn.licences_by_id([_row(record, CC0), _row(record, CC_BY)]) == {
+        "IF36953": "unverified"
+    }
 
 
 def _fake_api(total: int, broken: set[int] = frozenset()) -> httpx.Client:

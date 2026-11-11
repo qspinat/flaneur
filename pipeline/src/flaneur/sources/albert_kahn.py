@@ -8,7 +8,7 @@ domain (CC0) or CC BY 4.0; an image it marks as not transferable, or does not li
 """
 
 import re
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterable, Iterator, Mapping
 from pathlib import Path
 
 import httpx
@@ -50,10 +50,30 @@ def fetch(client: httpx.Client, cache_dir: Path) -> list[dict]:
     return _cached_export(client, EXPORT_URL, cache_dir / "export.json")
 
 
-def fetch_licences(client: httpx.Client, cache_dir: Path) -> dict[str, dict]:
-    """Each image's licence row in the whole collection, by its id."""
-    rows = _cached_export(client, LICENCES_URL, cache_dir / "licences.json")
-    return {row["identifiant_fakir"]: row for row in rows}
+def fetch_licences(client: httpx.Client, cache_dir: Path) -> dict[str, str]:
+    """Each image's licence in the whole collection, by its id (see licences_by_id)."""
+    return licences_by_id(_cached_export(client, LICENCES_URL, cache_dir / "licences.json"))
+
+
+def _refused(transferable: str | None) -> bool:
+    """Whether the museum says the rights are not transferable ("Non", however spelt): any
+    word there refuses, so an unexpected one keeps the image off the site."""
+    return bool((transferable or "").strip())
+
+
+def licences_by_id(rows: Iterable[dict]) -> dict[str, str]:
+    """ "CC0" or "CC-BY-4.0" for each image the museum gives one of them, else "unverified";
+    an image listed twice keeps its most restrictive row."""
+    found: dict[str, str] = {}
+    for row in rows:
+        licence = (
+            "unverified"
+            if _refused(row.get("droits_cessibles"))
+            else LICENCES.get(row.get("licence_reutilisation_1"), "unverified")
+        )
+        image = row["identifiant_fakir"]
+        found[image] = licence if found.get(image, licence) == licence else "unverified"
+    return found
 
 
 def harvest(client: httpx.Client, cache_dir: Path) -> Iterator[Photo]:
@@ -61,17 +81,15 @@ def harvest(client: httpx.Client, cache_dir: Path) -> Iterator[Photo]:
     return (parse(record, licences) for record in fetch(client, cache_dir))
 
 
-def licence_of(record: dict, licences: Mapping[str, dict]) -> str:
-    """ "CC0" or "CC-BY-4.0" as the museum gives it; "unverified" when the image is not listed,
-    not transferable ("droits non cessibles") or under another licence."""
-    row = licences.get(record["identifiant_fakir"])
-    # "not transferable" may be written on the Paris extract's record or on the licence row
-    if row is None or "Non" in (record.get("droits_cessibles"), row.get("droits_cessibles")):
+def licence_of(record: dict, licences: Mapping[str, str]) -> str:
+    """The image's licence from `licences` (licences_by_id); "unverified" when it is not listed
+    or the Paris extract's own record says its rights are not transferable."""
+    if _refused(record.get("droits_cessibles")):
         return "unverified"
-    return LICENCES.get(row.get("licence_reutilisation_1"), "unverified")
+    return licences.get(record["identifiant_fakir"], "unverified")
 
 
-def parse(record: dict, licences: Mapping[str, dict]) -> Photo:
+def parse(record: dict, licences: Mapping[str, str]) -> Photo:
     date_text = record.get("date_de_prise_de_vue")
     years = [int(y) for y in YEAR.findall(date_text or "")]
     geo = record.get("geo_point") or {}

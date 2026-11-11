@@ -48,6 +48,8 @@ LICENSES = {
     "etalab-2.0": "Licence Ouverte 2.0",
     "CC-BY-SA-4.0": "CC BY-SA 4.0",
 }
+# Licences that ask for any change to the image to be said (CC BY 4.0, section 3(a)(1)(B)).
+CHANGES_SAID = {"CC-BY-4.0"}
 
 
 def panoramax_credit(picture: panoramax.Picture) -> str:
@@ -212,6 +214,7 @@ def photos(
         # the crop drawn or accepted by hand on this very print, else the one proposed
         own = decided if decided and decided["id"] == f"photo:{r['photo_id']}" else {}
         frame = own.get("crop") or info.get("suggested_crop")
+        cropped = frame not in (None, [0, 0, 1, 1])
         walk.append(
             WalkPhoto(
                 id=r["photo_id"],
@@ -220,7 +223,8 @@ def photos(
                 years=info["years"],
                 photographer=display_name(r["photographer"]),
                 credit=f"{r['credit']}, {LICENSES.get(r['license'], r['license'])}"
-                + ("; image retournée" if flipped else ""),
+                + ("; image retournée" if flipped else "")
+                + ("; image recadrée" if cropped and r["license"] in CHANGES_SAID else ""),
                 record_url=https_or_none(r["record_url"]),
                 lon=place["lon"],
                 lat=place["lat"],
@@ -228,7 +232,7 @@ def photos(
                 street=plate_name(r["street"]) if r["street"] else None,
                 arrondissement=(json.loads(r["arrondissements"] or "[]") or [None])[0],
                 image_url=r["image_url"],
-                crop=None if frame == [0, 0, 1, 1] else frame,
+                crop=frame if cropped else None,
                 reviewed=by_hand is not None,
                 moved_by_review=bool(by_hand) and _moved(r, by_hand),
                 flipped=flipped,

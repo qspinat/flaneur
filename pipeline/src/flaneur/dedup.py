@@ -177,6 +177,7 @@ def save(conn: sqlite3.Connection, found: list[set[str]]) -> int:
     rank = {
         r["id"]: (
             r["license"] not in db.OPEN_LICENSES,
+            r["license"] != "CC0",  # public domain rather than a print that asks for credit
             not r["is_street_view"],
             r["match"] is None,
             r["viewpoint"] is None,
@@ -194,7 +195,7 @@ def save(conn: sqlite3.Connection, found: list[set[str]]) -> int:
         conn,
         "copies",
         (
-            {"photo_id": i, "negative": min(g, key=lambda j: rank.get(j, (True,) * 4 + (j,)))}
+            {"photo_id": i, "negative": min(g, key=lambda j: rank.get(j, (True,) * 5 + (j,)))}
             for g in found
             for i in g
         ),
