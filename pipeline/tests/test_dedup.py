@@ -3,7 +3,7 @@ import pytest
 from PIL import Image, ImageDraw, ImageEnhance
 from shapely.geometry import Point
 
-from flaneur import dedup
+from flaneur import db, dedup
 
 
 def _street(seed: int) -> Image.Image:
@@ -75,8 +75,6 @@ def test_a_print_dated_only_by_its_end_year_still_counts():
 
 
 def test_a_negative_is_named_after_an_openly_licensed_print_first(tmp_path):
-    from flaneur import db
-
     conn = db.connect(tmp_path / "f.sqlite")
     for photo_id, license in (("ak:0", "unverified"), ("ak:1", "CC-BY-4.0")):
         conn.execute(

@@ -313,3 +313,9 @@ def test_a_cc_by_photo_is_published_with_its_credit_and_an_unverified_one_is_not
     (walk,) = export.photos(conn, tmp_path / "pilot", tmp_path / "reviews.jsonl")
 
     assert (walk.id, walk.credit) == ("pm:1", "Musée, A 1, CC BY 4.0")
+
+
+def test_every_licence_that_may_be_published_is_named_under_the_photo():
+    from flaneur import db
+
+    assert set(db.OPEN_LICENSES) <= set(export.LICENSES)

@@ -13,6 +13,8 @@ const out = process.argv[3] ?? 'screenshots';
 mkdirSync(out, { recursive: true });
 
 const failures = [];
+// the licences a photo may be shown under, as named under it (pipeline: export.LICENSES)
+const OPEN_LICENCE = /domaine public \(CC0\)|CC BY 4\.0/;
 const check = (ok, what) => {
   if (!ok) failures.push(what);
   console.log(`${ok ? 'ok ' : 'NOT'} ${what}`);
@@ -68,7 +70,7 @@ for (const [name, viewport] of [['portable', { width: 1440, height: 900 }], ['te
 
   const hash = () => page.evaluate(() => decodeURIComponent(location.hash.slice(2)));
   check((await hash()) === start.id, `${name}: the URL names the photo shown`);
-  check((await page.textContent('#credit')).includes('CC0'), `${name}: credit and licence shown`);
+  check(OPEN_LICENCE.test(await page.textContent('#credit')), `${name}: credit and licence shown`);
 
   const ways = await page.$$eval('.onward', (els) => els.map((e) => e.dataset.way));
   const expected = Object.entries(start.links).filter(([, l]) => l).map(([w]) => w);
@@ -183,7 +185,7 @@ for (const photo of walk.photos) {
   await page.goto(`${base}#/${encodeURIComponent(photo.id)}`);
   await page.waitForFunction(() => document.getElementById('photo').naturalWidth > 0);
   const credit = await page.textContent('#credit');
-  if (credit.includes(photo.credit) && credit.includes('CC0')) shown += 1;
+  if (credit.includes(photo.credit) && OPEN_LICENCE.test(credit)) shown += 1;
 }
 check(shown === walk.photos.length, `every photo opens with its credit (${shown}/${walk.photos.length})`);
 await browser.close();

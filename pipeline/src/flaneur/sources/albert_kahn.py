@@ -24,7 +24,7 @@ EXPORT_URL = (
 LICENCES_URL = (
     "https://opendata.hauts-de-seine.fr/api/explore/v2.1/catalog/datasets/"
     "archives-de-la-planete/exports/json"
-    "?select=identifiant_fakir,operateur,licence_reutilisation_1,droits_cessibles"
+    "?select=identifiant_fakir,licence_reutilisation_1,droits_cessibles"
 )
 LICENCES = {
     "Librement réutilisable (CC-00) - Domaine Public": "CC0",
@@ -34,26 +34,25 @@ CREDIT = "Département des Hauts-de-Seine, musée départemental Albert-Kahn"
 YEAR = re.compile(r"\b(1[89]\d\d)\b")
 
 
-def fetch(client: httpx.Client, cache_dir: Path) -> list[dict]:
-    """Return every record; the export is downloaded once and kept on disk."""
+def _cached_export(client: httpx.Client, url: str, path: Path) -> list[dict]:
+    """The rows of an export, downloaded once and kept on disk."""
 
     def download() -> list[dict]:
-        response = client.get(EXPORT_URL)
+        response = client.get(url)
         response.raise_for_status()
         return response.json()
 
-    return cached_json(cache_dir / "export.json", download)
+    return cached_json(path, download)
+
+
+def fetch(client: httpx.Client, cache_dir: Path) -> list[dict]:
+    """Return every record of the Paris extract."""
+    return _cached_export(client, EXPORT_URL, cache_dir / "export.json")
 
 
 def fetch_licences(client: httpx.Client, cache_dir: Path) -> dict[str, dict]:
-    """Each image's licence row in the whole collection, by its id; downloaded once."""
-
-    def download() -> list[dict]:
-        response = client.get(LICENCES_URL)
-        response.raise_for_status()
-        return response.json()
-
-    rows = cached_json(cache_dir / "licences.json", download)
+    """Each image's licence row in the whole collection, by its id."""
+    rows = _cached_export(client, LICENCES_URL, cache_dir / "licences.json")
     return {row["identifiant_fakir"]: row for row in rows}
 
 
@@ -66,12 +65,13 @@ def licence_of(record: dict, licences: Mapping[str, dict]) -> str:
     """ "CC0" or "CC-BY-4.0" as the museum gives it; "unverified" when the image is not listed,
     not transferable ("droits non cessibles") or under another licence."""
     row = licences.get(record["identifiant_fakir"])
+    # "not transferable" may be written on the Paris extract's record or on the licence row
     if row is None or "Non" in (record.get("droits_cessibles"), row.get("droits_cessibles")):
         return "unverified"
     return LICENCES.get(row.get("licence_reutilisation_1"), "unverified")
 
 
-def parse(record: dict, licences: Mapping[str, dict] = {}) -> Photo:
+def parse(record: dict, licences: Mapping[str, dict]) -> Photo:
     date_text = record.get("date_de_prise_de_vue")
     years = [int(y) for y in YEAR.findall(date_text or "")]
     geo = record.get("geo_point") or {}

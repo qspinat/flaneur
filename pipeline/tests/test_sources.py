@@ -41,7 +41,7 @@ def test_paris_musees_null_entities_from_the_api_are_dropped(tmp_path):
 
 
 def test_albert_kahn_record_keeps_its_camera_position_and_unverified_image(load_fixture):
-    photo = albert_kahn.parse(load_fixture("albert_kahn_passage_du_caire.json"))
+    photo = albert_kahn.parse(load_fixture("albert_kahn_passage_du_caire.json"), {})
 
     assert photo.id == "albert_kahn:IF36953"
     assert (photo.camera_lat, photo.camera_lon) == (48.868362, 2.349735)
@@ -78,13 +78,20 @@ def test_albert_kahn_credit_names_the_museum_and_the_inventory_number(load_fixtu
     )
 
 
-def test_albert_kahn_image_stays_unverified_without_a_transferable_open_licence(load_fixture):
-    record = load_fixture("albert_kahn_passage_du_caire.json")
+@pytest.mark.parametrize(
+    ("on_record", "label", "on_licence"),
+    [
+        (None, CC0, "Non"),  # not transferable, said on the licence row
+        ("Non", CC0, None),  # said on the Paris record
+        (None, "Droits réservés", None),  # another licence
+    ],
+)
+def test_albert_kahn_image_stays_unverified_without_a_transferable_open_licence(
+    load_fixture, on_record, label, on_licence
+):
+    record = {**load_fixture("albert_kahn_passage_du_caire.json"), "droits_cessibles": on_record}
 
-    assert _licensed(record, CC0, transferable="Non").license == "unverified"
-    assert _licensed({**record, "droits_cessibles": "Non"}, CC0).license == "unverified"
-    assert _licensed(record, "Droits réservés").license == "unverified"
-    assert albert_kahn.parse(record, {}).license == "unverified"
+    assert _licensed(record, label, transferable=on_licence).license == "unverified"
 
 
 def _fake_api(total: int, broken: set[int] = frozenset()) -> httpx.Client:
