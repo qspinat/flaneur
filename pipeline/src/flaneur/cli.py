@@ -756,7 +756,7 @@ CHECK_SIDE = 800  # pixels
 # the mean gap between their projections, a share of the view's diagonal (DCRE, Wald et al.,
 # ECCV 2020; map-free relocalization's 5 %). 5° at the centre of a check's view is 5.4 %, 2° 2.1 %.
 DCRE_RIGHT = 0.05
-DCRE_MEDIAN = 0.02  # the check's median, as CHECK_DEG
+DCRE_PRECISE = 0.02  # and found precisely under this, as under CHECK_M and CHECK_DEG
 SCENE_GRID = 24  # rays across and down a view, for the walls it shows
 SCENE_SHARE = 0.1  # of them meeting a wall, for its scene to be known (the rest: sky, street)
 MARKED_TO = 0.015  # a landmark's column, marked by hand: off by this (a share of the width)
@@ -1105,12 +1105,15 @@ def _area_of(here: tuple[float, float]) -> str:
 def _check_setup(matcher: str, area: str, near_by: list[match.Panorama]) -> str:
     """What a matcher's known-answer check in an `area` depends on: the panoramas within reach
     of it (MATCH_RADIUS_M: its views' and those they are compared with, see _check_area; where
-    each stands, faces and leans: see _scene_of), the code, and for LoMa-G its own
-    code and LoMa's revision. Panoramas added or moved elsewhere leave it be."""
+    each stands, faces and leans: see _scene_of; those segmented, which tell its views' walls,
+    see _seen_points), the code, and for LoMa-G its own code and LoMa's revision. Panoramas
+    added or moved elsewhere leave it be."""
     reach = pilot.AREAS[area].buffer(MATCH_RADIUS_M)
     inside = sorted((p for p in near_by if reach.contains(Point(p.x, p.y))), key=lambda p: p.id)
     centre = pilot.AREAS[area].centroid
-    setup = f"{area}:{_scene_of(inside, (centre.x, centre.y), _code())}"
+    segmented = [p.id for p in inside if (VIEW_STRUCTURE / f"{_levelled_name(p)}.npz").exists()]
+    scene = _scene_of(inside, (centre.x, centre.y), _code())
+    setup = f"{area}:{hashlib.sha1(f'{scene}{segmented}'.encode()).hexdigest()[:16]}"
     if matcher == DISK:
         return setup
     from importlib import metadata
@@ -1928,30 +1931,27 @@ def match_check(
         )
 
 
-def _wanting(
-    tries: int,
-    situated: int,
-    metres: float,
-    degrees: float,
-    wrong: int,
-    attempts: int,
-    dcre: float | None = None,
-) -> list[str]:
-    """What a known-answer check lacks to pass (none: it passes): of its `tries` views,
-    `situated` found (`metres`, `degrees`: their median distance to the truth; `dcre`: their
-    median gap on the scene, see _dcre), `wrong` cameras among all its `attempts` (views, bands
-    and decoys)."""
+def _precise(metres: float, degrees: float, dcre: float | None = None) -> bool:
+    """Whether a view was found precisely: under CHECK_M and CHECK_DEG of its camera, or its
+    scene under DCRE_PRECISE off (see _dcre): a street's view by the first, a quay's seen from
+    across the river by the second, an area of both by either."""
     near = metres < CHECK_M and degrees < CHECK_DEG
-    lined_up = dcre is not None and dcre < DCRE_MEDIAN
+    return bool(near or (dcre is not None and dcre < DCRE_PRECISE))
+
+
+def _wanting(tries: int, situated: int, precise: int, wrong: int, attempts: int) -> list[str]:
+    """What a known-answer check lacks to pass (none: it passes): of its `tries` views,
+    `situated` found, `precise` of them precisely (see _precise), `wrong` cameras among all its
+    `attempts` (views, bands and decoys)."""
     return [
         need
         for met, need in [
             (tries >= CHECK_LEAST, f"au moins {CHECK_LEAST} vues"),
             (situated >= CHECK_SHARE * tries, f"au moins {CHECK_SHARE:.0%} situées"),
             (
-                near or lined_up,
-                f"en médiane, moins de {CHECK_M} m et {CHECK_DEG}°, ou la scène à moins de "
-                f"{DCRE_MEDIAN:.0%} de la diagonale",
+                precise >= situated / 2,
+                f"la moitié des situées à moins de {CHECK_M} m et {CHECK_DEG}°, ou leur scène à "
+                f"moins de {DCRE_PRECISE:.0%} de la diagonale",
             ),
             (wrong <= WRONG_SHARE * attempts, f"au plus {WRONG_SHARE:.0%} de fausses"),
         ]
@@ -1970,7 +1970,7 @@ def _check_area(
     today: "Then",
     shown: Callable[[match.View], tuple[match.Sight, ...]],
     views,
-    seeing: Callable[[match.Panorama, np.ndarray], np.ndarray] | None = None,
+    seeing: Callable[[match.Panorama, np.ndarray], np.ndarray],
 ) -> None:
     """One area's known-answer check (see match_check): its views cut from the panoramas COLMAP
     placed in it, its decoys from its own streets far from them, its result kept for it alone."""
@@ -2005,7 +2005,7 @@ def _check_area(
         others = _nearest(near_by, me.x, me.y, MATCH_RADIUS_M, but=me.id)[:MATCH_PANORAMAS]
         # the landmarks each fake shows, marked as by hand (as near): the band's are the true
         # view's inside it (the rest stands for houses rebuilt since, not for another place)
-        seen = _marked_by_hand(_check_view(me, heading), shown, marking)
+        seen = _marked_by_hand(truth.view, shown, marking)
         seen_there = _marked_by_hand(_check_view(there, facing), shown, marking)
         sights = (seen, tuple(s for s in seen if span[0] <= s.column <= span[1]), seen_there)
         line = []
@@ -2021,9 +2021,7 @@ def _check_area(
                 found[kind].append(None)
                 line.append(f"{kind} rien")
                 continue
-            metres, degrees, dcre = truth.off(
-                camera.x, camera.y, camera.heading, camera.fov, camera.horizon
-            )
+            metres, degrees, dcre = truth.off(camera)
             off = Off(metres, degrees, outlines.contrast(_grey(fake), camera, today.blocks), dcre)
             found[kind].append(off)
             scene = "" if dcre is None else f" scène {dcre:.1%}"
@@ -2043,10 +2041,9 @@ def _check_area(
     situated = [off for off in found["vue"] if off is not None]
     metres = register.median([off.metres for off in situated])
     degrees = register.median([off.degrees for off in situated])
-    # a view whose scene is not known lines up with nothing
-    dcre = register.median([np.inf if off.dcre is None else off.dcre for off in situated])
+    precise = sum(_precise(off.metres, off.degrees, off.dcre) for off in situated)
     bands = sum(right(off) for off in found["bande"])
-    wanting = _wanting(tries, len(situated), metres, degrees, len(wrong), attempts, dcre)
+    wanting = _wanting(tries, len(situated), precise, len(wrong), attempts)
     passed = not wanting
     write_json(_of_matcher(CHECK_TRACE, matcher), {**_per_area(CHECK_TRACE, matcher), name: traces})
     for kind, rows in traces.items():
@@ -2071,7 +2068,7 @@ def _check_area(
         "tries": tries,
         "median_m": metres,
         "median_deg": degrees,
-        "median_dcre": round(dcre, 4),
+        "precise": precise,
         "bands_right": bands,
         "wrong": len(wrong),
         "passed": passed,
@@ -2089,7 +2086,7 @@ def _check_area(
     write_json(_of_matcher(MATCH_CHECK, matcher), checks)
     typer.echo(
         f"{name} — vues : {len(situated)} situées sur {tries}, écart médian {metres:.1f} m et "
-        f"{degrees:.1f}° (scène : {dcre:.1%} de la diagonale) ; bandes vieillies justes : "
+        f"{degrees:.1f}° (précises : {precise}) ; bandes vieillies justes : "
         f"{bands} sur {tries} ; fausses : {len(wrong)} sur {attempts} : "
         + ("porte passée" if passed else f"porte NON passée (il faut {', '.join(wanting)})")
     )
@@ -2102,18 +2099,15 @@ def _traced(trace: match.Trace, truth: "_Truth | None" = None) -> dict:
     if truth is None:
         return row
     for c in row["candidates"]:
-        metres, degrees, dcre = truth.off(c["x"], c["y"], c["heading"], c["fov"], c["horizon"])
+        found = match.View(c["x"], c["y"], 0.0, c["heading"], c["horizon"], c["fov"])
+        metres, degrees, dcre = truth.off(found)
         c.update(
             off_m=round(metres, 2),
             off_deg=round(degrees, 2),
             dcre=None if dcre is None else round(dcre, 4),
             right=_right(metres, degrees, dcre),
         )
-    row["truth"] = {
-        "panorama": truth.panorama,
-        "heading": round(truth.view.heading, 3),
-        "scene": truth.seen is not None,
-    }
+    row["truth"] = {"panorama": truth.panorama, "heading": round(truth.view.heading, 3)}
     return row
 
 
@@ -2131,7 +2125,7 @@ class _Truth(NamedTuple):
         panorama: match.Panorama,
         heading: float,
         blocks,
-        seeing: Callable[[match.Panorama, np.ndarray], np.ndarray] | None = None,
+        seeing: Callable[[match.Panorama, np.ndarray], np.ndarray] | None,
     ) -> "_Truth":
         """`seeing`: what rays from a panorama show (see _seeing); none: walls everywhere."""
         view = _check_view(panorama, heading)
@@ -2139,18 +2133,15 @@ class _Truth(NamedTuple):
         seen, share = _seen_points(view, blocks, sees)
         return cls(panorama.id, view, seen if share >= SCENE_SHARE else None)
 
-    def off(
-        self, x: float, y: float, heading: float, fov: float, horizon: float
-    ) -> tuple[float, float, float | None]:
-        """How far a camera found is from it (metres, degrees) and how far off it shows its
-        scene (see _dcre; None: not known); at its height (the check does not judge it)."""
-        true = self.view
-        metres = float(np.hypot(x - true.x, y - true.y))
-        degrees = abs(angle(true.heading, heading))
+    def off(self, found: match.View) -> tuple[float, float, float | None]:
+        """How far a camera `found` is from it (metres, degrees, see _moved) and how far off it
+        shows its scene (see _dcre; None: not known), at its height (the check does not judge
+        it)."""
+        metres, degrees = _moved(found, self.view)
         if self.seen is None:
             return metres, degrees, None
-        found = match.View(x, y, true.z, heading, horizon, fov)
-        return metres, degrees, _dcre(true, found, self.seen)
+        level = match.View(found.x, found.y, self.view.z, found.heading, found.horizon, found.fov)
+        return metres, degrees, _dcre(self.view, level, self.seen)
 
 
 def _right(metres: float, degrees: float, dcre: float | None = None) -> bool:
@@ -2167,12 +2158,10 @@ def _seen_points(
     across and down that meets one where its panorama shows a building: `sees` tells what each
     ray shows, see segment.seen; a tree before a wall hides it), and the share of the rays
     that do."""
-    across = (np.arange(SCENE_GRID) + 0.5) * CHECK_SIDE / SCENE_GRID
-    pixels = np.stack(np.meshgrid(across, across), axis=-1).reshape(-1, 2)
-    size = (CHECK_SIDE, CHECK_SIDE)
-    directions = match.rays(pixels, size, view.fov, view.horizon, view.heading)
-    walls, _ = blocks.hit(np.array([view.x, view.y, view.z]), directions)
-    met = np.isfinite(walls).all(axis=1)
+    grid = (SCENE_GRID, SCENE_GRID)  # the view, one ray through the middle of each cell
+    directions = match.rays(match.pixels_of(grid), grid, view.fov, view.horizon, view.heading)
+    walls, edge = blocks.hit(np.array([view.x, view.y, view.z]), directions)
+    met = edge >= 0
     if sees is not None:
         met &= sees(directions) == segment.BUILT
     return walls[met], float(met.mean())
@@ -2187,9 +2176,8 @@ def _dcre(true: match.View, found: match.View, seen: np.ndarray) -> float:
     there = match.project(true, seen, size)
     here = match.project(found, seen, size)
     behind = ~np.isfinite(here).all(axis=1)
-    edge = np.clip(np.where(behind[:, None], 0.0, here), 0, CHECK_SIDE)
-    gaps = np.where(behind, diagonal, np.hypot(*(edge - there).T))
-    return float(gaps.mean() / diagonal) if len(gaps) else float("nan")
+    gaps = np.where(behind, diagonal, np.hypot(*(np.clip(here, 0, CHECK_SIDE) - there).T))
+    return float(gaps.mean() / diagonal)
 
 
 def _funnel(rows: Iterable[dict]) -> str:

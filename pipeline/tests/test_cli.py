@@ -28,7 +28,7 @@ def test_a_trace_tells_which_camera_turned_down_was_the_right_one():
         match.Candidate(40.0, 0.0, 10.0, 60.0, 0.5, 22, None, "ne peut se tenir là"),
     ]
     panorama = match.Panorama("p", 0.0, 0.0, 2.5, 0.0, path=None)
-    truth = cli._Truth.of(panorama, 0.0, _wall_north(200.0))  # facing a wall 200 m off
+    truth = cli._Truth.of(panorama, 0.0, _wall_north(200.0), None)  # a wall 200 m off
 
     row = cli._traced(trace, truth)
 
@@ -36,7 +36,7 @@ def test_a_trace_tells_which_camera_turned_down_was_the_right_one():
     assert near["right"] and near["off_m"] == pytest.approx(1.12, abs=0.01)
     assert aside["right"] and aside["off_m"] == 6.0 and aside["dcre"] < cli.DCRE_RIGHT
     assert not wrong["right"] and wrong["spread_m"] is None
-    assert row["truth"] == {"panorama": "p", "heading": 0.0, "scene": True}
+    assert row["truth"] == {"panorama": "p", "heading": 0.0}
     assert cli._funnel([row, row, {"verdict": "située"}]) == "aucune caméra 2 ; située 1"
 
 
@@ -1112,8 +1112,8 @@ def test_a_proposed_camera_said_yes_to_wins_over_a_placement_not_judged(monkeypa
 
 
 def test_an_areas_check_passes_only_on_enough_views():
-    assert cli._wanting(10, 10, 0.3, 0.5, 0, 30) == []
-    assert cli._wanting(3, 3, 0.3, 0.5, 0, 9) == [f"au moins {cli.CHECK_LEAST} vues"]
+    assert cli._wanting(10, 10, 10, 0, 30) == []
+    assert cli._wanting(3, 3, 3, 0, 9) == [f"au moins {cli.CHECK_LEAST} vues"]
 
 
 def test_an_area_without_decoys_is_left_unchecked_and_the_others_checked(tmp_path, monkeypatch):
@@ -1150,6 +1150,19 @@ def test_an_area_without_decoys_is_left_unchecked_and_the_others_checked(tmp_pat
     cli.match_check(tries=20, seed=0, matcher="disk", area=None)
 
     assert set(json.loads((tmp_path / "check.json").read_text())) == {"cite"}
+
+
+def test_an_areas_check_is_stale_once_a_panorama_in_reach_is_segmented(tmp_path, monkeypatch):
+    from flaneur import pilot
+
+    home = pilot.AREAS["saint-severin"].centroid
+    near_by = [_panorama(n, home.x + 10.0 * n, home.y) for n in range(3)]
+    monkeypatch.setattr(cli, "VIEW_STRUCTURE", tmp_path)
+    before = cli._check_setup("disk", "saint-severin", near_by)
+
+    (tmp_path / f"{cli._levelled_name(near_by[1])}.npz").write_bytes(b"")  # `flaneur segmenter`
+
+    assert cli._check_setup("disk", "saint-severin", near_by) != before
 
 
 def test_an_areas_check_holds_while_panoramas_are_added_elsewhere():
@@ -1197,8 +1210,6 @@ def test_a_photo_is_matched_only_by_matchers_checked_in_its_area(
 
 def _wall_north(distance: float, height: float = 100.0):
     """A long building whose south wall stands `distance` m north of the origin."""
-    from flaneur import blocks
-
     footprint = [
         (-500.0, distance),
         (500.0, distance),
@@ -1219,8 +1230,6 @@ def test_a_check_view_sees_the_wall_ahead_and_nothing_else():
 
 
 def test_a_check_view_sees_a_wall_only_where_its_panorama_shows_one():
-    from flaneur import segment
-
     def trees_on_the_left(rays):  # what the panorama shows each way: a tree west of north
         return np.where(rays[:, 0] < 0, segment.OTHER, segment.BUILT)
 
@@ -1249,7 +1258,17 @@ def test_a_camera_far_off_counts_right_when_the_scene_lines_up():
     assert not cli._right(6.5, 0.3, dcre=0.08)
 
 
-def test_an_areas_check_takes_the_scenes_median_when_metres_say_no():
-    assert cli._wanting(20, 20, 3.0, 0.5, 0, 60) != []  # 3 m median: wanting
-    assert cli._wanting(20, 20, 3.0, 0.5, 0, 60, dcre=0.01) == []  # yet the scene lines up
-    assert cli._wanting(20, 20, 3.0, 0.5, 0, 60, dcre=0.03) != []
+def test_a_view_is_found_precisely_near_its_camera_or_lined_up_with_its_scene():
+    assert cli._precise(0.3, 0.5)  # a street: decimetres
+    assert not cli._precise(3.0, 0.5)
+    assert cli._precise(3.0, 0.5, dcre=0.01)  # across the river: the scene lines up
+    assert not cli._precise(3.0, 0.5, dcre=0.03)
+
+
+def test_an_area_of_near_and_far_views_passes_when_half_are_precise_either_way():
+    near = [cli._precise(0.3, 0.2, dcre=0.031)] * 10  # a street: 0.3 m, yet 3 % of a near wall
+    far = [cli._precise(5.0, 0.3, dcre=0.01)] * 10  # a quay 200 m off: 5 m, 1 %
+    precise = sum(near + far)
+
+    assert cli._wanting(20, 20, precise, 0, 60) == []
+    assert cli._wanting(20, 20, 9, 0, 60) != []  # fewer than half
