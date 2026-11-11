@@ -567,6 +567,21 @@ def test_no_view_of_today_is_shown_from_a_panorama_too_far_from_the_camera(tmp_p
     assert row is None
 
 
+def test_a_photo_and_today_s_view_are_framed_alike(tmp_path, monkeypatch):
+    photo = tmp_path / "old.jpg"
+    cv2.imwrite(str(photo), np.full((80, 60, 3), 128, np.uint8))
+    monkeypatch.setattr(cli, "_exported", lambda photo_id: photo)
+    near = match.Panorama("p", 1.0, 0.0, 2.5, 0.0, path=tmp_path / "p.jpg")
+    m = match.Situated(0.0, 0.0, 1.5, 90.0, 0.5, 60.0, 30, 2, 3.0, [], "i", 0.1)
+    heights = type("H", (), {"street": staticmethod(lambda x, y: 0.0)})()
+
+    framed = cli._framed(
+        "pm:1", m, heights, [near], lambda path: np.zeros((512, 1024, 3), np.uint8), 30
+    )
+
+    assert framed.old.shape == framed.today.shape == (40, 30, 3) and framed.away_m == 1.0
+
+
 def _match_world(tmp_path, monkeypatch, previous: dict, places) -> None:
     """`match` over two photos pm:1 and pm:2 with everything faked: `previous` as matches.json
     held, `places(matcher)` the camera each matcher finds (None: nothing)."""

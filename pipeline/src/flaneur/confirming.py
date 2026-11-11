@@ -16,16 +16,30 @@ from flaneur.sources import append_row, seconds_taken
 
 PAGE = Path(__file__).with_name("confirming_page.html")
 VERDICTS = ("yes", "near", "no")
+# Why a placement is wrong, said with a "no" (the guards learn from them): a reproduction of
+# the photo in today's street (a panel, a poster), another street, not a street view, the
+# image mirrored, another reason.
+REASONS = ("reproduction", "other_street", "not_street", "mirrored", "other")
+FRAMES = ("old", "today", "outlines")  # the photo, today's view framed alike, the outlines on it
 
 
 def record(
-    path: Path, photo_id: str, verdict: str, inputs: str, seconds: float, camera: dict | None = None
+    path: Path,
+    photo_id: str,
+    verdict: str,
+    inputs: str,
+    seconds: float,
+    camera: dict | None = None,
+    reason: str | None = None,
 ) -> dict:
     """Append the user's verdict on a photo placed from `inputs` (see cli._inputs), with the
     camera judged (`camera`: x, y, heading): recorded so that a verdict can later be carried
-    over to a new placement that hardly moves the camera (not done yet)."""
+    over to a new placement that hardly moves the camera (not done yet); a "no" with its
+    `reason` when one was given (see REASONS)."""
     if verdict not in VERDICTS:
         raise ValueError(f"un verdict est l'un de {VERDICTS}")
+    if reason is not None and (verdict != "no" or reason not in REASONS):
+        raise ValueError(f"une raison va avec un « non » et est l'une de {REASONS}")
     row = {
         "photo_id": photo_id,
         "verdict": verdict,
@@ -34,6 +48,8 @@ def record(
     }
     if camera is not None:
         row["camera"] = camera
+    if reason is not None:
+        row["reason"] = reason
     return append_row(path, row)
 
 
@@ -45,8 +61,8 @@ def queue(placed: list[dict], verdicts: dict[str, dict]) -> list[dict]:
     items = []
     for photo in placed:
         last = verdicts.get(photo["id"])
-        verdict = last["verdict"] if last and last["inputs"] == photo["inputs"] else None
-        items.append({**photo, "verdict": verdict})
+        now = last if last and last["inputs"] == photo["inputs"] else {}
+        items.append({**photo, "verdict": now.get("verdict"), "reason": now.get("reason")})
     return sorted(
         items,
         key=lambda item: (
@@ -61,24 +77,34 @@ def serve(
     placed: list[dict],
     path: Path,
     verdicts: Callable[[], dict[str, dict]],
-    sheet: Callable[[str], bytes],
+    frame: Callable[[str, str], bytes | None],
     port: int,
 ) -> HTTPServer:
-    """`sheet(photo_id)`: its row of pictures (JPEG): the photo, today's real view framed as
-    its camera, the photo's outlines on that view."""
+    """`frame(photo_id, part)`: one of its pictures (JPEG), all of one size: the photo
+    ("old"), today's real view framed as its camera ("today"), the photo's outlines on that
+    view ("outlines"); None when they cannot be drawn."""
     by_id = {photo["id"]: photo for photo in placed}
 
     class Handler(localpage.Handler):
         def do_GET(self) -> None:  # noqa: N802 (http.server's naming)
             route = unquote(self.path.split("?")[0])
+            parts = [
+                unquote(p) for p in self.path.split("?")[0].strip("/").split("/")
+            ]  # ids may hold "/"
             if route == "/":
                 self._send(200, PAGE.read_bytes(), "text/html; charset=utf-8")
             elif route == "/api/queue":
                 self._json(queue(placed, verdicts()))
+            elif route == "/api/reasons":
+                self._json(list(REASONS))
             elif (
-                route.startswith("/sheet/") and (photo_id := route.removeprefix("/sheet/")) in by_id
+                parts[0] == "frame"
+                and len(parts) == 3
+                and parts[1] in by_id
+                and parts[2] in FRAMES
+                and (jpeg := frame(parts[1], parts[2]))
             ):
-                self._send(200, sheet(photo_id), "image/jpeg")
+                self._send(200, jpeg, "image/jpeg")
             else:
                 self._send(404, b"not found", "text/plain")
 
@@ -99,6 +125,7 @@ def serve(
                         photo["inputs"],
                         body.get("seconds", 0),
                         photo.get("camera"),
+                        body.get("reason"),
                     )
                 )
             except (ValueError, KeyError, TypeError, AttributeError) as error:
