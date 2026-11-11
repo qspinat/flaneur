@@ -33,12 +33,12 @@ def test_the_photos_not_judged_as_placed_now_come_first_round_by_round():
         {"id": "c", "round": 1, "inputs": "1"},
         {"id": "d", "round": 0, "inputs": "2"},
     ]
-    verdicts = {"a": {"verdict": "yes", "inputs": "1"}, "d": {"verdict": "no", "inputs": "1"}}
+    verdicts = {"a": {"verdict": "yes", "inputs": "1"}}  # the word that holds for each
 
     queue = confirming.queue(placed, verdicts)
 
     assert [(p["id"], p["verdict"]) for p in queue] == [
-        ("d", None),  # judged when placed otherwise: to judge again
+        ("d", None),
         ("c", None),
         ("b", None),
         ("a", "yes"),
@@ -79,10 +79,7 @@ def test_a_reason_goes_only_with_a_no_and_is_one_of_the_page_s(tmp_path, verdict
 
 def test_a_no_comes_back_with_its_reason():
     placed = [{"id": "a", "round": 0, "inputs": "1"}, {"id": "b", "round": 0, "inputs": "1"}]
-    verdicts = {
-        "a": {"verdict": "no", "inputs": "1", "reason": "mirrored"},
-        "b": {"verdict": "no", "inputs": "2", "reason": "mirrored"},  # on another placement
-    }
+    verdicts = {"a": {"verdict": "no", "inputs": "1", "reason": "mirrored"}}  # b: none holds
 
     queue = {p["id"]: p for p in confirming.queue(placed, verdicts)}
 

@@ -56,7 +56,7 @@ def test_photos_placed_near_but_not_at_their_camera_are_no_anchors(tmp_path, mon
         confirming.record(path, photo_id, verdict, "1", 2)
     monkeypatch.setattr(cli, "ANCHORS", path)
 
-    assert cli._refused() == {("b", "1"), ("c", "1")}
+    assert cli._turned_down() == {"b", "c"}
 
 
 def test_photos_the_user_turned_down_stay_down_until_a_yes(tmp_path, monkeypatch):
@@ -613,13 +613,11 @@ def _match_world(tmp_path, monkeypatch, previous: dict, places) -> None:
         "MATCHES": tmp_path / "matches.json",
         "MATCH_TRACE": tmp_path / "trace.json",
         "ANCHORS": tmp_path / "anchors.jsonl",  # the user's verdicts: none unless a test says
-        "_setup": lambda: "s",
         "_matching": lambda: (heights, [], lambda year: SimpleNamespace(blocks=None)),
         "_matches": lambda: previous,
-        "_refused": lambda: set(),
         "_situated": lambda: {},
         "_exported": lambda photo_id: exported,
-        "_inputs": lambda photo_id, setup: "i",
+        "_inputs": lambda scene, photo_id: "i",
         "_image": lambda photo_id: "h",
         "_place_of": lambda me: (0.0, 0.0),
         "_where": lambda me, heights, now: None,
@@ -784,18 +782,25 @@ def test_a_yes_is_to_the_camera_proposed_not_to_the_next_one(tmp_path, monkeypat
         lambda k: "i",
         2,
     )
-    (tmp_path / "proposed.json").write_text(json.dumps(later))
     monkeypatch.setattr(cli, "PROPOSED_CAMERAS", tmp_path / "proposed.json")
     monkeypatch.setattr(cli, "_matches", dict)
     monkeypatch.setattr(cli, "_exported", lambda photo_id: photo)
     monkeypatch.setattr(cli, "_scenes_now", lambda: {"a": "s"})
     monkeypatch.setattr(cli, "_inputs", lambda scene, photo_id: "i")
-    monkeypatch.setattr(
-        cli, "_verdicts", lambda: {"a": {"verdict": "yes", "inputs": first["a"]["inputs"]}}
-    )
+    a = first["a"]
+    yes = {
+        "photo_id": "a",
+        "verdict": "yes",
+        "inputs": a["inputs"],
+        "camera": {"x": a["x"], "y": a["y"], "heading": a["heading"]},
+    }
+    (tmp_path / "anchors.jsonl").write_text(json.dumps(yes) + "\n")
+    monkeypatch.setattr(cli, "ANCHORS", tmp_path / "anchors.jsonl")
 
-    assert first["a"]["inputs"] != later["a"]["inputs"]
-    assert "a" not in cli._situated()
+    (tmp_path / "proposed.json").write_text(json.dumps(first))
+    assert "a" in cli._situated()  # the camera said yes to
+    (tmp_path / "proposed.json").write_text(json.dumps(later))
+    assert "a" not in cli._situated()  # another, 40 m away
 
 
 def test_a_trace_made_from_another_image_proposes_nothing():
@@ -884,30 +889,74 @@ def test_a_photos_fingerprint_changes_with_what_its_match_is_found_from():
     assert _scene(near_by, code="other") != before  # the code that finds it changed
 
 
+def test_the_page_shows_only_the_word_that_holds_for_each_photo_as_placed(monkeypatch, tmp_path):
+    _judged(tmp_path, _said("yes", "s:img"))
+    monkeypatch.setattr(cli, "ANCHORS", tmp_path / "anchors.jsonl")
+    here = {"x": 0.3, "y": 0.0, "heading": 90.5}
+
+    def placed(inputs, camera):
+        return [{"id": "a", "inputs": inputs, "camera": camera}]
+
+    assert cli._said_on(placed("t:img", here))["a"]["verdict"] == "yes"  # its camera, hardly moved
+    assert cli._said_on(placed("t:img", {**here, "x": 5.0})) == {}  # placed elsewhere: judge again
+
+
+def test_each_photos_scene_is_found_from_the_panoramas_match_compares_it_with(monkeypatch):
+    from types import SimpleNamespace
+
+    from flaneur import cli
+
+    rng = np.random.default_rng(0)
+    near_by = [_panorama(n, *rng.integers(-60, 60, 2).astype(float)) for n in range(300)]
+    near_by += [_panorama(400 + n, 3.0, 4.0) for n in range(20)]  # ties, more than 16
+    walk = [
+        SimpleNamespace(id=str(n), here=(float(x), float(y)))
+        for n, (x, y) in enumerate([(0.0, 0.0), (3.0, 4.0), (50.0, -50.0), (500.0, 0.0)])
+    ]
+    monkeypatch.setattr(cli, "_place_of", lambda me: me.here)
+    monkeypatch.setattr(cli, "_code", lambda: "code")
+
+    assert cli._scenes(walk, near_by) == {me.id: _scene(near_by, me.here) for me in walk}
+
+
 def test_a_verdict_follows_its_camera_found_again_from_other_panoramas(tmp_path):
     judged = _judged(tmp_path, _said("yes", "oldscene:img:lomag"))
 
-    assert judged.on("a", "newscene:img", 0.6, 0.6, 91.5)["verdict"] == "yes"  # hardly moved
-    assert judged.on("a", "newscene:img", 1.2, 0.0, 90.0) is None  # moved
-    assert judged.on("a", "newscene:img", 0.0, 0.0, 93.0) is None  # turned
-    assert judged.on("a", "newscene:other", 0.0, 0.0, 90.0) is None  # another crop of the photo
-    assert judged.on("a", "newscene:img:ab12cd34", 0.0, 0.0, 90.0) is None  # landmarks marked since
+    def placed(inputs, x=0.0, y=0.0, heading=90.0):
+        return {"inputs": inputs, "x": x, "y": y, "heading": heading}
+
+    assert (
+        judged.on("a", placed("newscene:img", 0.6, 0.6, 91.5))["verdict"] == "yes"
+    )  # hardly moved
+    assert judged.on("a", placed("newscene:img", x=1.2)) is None  # moved
+    assert judged.on("a", placed("newscene:img", heading=93.0)) is None  # turned
+    assert judged.on("a", placed("newscene:other")) is None  # another crop of the photo
+    assert judged.on("a", placed("newscene:img:ab12cd34")) is None  # landmarks marked since
+    assert judged.on("a", {"inputs": "newscene:img"}) is None  # not placed: its inputs only
 
 
 def test_the_last_word_on_a_camera_holds(tmp_path):
     judged = _judged(tmp_path, _said("yes", "s1:img"), _said("no", "s2:img", x=0.3))
 
-    assert judged.on("a", "s3:img", 0.1, 0.0, 90.0)["verdict"] == "no"
-    assert judged.on("a", "s1:img", 50.0, 0.0, 0.0)["verdict"] == "yes"  # its very inputs
+    assert (
+        judged.on("a", {"inputs": "s3:img", "x": 0.1, "y": 0.0, "heading": 90.0})["verdict"] == "no"
+    )
+    assert (
+        judged.on("a", {"inputs": "s1:img", "x": 50.0, "y": 0.0, "heading": 0.0})["verdict"]
+        == "yes"
+    )
 
 
 def test_a_yes_holds_while_the_photo_is_the_same(tmp_path):
     judged = _judged(tmp_path, _said("yes", "oldscene:img"))
     placed = {"inputs": "oldscene:img", "x": 0.0, "y": 0.0, "heading": 90.0}
 
-    assert judged.holds("a", placed, "img")
-    assert not judged.holds("a", placed, "recropped")
-    assert not _judged(tmp_path, _said("near", "oldscene:img")).holds("a", placed, "img")
+    with pytest.MonkeyPatch.context() as patched:
+        patched.setattr(cli, "_photo_part", lambda photo_id: "img")
+        assert judged.holds("a", placed)
+        assert not _judged(tmp_path, _said("near", "oldscene:img")).holds("a", placed)
+        patched.setattr(cli, "_photo_part", lambda photo_id: "recropped")
+        assert not judged.holds("a", placed)
 
 
 def _placed_now(monkeypatch, tmp_path, kept, *said, photo="img"):
