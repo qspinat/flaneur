@@ -20,7 +20,7 @@ const check = (ok, what) => {
  *  server cuts views on demand, slowly when its cache is cold). */
 const loaded = (on, selector) => on.waitForFunction(
   (s) => { const image = document.querySelector(s); return image.complete && image.naturalWidth > 0; },
-  selector, { timeout: 120000 });
+  selector, { timeout: 120000 }).then(() => true, () => false);
 /** Until `condition` holds (what the page asked of the server): whether it did within `ms`. */
 const until = async (condition, ms = 30000) => {
   const start = Date.now();
@@ -60,8 +60,7 @@ await page.goto(url);
 await page.waitForFunction(() => typeof photo !== 'undefined' && photo && proposal, null, { timeout: 30000 });
 await page.keyboard.press('f'); // the proposal looks wrong: place it by points
 await page.locator('#pair.on').waitFor();
-await loaded(page, '#photo');
-await loaded(page, '#view');
+check(await loaded(page, '#photo') && await loaded(page, '#view'), 'on points, the photo and the view come');
 const photo = await page.locator('#photo').boundingBox();
 const view = await page.locator('#view').boundingBox();
 const clickPairs = async (points) => {  // each point in the photo, then the same in the view
@@ -109,8 +108,7 @@ async function onPoints(routes) {
   for (const [path, handle] of Object.entries(routes)) await opened.route(path, handle);
   await opened.goto(url);
   await opened.locator('#pair.on').waitFor({ timeout: 15000 });
-  await loaded(opened, '#photo');
-  await loaded(opened, '#view');
+  check(await loaded(opened, '#photo') && await loaded(opened, '#view'), 'a page opened on points shows the photo and the view');
   const click = async (points) => {  // where the pictures stand now (a third one moves them)
     const shot = await opened.locator('#photo').boundingBox(), seen = await opened.locator('#view').boundingBox();
     for (const [x, y] of points) {
@@ -199,14 +197,13 @@ const overlaid = await overView(deep);
 check(overlaid >= 3, `the walls are drawn over the view too: foot, top, ends (${overlaid})`);
 check(!(await deep.locator('#third-box').isVisible()), 'pairing keeps two large pictures: the photo and the view');
 await pairsAt(SIX);
-await until(() => asked.parallax.length > 0 && asked.standingLaid > 0);
+check(await until(() => asked.parallax.length > 0 && asked.standingLaid > 0), `six pairs refit by parallax and laid through depth (${asked.parallax.length}, ${asked.standingLaid})`);
 await shows(deep, '#strip button.wall', 6);  // the plates drawn from the answer
-check(asked.parallax.length > 0 && asked.standingLaid > 0, `six pairs refit by parallax and laid through depth (${asked.parallax.length}, ${asked.standingLaid})`);
 check((await deep.locator('#view-stage .dot.off').count()) >= 1, 'a pair far from the fit shows on its dot');
 check((await deep.locator('#strip button.wall').count()) === 6, 'each pair\'s plate says its depth came from a wall');
 await deep.locator('#strip button').nth(5).click();  // pair 6: its depth by the neighbour's view
 await deep.locator('#third-box').waitFor();
-await loaded(deep, '#third');
+check(await loaded(deep, '#third'), 'the neighbour\'s view comes');
 check(await deep.locator('#third-box').isVisible() && !(await deep.locator('#photo-box').isVisible()),
   'a pair\'s plate shows the neighbour\'s view in the photo\'s place');
 check(asked.epipolar > 0 && (await deep.locator('#line').getAttribute('points')).length > 0,
@@ -465,7 +462,10 @@ const box = await coming.locator('#view').boundingBox(), shot = await coming.loc
 await coming.mouse.click(shot.x + shot.width * 0.3, shot.y + shot.height * 0.3);
 await coming.mouse.click(box.x + box.width * 0.3, box.y + box.height * 0.3);
 const refused = await coming.evaluate(() => [pairs.length, document.getElementById('message').textContent]);
-check(refused[0] === 0 && refused[1].includes('charge'), `a click in a view still coming in is refused, and said (${refused})`);
+check(refused[0] === 0 && refused[1].includes('La vue se charge'), `a click in a view still coming in is refused, and said (${refused})`);
 held = false;
+check(await loaded(coming, '#view') && (await coming.textContent('#message')) === '', 'once the view comes, the message goes');
+await coming.close();
+
 await browser.close();
 process.exit(failed ? 1 : 0);

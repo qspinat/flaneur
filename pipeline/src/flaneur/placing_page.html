@@ -960,10 +960,18 @@ function help() {
 }
 /** Whether `img` has its pixels: one coming in (another panorama's, say) keeps its place on
  *  screen without them, and a click there would be taken at its corner. */
+const PICTURES = { photo: 'La photo', view: 'La vue', third: 'La vue du voisin' };
+let waitingFor = null;  // the picture the message says is coming, cleared when it comes
 function measurable(img) {
   if (img.complete && img.naturalWidth > 0) return true;
-  say('La vue se charge : cliquer une fois qu’elle est là.');
+  const name = PICTURES[img.id];
+  waitingFor = img.complete ? null : img;  // complete with no pixels: it failed, and will not come
+  say(img.complete ? `${name} n’a pas pu être chargée : changer de panorama ou recharger la page.`
+                   : `${name} se charge : cliquer une fois qu’elle est là.`);
   return false;
+}
+for (const id of Object.keys(PICTURES)) {
+  $(id).addEventListener('load', () => { if (waitingFor === $(id)) { waitingFor = null; say(''); } });
 }
 function pixelOf(img, event) {
   const box = img.getBoundingClientRect();  // as shown, zoomed or not
