@@ -1,6 +1,8 @@
 // The built site served as a static host would serve it: text compressed (gzip), so that
 // timings measured here are those of a real host, under a sub-path as GitHub Pages serves it.
-// Usage: node tests/visual/serve.mjs [port] [sub-path, e.g. /flaneur/]
+// Usage: [HOST=0.0.0.0] node tests/visual/serve.mjs [port] [sub-path, e.g. /flaneur/]
+// Listens on this machine only (127.0.0.1); HOST=0.0.0.0 opens it to the local network, to try
+// the site from a phone.
 import { createServer } from 'node:http';
 import { createReadStream, statSync } from 'node:fs';
 import { extname, join, normalize } from 'node:path';
@@ -28,4 +30,7 @@ createServer((req, res) => {
   res.writeHead(200, { 'Content-Type': types[ext] ?? 'application/octet-stream', ...(gzip ? { 'Content-Encoding': 'gzip' } : {}) });
   const stream = createReadStream(file);
   (gzip ? stream.pipe(createGzip()) : stream).pipe(res);
-}).listen(Number(process.argv[2] ?? 4174), '127.0.0.1'); // this machine only: not the local network
+}).listen(Number(process.argv[2] ?? 4174), process.env.HOST || '127.0.0.1', function () {
+  const { address, port } = this.address();
+  console.log(`http://${address}:${port}${mount}`);
+});
