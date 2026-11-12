@@ -1241,25 +1241,38 @@ TRUE_VIEW = match.View(0.0, 0.0, 2.5, 0.0, 0.5, 60.0)  # facing north, as a chec
 
 
 def test_a_check_view_sees_the_wall_ahead_and_nothing_else():
-    seen, share = cli._seen_points(TRUE_VIEW, _wall_north(50.0, height=10.0))
+    seen = cli._seen_points(TRUE_VIEW, _wall_north(50.0, height=10.0))
 
     assert np.allclose(seen[:, 1], 50.0)  # on the wall
-    assert 0.1 < share < 0.6  # the sky above it, the street below: left out
+    assert 0.1 < len(seen) / cli.SCENE_GRID**2 < 0.6  # the sky above it, the street below: left out
 
 
 def test_a_check_view_sees_a_wall_only_where_its_panorama_shows_one():
     def trees_on_the_left(rays):  # what the panorama shows each way: a tree west of north
         return np.where(rays[:, 0] < 0, segment.OTHER, segment.BUILT)
 
-    seen, share = cli._seen_points(TRUE_VIEW, _wall_north(50.0), trees_on_the_left)
+    seen = cli._seen_points(TRUE_VIEW, _wall_north(50.0), trees_on_the_left)
 
     assert len(seen) and (seen[:, 0] > 0).all()  # the wall behind the tree left out
-    assert share < cli._seen_points(TRUE_VIEW, _wall_north(50.0))[1]
+    assert len(seen) < len(cli._seen_points(TRUE_VIEW, _wall_north(50.0)))
+
+
+def test_a_far_thin_band_of_facades_is_a_scene_known():
+    from flaneur import blocks
+
+    footprint = [(0.0, 120.0), (60.0, 120.0), (60.0, 130.0), (0.0, 130.0)]  # half the view, 120 m
+    quay = blocks.Blocks.of([(footprint, 0.0, 20.0)])
+    panorama = match.Panorama("p", 0.0, 0.0, 2.5, 0.0, path=None)
+
+    truth = cli._Truth.of(panorama, 0.0, quay, None)
+
+    assert truth.seen is not None and len(truth.seen) < 0.1 * cli.SCENE_GRID**2  # a thin band
+    assert truth.distance == pytest.approx(120.0, abs=5.0)
 
 
 def test_a_camera_found_aside_lines_up_with_a_far_scene_not_with_a_near_one():
     def dcre(distance, **off):
-        seen, _ = cli._seen_points(TRUE_VIEW, _wall_north(distance))
+        seen = cli._seen_points(TRUE_VIEW, _wall_north(distance))
         return cli._dcre(TRUE_VIEW, replace(TRUE_VIEW, **off), seen)
 
     assert dcre(200.0) == 0.0

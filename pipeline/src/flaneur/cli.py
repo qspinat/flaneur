@@ -762,8 +762,10 @@ DCRE_PRECISE = 0.02  # and found precisely under this, as under CHECK_M and CHEC
 # metres off (50 m back with a narrower view, or 30 m aside turned back to it)
 RIGHT_SHARE = 0.05  # 10 m for walls 200 m off, RIGHT_M at 60 m
 PRECISE_SHARE = 0.02  # 4 m for walls 200 m off, CHECK_M at 50 m
-SCENE_GRID = 24  # rays across and down a view, for the walls it shows
-SCENE_SHARE = 0.1  # of them meeting a wall, for its scene to be known (the rest: sky, street)
+SCENE_GRID = 48  # rays across and down a view, for the walls it shows: one every 1.25°
+# rays meeting a wall, for its scene to be known (the rest: sky, street, water, trees): a count,
+# not a share, as far facades are a thin band of any view (20 m high at 120 m: 9° of 60)
+SCENE_LEAST = 30
 MARKED_TO = 0.015  # a landmark's column, marked by hand: off by this (a share of the width)
 RIGHT_M, RIGHT_DEG = 3.0, 5.0  # a camera found farther off than this is a wrong one
 WRONG_SHARE = 0.05  # of all the views, bands and decoys: at most this share wrong
@@ -1147,7 +1149,7 @@ def _check_rule() -> str:
             RIGHT_SHARE,
             PRECISE_SHARE,
             SCENE_GRID,
-            SCENE_SHARE,
+            SCENE_LEAST,
             segment.MODEL,
             segment.STRUCTURE,
         )
@@ -2177,7 +2179,7 @@ def _traced(trace: match.Trace, truth: "_Truth | None" = None) -> dict:
 class _Truth(NamedTuple):
     """The true camera of a view of the known-answer check (cut from a panorama, see
     _check_view), the walls it shows and how far they stand (median, metres; both None: too
-    few to judge by, see SCENE_SHARE), and whether its panorama's segmentation told them."""
+    few to judge by, see SCENE_LEAST), and whether its panorama's segmentation told them."""
 
     panorama: str
     view: match.View
@@ -2193,8 +2195,8 @@ class _Truth(NamedTuple):
         segmented, walls wherever BD TOPO has them."""
         view = _check_view(panorama, heading)
         sees = None if kinds is None else functools.partial(segment.seen, kinds)
-        seen, share = _seen_points(view, blocks, sees)
-        if share < SCENE_SHARE:
+        seen = _seen_points(view, blocks, sees)
+        if len(seen) < SCENE_LEAST:
             return cls(panorama.id, view, None, None, kinds is not None)
         distance = float(np.median(np.hypot(seen[:, 0] - view.x, seen[:, 1] - view.y)))
         return cls(panorama.id, view, seen, distance, kinds is not None)
@@ -2240,18 +2242,17 @@ def _close_to_truth(
 
 def _seen_points(
     view: match.View, blocks, sees: Callable[[np.ndarray], np.ndarray] | None = None
-) -> tuple[np.ndarray, float]:
-    """The walls a check's view shows (east, north, up; one point per ray of a SCENE_GRID
-    across and down that meets one where its panorama shows a building: `sees` tells what each
-    ray shows, see segment.seen; a tree before a wall hides it), and the share of the rays
-    that do."""
+) -> np.ndarray:
+    """The walls a check's view shows (east, north, up): one point per ray of a SCENE_GRID
+    across and down that meets one where its panorama shows a building (`sees` tells what each
+    ray shows, see segment.seen; a tree before a wall hides it)."""
     grid = (SCENE_GRID, SCENE_GRID)  # the view, one ray through the middle of each cell
     directions = match.rays(match.pixels_of(grid), grid, view.fov, view.horizon, view.heading)
     walls, edge = blocks.hit(np.array([view.x, view.y, view.z]), directions)
     met = edge >= 0
     if sees is not None:
         met &= sees(directions) == segment.BUILT
-    return walls[met], float(met.mean())
+    return walls[met]
 
 
 def _dcre(true: match.View, found: match.View, seen: np.ndarray) -> float:
