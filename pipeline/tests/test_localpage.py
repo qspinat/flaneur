@@ -18,9 +18,10 @@ def _confirming(tmp_path, photo_id="pm:1"):
             "camera": {"x": 1.0, "y": 2.0, "heading": 3.0},
         }
     ]
-    frames = {"old": b"O", "today": b"T", "outlines": b"L"}
+    frames = {"old": b"O", "today": b"T", "outlines": b"L", "parallax": b"P"}
+    scenes = {photo_id: {"pairs": [], "plan": {}}}
     server = confirming.serve(
-        placed, tmp_path / "anchors.jsonl", dict, lambda _, part: frames[part], 0
+        placed, tmp_path / "anchors.jsonl", dict, lambda _, part: frames[part], scenes.get, 0
     )
     threading.Thread(target=server.handle_request, daemon=True).start()
     return server
@@ -93,3 +94,14 @@ def test_the_page_is_told_the_reasons_a_no_can_give(tmp_path):
     status, body = _ask(_confirming(tmp_path), "GET", "/api/reasons")
 
     assert (status, json.loads(body)) == (200, list(confirming.REASONS))
+
+
+def test_a_photo_s_scene_and_its_outlines_corrected_are_served(tmp_path):
+    status, body = _ask(_confirming(tmp_path), "GET", "/scene/pm:1")
+    assert status == 200 and json.loads(body) == {"pairs": [], "plan": {}}
+
+    status, body = _ask(_confirming(tmp_path), "GET", "/frame/pm:1/parallax")
+    assert status == 200 and body == b"P"
+
+    status, _ = _ask(_confirming(tmp_path), "GET", "/scene/pm:2")  # not on the page
+    assert status == 404

@@ -527,10 +527,16 @@ class _Scenes:
             write_atomic(path, lambda out: np.savez(out, a=rays_a, b=rays_b))
         return rays_a.astype(float), rays_b.astype(float)
 
-    def scene(self, panorama: str, chosen: Iterable[str] | None) -> facades.Scene | None:
+    def has_pairs(self, home: match.Panorama) -> bool:
+        """Whether a panorama is matched with a neighbour already (see scene, `made_only`)."""
+        return any(self._made(home, p) for p in depth.candidates(home, self.spheres, self.fixed))
+
+    def scene(
+        self, panorama: str, chosen: Iterable[str] | None, made_only: bool = False
+    ) -> facades.Scene | None:
         """The walls around a panorama, from the neighbours `chosen` (else those 2-15 m off:
-        see depth.candidates), with those drawn and removed by hand; none for a panorama not
-        known."""
+        see depth.candidates; `made_only`, those matched with it already: the matcher never
+        woken), with those drawn and removed by hand; none for a panorama not known."""
         home = self.by_id.get(panorama)
         if home is None:
             return None
@@ -540,6 +546,8 @@ class _Scenes:
             if chosen is None
             else [self.by_id[i] for i in chosen if i in self.by_id and i != home.id]
         )
+        if made_only:
+            asked = [p for p in asked if self._made(home, p)]
         found = {p.id: f for p in asked if (f := self.pair(home, p))}
         neighbours = tuple(sorted(found))
         fitted = self._kept(
@@ -876,6 +884,12 @@ def _placed_inputs(inputs: str, matcher: str | None) -> str:
     return inputs if matcher in (None, DISK) else f"{inputs}:{matcher}"
 
 
+def _found_inputs(placed: str, matcher: str | None) -> str:
+    """What a placement's points were found from: its inputs, its matcher's mark taken off (see
+    _placed_inputs)."""
+    return placed if matcher in (None, DISK) else placed.removesuffix(f":{matcher}")
+
+
 def _tried(kept: dict | None, inputs: str) -> list[str]:
     """The matchers a photo was tried with from these `inputs` (none: from others, or never;
     before LoMa-G, only DISK was)."""
@@ -1057,9 +1071,23 @@ class Then:
     def free(self) -> Callable[[np.ndarray, np.ndarray], np.ndarray]:
         return buildings.outside(self._standing)
 
+    @property
+    def standing(self) -> list[dict]:
+        """The buildings standing then (BD TOPO's features)."""
+        return self._standing
+
+    @functools.cached_property
+    def _built(self) -> list[dict]:
+        return scene.buildings_of(self._standing, (0.0, 0.0, self._heights.origin_z))
+
     @functools.cached_property
     def blocks(self) -> Blocks:
-        return _blocks(self._standing, self._heights)
+        return Blocks.of([(b["footprint"], b["base"], b["height"]) for b in self._built])
+
+    @functools.cached_property
+    def footprints(self) -> list[list[tuple[float, float]]]:
+        """Their footprints on the plan (Lambert-93)."""
+        return [b["footprint"] for b in self._built]
 
 
 def _matching() -> tuple[scene.CameraHeights, list[match.Panorama], Callable[[int], Then]]:
@@ -1245,15 +1273,215 @@ def _outlines(old: np.ndarray, today: np.ndarray) -> np.ndarray:
     """Today's view (at the sheet's size) in grey, dimmed, with the old photo's outlines drawn
     on it in amber: the edges its camera was scored on (outlines.edges_of, at the size it is
     matched at), less the print's own border. Where they line up, it is placed right."""
-    edges = _unframed(outlines.edge_mask(_grey(old)))
-    h, w = today.shape[:2]
-    edges = cv2.resize(edges.astype(np.float32), (w, h), interpolation=cv2.INTER_AREA)
-    edges = edges >= LINE_SHARE
-    drawn = cv2.cvtColor(
-        cv2.convertScaleAbs(cv2.cvtColor(today, cv2.COLOR_BGR2GRAY), alpha=0.8), cv2.COLOR_GRAY2BGR
-    )
-    drawn[edges] = OUTLINE_COLOUR
+    drawn = _dimmed(today)
+    drawn[_edges_at(old, today.shape[:2])] = OUTLINE_COLOUR
     return drawn
+
+
+def _edges_at(old: np.ndarray, size: tuple[int, int]) -> np.ndarray:
+    """The old photo's outlines (see _outlines), as a mask of a picture of `size`."""
+    edges = _unframed(outlines.edge_mask(_grey(old)))
+    h, w = size
+    return cv2.resize(edges.astype(np.float32), (w, h), interpolation=cv2.INTER_AREA) >= LINE_SHARE
+
+
+def _dimmed(today: np.ndarray) -> np.ndarray:
+    """Today's view in grey, dimmed: what outlines are drawn on."""
+    grey = cv2.cvtColor(today, cv2.COLOR_BGR2GRAY)
+    return cv2.cvtColor(cv2.convertScaleAbs(grey, alpha=0.8), cv2.COLOR_GRAY2BGR)
+
+
+def _toward(camera: match.View, panorama: match.Panorama) -> match.View:
+    """How the page's view of today is cut from `panorama` for a `camera` found: framed as it
+    (heading, width, horizon; see match.real_view), from where the panorama stands."""
+    return replace(camera, x=panorama.x, y=panorama.y, z=panorama.z)
+
+
+SKY_M = 1e5  # what meets nothing (the sky, a spire over the roofs) stands this far: no parallax
+DEPTH_STEP = 4  # pixels: today's view's depth is read every few, and in between interpolated
+
+
+def _depth_of_view(
+    view: match.View,
+    size: tuple[int, int],
+    walls: facades.Scene | None,
+    bdtopo: Blocks,
+    street: Callable[[np.ndarray, np.ndarray], np.ndarray],
+    step: int = DEPTH_STEP,
+) -> np.ndarray:
+    """Where what a view of today (`view`: cut from a panorama, of `size`) shows stands, every
+    `step` pixels (rows × columns × east, north, up; see _where_shown)."""
+    h, w = size
+    rows = np.arange(step / 2 - 0.5, h, step)
+    columns = np.arange(step / 2 - 0.5, w, step)
+    pixels = np.stack(np.meshgrid(columns, rows), axis=-1).reshape(-1, 2)
+    stands = _where_shown(view, size, pixels, walls, bdtopo, street)
+    return stands.reshape(len(rows), len(columns), 3)
+
+
+def _where_shown(
+    view: match.View,
+    size: tuple[int, int],
+    pixels: np.ndarray,
+    walls: facades.Scene | None,
+    bdtopo: Blocks,
+    street: Callable[[np.ndarray, np.ndarray], np.ndarray],
+) -> np.ndarray:
+    """Where what `pixels` of a view of today (`view`, from a panorama; of `size`) show stands
+    (east, north, up): on the panorama's own walls (`walls`, fitted from its neighbours and seen
+    from it, as the placing page takes them), else on BD TOPO's seen from it, else on the
+    street (`street`: its height at points), else SKY_M off."""
+    directions = match.rays(pixels, size, view.fov, view.horizon, view.heading)
+    eye = np.array([view.x, view.y, view.z])
+    away = np.full(len(directions), np.inf)
+    if walls is not None and walls.walls:
+        metres, met = facades.cast(walls, directions)
+        away = np.where(met >= 0, metres, np.inf)  # its walls only: the street, BD TOPO's first
+    left = np.flatnonzero(~np.isfinite(away))
+    met, edge = bdtopo.hit(eye, directions[left])
+    away[left[edge >= 0]] = np.linalg.norm(met[edge >= 0] - eye, axis=1)
+    away = np.minimum(away, match._to_street(eye, directions, street))
+    away = np.where(np.isfinite(away), away, SKY_M)
+    return eye + away[:, None] * directions
+
+
+BREAK_PX = 4 * DEPTH_STEP  # samples of a map this far apart are a break (a wall's edge, the sky)
+
+
+def _spread(at: np.ndarray, size: tuple[int, int], step: int) -> tuple[np.ndarray, np.ndarray]:
+    """A map sampled every `step` pixels (rows × columns × 2: the pixel each sample is looked
+    for at; NaN: nowhere) spread over a picture of `size`, each pixel between its four samples:
+    interpolated, except across a break (one of them nowhere, or they lie more than BREAK_PX
+    apart), where the nearest is taken."""
+    h, w = size
+    rows, columns = at.shape[:2]
+    grid_y, grid_x = np.mgrid[0:h, 0:w].astype(np.float32)
+    grid_x, grid_y = (grid_x - (step / 2 - 0.5)) / step, (grid_y - (step / 2 - 0.5)) / step
+    valid = np.isfinite(at).all(axis=2)
+    filled = np.where(valid[..., None], at, -10.0 * (h + w)).astype(np.float32)  # far off it
+    padded = np.pad(filled, ((0, 1), (0, 1), (0, 0)), mode="edge")
+    corners = [padded[a : a + rows, b : b + columns] for a in (0, 1) for b in (0, 1)]
+    span = np.max(corners, axis=0) - np.min(corners, axis=0)
+    whole = np.pad(valid, ((0, 1), (0, 1)), mode="edge")
+    whole = np.all([whole[a : a + rows, b : b + columns] for a in (0, 1) for b in (0, 1)], axis=0)
+    broken = ~whole | (span.max(axis=2) > BREAK_PX)
+    cell_y = np.clip(np.floor(grid_y), 0, rows - 1).astype(int)
+    cell_x = np.clip(np.floor(grid_x), 0, columns - 1).astype(int)
+    nearest_too = broken[cell_y, cell_x]
+    spread = []
+    for k in (0, 1):
+        smooth = cv2.remap(
+            filled[..., k], grid_x, grid_y, cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE
+        )
+        nearest = cv2.remap(
+            filled[..., k], grid_x, grid_y, cv2.INTER_NEAREST, borderMode=cv2.BORDER_REPLICATE
+        )
+        spread.append(np.where(nearest_too, nearest, smooth))
+    return spread[0], spread[1]
+
+
+def _parallax_outlines(
+    old: np.ndarray,
+    today: np.ndarray,
+    camera: match.View,
+    seen_from: match.View,
+    walls: facades.Scene | None,
+    bdtopo: Blocks,
+    street: Callable[[np.ndarray, np.ndarray], np.ndarray],
+) -> np.ndarray:
+    """Today's view as _outlines draws it, the old photo's outlines drawn where today's view
+    (`seen_from` its panorama) sees what they show: each of its pixels taken where it stands
+    (see _depth_of_view), then looked for in the photo through the `camera` found (see
+    _spread). What the panorama sees from elsewhere (parallax) no longer shifts them; what is
+    far stays."""
+    size = today.shape[:2]
+    stands = _depth_of_view(seen_from, size, walls, bdtopo, street)
+    rows, columns = stands.shape[:2]
+    at = match.project(camera, stands.reshape(-1, 3), size).reshape(rows, columns, 2)
+    to_x, to_y = _spread(at, size, DEPTH_STEP)
+    edges = _edges_at(old, size).astype(np.uint8) * 255
+    drawn = _dimmed(today)
+    drawn[cv2.remap(edges, to_x, to_y, cv2.INTER_LINEAR, borderValue=0) > 64] = OUTLINE_COLOUR
+    return drawn
+
+
+def _inside(at: np.ndarray, size: tuple[int, int]) -> np.ndarray:
+    """Which pixels (rows of column, row; NaN: none) fall in a picture of `size`."""
+    h, w = size
+    return (
+        np.isfinite(at).all(axis=1)
+        & (at[:, 0] >= 0)
+        & (at[:, 0] < w)
+        & (at[:, 1] >= 0)
+        & (at[:, 1] < h)
+    )
+
+
+PAIRS_SHOWN = 12  # pairs on the confirmation page: as many as the eye follows
+PLAN_M = 40.0  # the confirmation page's plan: so far each way from its camera
+
+
+def _pairs_shown(
+    points: match.Points, photo: tuple[int, ...], size: tuple[int, int], seen_from: match.View
+) -> list[dict]:
+    """Up to PAIRS_SHOWN of the points a camera was found from, the most spread over the photo:
+    each one's `index`, its pixel on the `photo` (of that shape, matched at PHOTO_SIDE) shown at
+    `size` (`old`), and where today's view (`seen_from` a panorama) shows its point in space
+    (`today`) — not where the camera puts it, which lines up by construction."""
+    scale = size[1] / (photo[1] * match.PHOTO_SIDE / max(photo[:2]))
+    old = points.pixels * scale
+    today = match.project(seen_from, points.world, size)
+    kept = np.flatnonzero(_inside(old, size) & _inside(today, size))
+    chosen: list[int] = []
+    if len(kept):  # the farthest from those chosen, each in turn: spread over the photo
+        chosen.append(int(kept[0]))
+        gap = np.hypot(*(old[kept] - old[kept[0]]).T)
+        while len(chosen) < min(PAIRS_SHOWN, len(kept)):
+            far = int(np.argmax(gap))
+            chosen.append(int(kept[far]))
+            gap = np.minimum(gap, np.hypot(*(old[kept] - old[kept[far]]).T))
+    return [
+        {
+            "index": k,
+            "old": [round(float(v), 2) for v in old[k]],
+            "today": [round(float(v), 2) for v in today[k]],
+        }
+        for k in chosen
+    ]
+
+
+def _plan(
+    m: match.Situated,
+    panorama: match.Panorama,
+    sources: Sequence[tuple[float, float]],
+    caption: tuple[float, float],
+    footprints: Sequence[Sequence[tuple[float, float]]],
+) -> dict:
+    """The confirmation page's plan around a camera found (metres east and north of it; `reach`
+    of them each way): its heading and width, the `panorama` today's view comes from and how
+    far, the panoramas its points were seen from (`sources`), its caption's place, and today's
+    buildings within PLAN_M (`footprints`, Lambert-93)."""
+
+    def local(x: float, y: float) -> list[float]:
+        return [round(x - m.x, 1), round(y - m.y, 1)]
+
+    def on_plan(f: Sequence[tuple[float, float]]) -> bool:  # its box meets the plan's square
+        xs, ys = [x for x, _ in f], [y for _, y in f]
+        east = max(xs) >= m.x - PLAN_M and min(xs) <= m.x + PLAN_M
+        return east and max(ys) >= m.y - PLAN_M and min(ys) <= m.y + PLAN_M
+
+    near = [f for f in footprints if on_plan(f)]
+    return {
+        "reach": PLAN_M,
+        "camera": {"heading": round(m.heading, 1), "fov": round(m.fov, 1)},
+        "panorama": {
+            "at": local(panorama.x, panorama.y),
+            "away_m": round(float(np.hypot(panorama.x - m.x, panorama.y - m.y)), 1),
+        },
+        "sources": [local(*at) for at in sources],
+        "caption": local(*caption),
+        "buildings": [[local(x, y) for x, y in f] for f in near],
+    }
 
 
 def _to_width(image: np.ndarray, width: int) -> np.ndarray:
@@ -2138,13 +2366,34 @@ class Framed(NamedTuple):
     old: np.ndarray
     today: np.ndarray
     away_m: float
+    camera: match.View  # as found, standing on the street
+    panorama: match.Panorama  # the one today's view is cut from
 
 
-def _away(near_by: list[match.Panorama], m: match.Situated) -> float | None:
+def _away(
+    near_by: list[match.Panorama],
+    m: match.Situated,
+    walled: Callable[[match.Panorama], bool] | None = None,
+) -> float | None:
     """How far from a photo's camera stands the panorama its view of today comes from: the
-    nearest whose picture is at hand (as _framed takes it)."""
-    near = [p for p in _nearest(near_by, m.x, m.y, SHEET_MOST_M) if p.path.exists()]
+    first whose picture is at hand (as _framed takes it, see _viewed_from)."""
+    near = [p for p in _viewed_from(near_by, m, walled) if p.path.exists()]
     return round(float(np.hypot(near[0].x - m.x, near[0].y - m.y)), 1) if near else None
+
+
+def _viewed_from(
+    near_by: list[match.Panorama],
+    m: match.Situated,
+    walled: Callable[[match.Panorama], bool] | None = None,
+) -> list[match.Panorama]:
+    """The panoramas today's view of a placement may come from, the first whose picture is read
+    taken: the nearest SHEET_PANORAMAS within SHEET_MOST_M; before them, those within
+    VIEW_WALLS_M whose walls are fitted (`walled`), nearest first."""
+    near = _nearest(near_by, m.x, m.y, SHEET_MOST_M)
+    first = [
+        p for p in near if np.hypot(p.x - m.x, p.y - m.y) <= VIEW_WALLS_M and walled and walled(p)
+    ]
+    return first + near[:SHEET_PANORAMAS]
 
 
 def _framed(
@@ -2154,22 +2403,24 @@ def _framed(
     near_by: list[match.Panorama],
     read: Callable[[Path], np.ndarray | None],
     width: int,
+    walled: Callable[[match.Panorama], bool] | None = None,
 ) -> Framed | None:
-    """A photo situated, `width` wide, and today's true view from the nearest panorama at hand
-    framed as the camera found; none without the photo or a panorama near enough."""
+    """A photo situated, `width` wide, and today's true view framed as the camera found, from
+    the nearest panorama at hand (`walled`: one with its walls fitted first, see _viewed_from);
+    none without the photo or a panorama near enough."""
     photo = cv2.imread(str(_exported(photo_id)))
     if photo is None:
         return None
     old = _to_width(photo, width)
-    for panorama in _nearest(near_by, m.x, m.y, SHEET_MOST_M)[
-        :SHEET_PANORAMAS
-    ]:  # one may be unreadable
+    for panorama in _viewed_from(near_by, m, walled):  # one may be unreadable
         if (picture := read(panorama.path)) is not None:
             break
     else:
         return None
-    real = match.real_view(m.view(heights.street(m.x, m.y)), old.shape[:2], panorama, picture)
-    return Framed(photo, old, real, float(np.hypot(panorama.x - m.x, panorama.y - m.y)))
+    camera = m.view(heights.street(m.x, m.y))
+    real = match.real_view(camera, old.shape[:2], panorama, picture)
+    away = float(np.hypot(panorama.x - m.x, panorama.y - m.y))
+    return Framed(photo, old, real, away, camera, panorama)
 
 
 def _sheet_row(
@@ -2184,7 +2435,7 @@ def _sheet_row(
     the camera found, and the photo's outlines drawn on that view; each `width` wide."""
     if (framed := _framed(photo_id, m, heights, near_by, read, width)) is None:
         return None
-    photo, old, real, away = framed
+    photo, old, real, away = framed.photo, framed.old, framed.today, framed.away_m
     pictures = np.hstack([old, real, _outlines(photo, real)])
     row = np.vstack([np.full((LABEL_BAND, *pictures.shape[1:]), 40, np.uint8), pictures])
     for column, text in enumerate(
@@ -2246,15 +2497,68 @@ def _with_chained(
     return placed, rounds
 
 
+VIEW_WALLS_M = 10.0  # today's view from the nearest panorama with its walls fitted this near the
+# camera found (else the nearest): the parallax drawn from that panorama's own walls
+
+
+def _no_matcher() -> match.Views:
+    raise RuntimeError("la page de confirmation ne réveille pas l'apparieur")
+
+
+class _ViewWalls:
+    """The walls the confirmation page draws the parallax from: each panorama's own, fitted
+    from the neighbours it is matched with already (see _Scenes: the matcher never woken), and
+    BD TOPO's (`blocks`) where they say nothing."""
+
+    def __init__(self, near_by: list[match.Panorama], fixed: set[str], segments, blocks: Blocks):
+        self.blocks = blocks
+        self.scenes = _Scenes(
+            near_by, fixed, _no_matcher, threading.Lock(), segments, WALLS, seen=_seeing(False)
+        )
+        self._fitted: dict[str, bool] = {}
+
+    def fitted(self, panorama: match.Panorama) -> bool:
+        """Whether a panorama may have walls of its own: a neighbour matched already, or walls
+        drawn by hand near it (whether any could be fitted is known once they are)."""
+        if panorama.id not in self._fitted:
+            drawn = facades.saved_near(WALLS, panorama.x, panorama.y, now=self.scenes.now)[0]
+            self._fitted[panorama.id] = bool(drawn) or self.scenes.has_pairs(panorama)
+        return self._fitted[panorama.id]
+
+    def of(self, panorama: match.Panorama) -> tuple[facades.Scene | None, Blocks]:
+        """A panorama's own walls (none: none fitted nor drawn) and BD TOPO's in its reach."""
+        own = None
+        if self.fitted(panorama):
+            own = self.scenes.scene(panorama.id, None, made_only=True)
+        bdtopo = self.blocks.near(panorama.x, panorama.y, match.NEAR_M)
+        return (own if own is not None and own.walls else None), bdtopo
+
+
+def _points_of(photo_id: str, m: match.Situated, kept: dict | None) -> match.Points | None:
+    """The points a placement against today was found from, as `match` kept them (none: a
+    camera proposed, or the points kept for another placement)."""
+    if _is_proposal(m.inputs):
+        return None
+    matcher = (kept or {}).get("matcher") or DISK
+    store = chain.Store(MATCHERS[matcher].photos, None)
+    return store.points(photo_id, _found_inputs(m.inputs, matcher))
+
+
 @app.command("confirmer")
 def confirm_placed(port: int = 8768, open_browser: bool = True) -> None:
     """Ouvre la page de confirmation (locale) : oui ou non à chaque photo située, contre les
     panoramas ou par enchaînement, à côté de la vraie vue d'aujourd'hui cadrée comme sa caméra
     et de ses contours posés sur cette vue. Un « non » la retire ; l'enchaînement suivant
     re-situe sans elle les photos qu'elle avait aidé à situer."""
-    heights, near_by, _ = _matching()
+    heights, near_by, then = _matching()
     with closing(db.connect(DB_PATH)) as conn:
-        titles = {me.id: me.title for me in export.photos(conn, DATA / "pilot", REVIEWS)}
+        walk = export.photos(conn, DATA / "pilot", REVIEWS)
+        fixed = _fixed_by_colmap(panoramas.load(conn), register.load(FIXES))
+    titles = {me.id: me.title for me in walk}
+    places = {me.id: _place_of(me) for me in walk}
+    today = then(date.today().year)
+    walls = _ViewWalls(near_by, fixed, _street_facades(today.standing), today.blocks)
+    by_id = {p.id: p for p in near_by}
     chained = _chained()
     situated, rounds = _with_chained(_situated(), chained, set(titles))
     for k, why in chained.get("doubts", {}).items():
@@ -2285,7 +2589,7 @@ def confirm_placed(port: int = 8768, open_browser: bool = True) -> None:
             },
             "agree": m.agree,
             "moved_m": m.moved_m,
-            "away_m": _away(near_by, m),
+            "away_m": _away(near_by, m, walls.fitted),
             **rounds[k],
         }
         for k, m in situated.items()
@@ -2294,17 +2598,52 @@ def confirm_placed(port: int = 8768, open_browser: bool = True) -> None:
 
     @functools.lru_cache(maxsize=2)  # the heavy part, in arrays: the photo shown and the next
     def framed(photo_id: str) -> Framed | None:
-        return _framed(photo_id, situated[photo_id], heights, near_by, read, CONFIRM_WIDTH)
+        m = situated[photo_id]
+        return _framed(photo_id, m, heights, near_by, read, CONFIRM_WIDTH, walls.fitted)
 
     @functools.lru_cache(maxsize=192)  # the pictures as sent, a few hundred kB a photo
     def frame(photo_id: str, part: str) -> bytes | None:
         if (f := framed(photo_id)) is None:
             return None
-        picture = _outlines(f.photo, f.today) if part == "outlines" else getattr(f, part)
+        if part == "parallax":
+            seen_from = _toward(f.camera, f.panorama)
+            own, bdtopo = walls.of(f.panorama)
+            args = (f.camera, seen_from, own, bdtopo, heights.streets)
+            picture = _parallax_outlines(f.photo, f.today, *args)
+        elif part == "outlines":
+            picture = _outlines(f.photo, f.today)
+        else:
+            picture = getattr(f, part)
         return cv2.imencode(".jpg", picture, SHEET_JPEG)[1].tobytes()
 
+    @functools.lru_cache(maxsize=192)
+    def scene(photo_id: str) -> dict | None:
+        if (f := framed(photo_id)) is None:
+            return None
+        m = situated[photo_id]
+        chained = rounds[photo_id]["round"] > 0
+        points = None if chained else _points_of(photo_id, m, kept.get(photo_id))
+        seen = frozenset().union(*points.seen) if points is not None else ()
+        sources = [(by_id[i].x, by_id[i].y) for i in sorted(seen) if i in by_id]
+        size = f.today.shape[:2]
+        pairs = None
+        if points is not None:
+            pairs = _pairs_shown(points, f.photo.shape, size, _toward(f.camera, f.panorama))
+        why = "enchaînée" if chained else "proposée" if _is_proposal(m.inputs) else "perdus"
+        return {
+            "size": [size[1], size[0]],
+            "walls": "fitted" if walls.fitted(f.panorama) else "bdtopo",
+            "pairs": pairs,
+            "no_pairs": None if pairs is not None else why,
+            "plan": _plan(
+                m, f.panorama, sources, places.get(photo_id, (m.x, m.y)), today.footprints
+            ),
+        }
+
     _serve_page(
-        lambda: confirming.serve(placed, ANCHORS, functools.partial(_said_on, placed), frame, port),
+        lambda: confirming.serve(
+            placed, ANCHORS, functools.partial(_said_on, placed), frame, scene, port
+        ),
         f"photos situées ({len(placed)})",
         port,
         open_browser,

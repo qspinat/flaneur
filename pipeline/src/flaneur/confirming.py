@@ -20,7 +20,9 @@ VERDICTS = ("yes", "near", "no")
 # the photo in today's street (a panel, a poster), another street, not a street view, the
 # image mirrored, another reason.
 REASONS = ("reproduction", "other_street", "not_street", "mirrored", "other")
-FRAMES = ("old", "today", "outlines")  # the photo, today's view framed alike, the outlines on it
+# the photo, today's view framed alike, the outlines on it, and so again where today's view sees
+# what they show (the parallax of a panorama standing elsewhere set aside)
+FRAMES = ("old", "today", "outlines", "parallax")
 
 
 def record(
@@ -78,11 +80,14 @@ def serve(
     path: Path,
     verdicts: Callable[[], dict[str, dict]],
     frame: Callable[[str, str], bytes | None],
+    scene: Callable[[str], dict | None],
     port: int,
 ) -> HTTPServer:
     """`frame(photo_id, part)`: one of its pictures (JPEG), all of one size: the photo
     ("old"), today's real view framed as its camera ("today"), the photo's outlines on that
-    view ("outlines"); None when they cannot be drawn."""
+    view ("outlines"), and drawn where that view sees what they show ("parallax"); None when they
+    cannot be drawn. `scene(photo_id)`: what the page draws over them (the pairs its camera was
+    found from, the plan around it); None when there is none."""
     by_id = {photo["id"]: photo for photo in placed}
 
     class Handler(localpage.Handler):
@@ -105,6 +110,13 @@ def serve(
                 and (jpeg := frame(parts[1], parts[2]))
             ):
                 self._send(200, jpeg, "image/jpeg")
+            elif (
+                parts[0] == "scene"
+                and len(parts) == 2
+                and parts[1] in by_id
+                and (found := scene(parts[1])) is not None
+            ):
+                self._json(found)
             else:
                 self._send(404, b"not found", "text/plain")
 
