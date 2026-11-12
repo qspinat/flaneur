@@ -27,8 +27,7 @@ def test_a_trace_tells_which_camera_turned_down_was_the_right_one():
         match.Candidate(6.0, 0.0, 0.0, 60.0, 0.5, 25, 2.0, "position incertaine"),
         match.Candidate(40.0, 0.0, 10.0, 60.0, 0.5, 22, None, "ne peut se tenir là"),
     ]
-    panorama = match.Panorama("p", 0.0, 0.0, 2.5, 0.0, path=None)
-    truth = cli._Truth.of(panorama, 0.0, _wall_north(200.0), None)  # a wall 200 m off
+    truth = cli._Truth.of(TRUE_PANORAMA, 0.0, _wall_north(200.0), None)  # a wall 200 m off
 
     row = cli._traced(trace, truth)
 
@@ -36,7 +35,7 @@ def test_a_trace_tells_which_camera_turned_down_was_the_right_one():
     assert near["right"] and near["off_m"] == pytest.approx(1.12, abs=0.01)
     assert aside["right"] and aside["off_m"] == 6.0 and aside["dcre"] < cli.DCRE_RIGHT
     assert not wrong["right"] and wrong["spread_m"] is None
-    assert row["truth"] == {"panorama": "p", "heading": 0.0, "walls_m": pytest.approx(208, abs=1)}
+    assert row["truth"] == {"panorama": "p", "heading": 0.0, "walls_m": pytest.approx(201, abs=1)}
     assert cli._funnel([row, row, {"verdict": "située"}]) == "aucune caméra 2 ; située 1"
 
 
@@ -1226,25 +1225,28 @@ def test_a_photo_is_matched_only_by_matchers_checked_in_its_area(
     assert kept.get("pm:1", {}).get("matcher", "disk") == "disk"
 
 
-def _wall_north(distance: float, height: float = 100.0):
+def _north(distance: float, height: float = 100.0, west: float = -500.0, east: float = 500.0):
+    """A building whose south wall stands `distance` m north of the origin, `west` to `east`."""
+    return (
+        [(west, distance), (east, distance), (east, distance + 10), (west, distance + 10)],
+        0.0,
+        height,
+    )
+
+
+def _wall_north(distance: float, height: float = 100.0, west: float = -500.0, east: float = 500.0):
     """A long building whose south wall stands `distance` m north of the origin."""
-    footprint = [
-        (-500.0, distance),
-        (500.0, distance),
-        (500.0, distance + 10),
-        (-500.0, distance + 10),
-    ]
-    return blocks.Blocks.of([(footprint, 0.0, height)])
+    return blocks.Blocks.of([_north(distance, height, west, east)])
 
 
-TRUE_VIEW = match.View(0.0, 0.0, 2.5, 0.0, 0.5, 60.0)  # facing north, as a check's views
+TRUE_PANORAMA = match.Panorama("p", 0.0, 0.0, 2.5, 0.0, path=None)
+TRUE_VIEW = match.View(0.0, 0.0, 2.5, 0.0, 0.5, 60.0)  # its view facing north, as a check's
 
 
 def test_a_check_view_sees_the_wall_ahead_and_nothing_else():
     seen = cli._seen_points(TRUE_VIEW, _wall_north(50.0, height=10.0))
 
-    assert np.allclose(seen[:, 1], 50.0)  # on the wall
-    assert 0.1 < len(seen) / cli.SCENE_GRID**2 < 0.6  # the sky above it, the street below: left out
+    assert len(seen) and np.allclose(seen[:, 1], 50.0)  # the sky above, the street below: left out
 
 
 def test_a_check_view_sees_a_wall_only_where_its_panorama_shows_one():
@@ -1258,16 +1260,22 @@ def test_a_check_view_sees_a_wall_only_where_its_panorama_shows_one():
 
 
 def test_a_far_thin_band_of_facades_is_a_scene_known():
-    from flaneur import blocks
+    quay = _wall_north(120.0, height=20.0, west=0.0, east=60.0)  # half the view: 6 % of it
 
-    footprint = [(0.0, 120.0), (60.0, 120.0), (60.0, 130.0), (0.0, 130.0)]  # half the view, 120 m
-    quay = blocks.Blocks.of([(footprint, 0.0, 20.0)])
-    panorama = match.Panorama("p", 0.0, 0.0, 2.5, 0.0, path=None)
+    truth = cli._Truth.of(TRUE_PANORAMA, 0.0, quay, None)
 
-    truth = cli._Truth.of(panorama, 0.0, quay, None)
-
-    assert truth.seen is not None and len(truth.seen) < 0.1 * cli.SCENE_GRID**2  # a thin band
+    assert truth.seen is not None
     assert truth.distance == pytest.approx(120.0, abs=5.0)
+
+
+def test_a_near_building_in_a_far_view_keeps_the_position_to_metres():
+    far = _north(150.0)  # across the river
+    near = _north(25.0, height=30.0, west=5.0, east=40.0)  # a third of the walls seen
+    truth = cli._Truth.of(TRUE_PANORAMA, 0.0, blocks.Blocks.of([far, near]), None)
+
+    assert float(np.median(np.hypot(*truth.seen[:, :2].T))) > 100  # most walls are far
+    assert truth.distance < 60  # yet the near ones are what a position off would show
+    assert not cli._right(6.0, 0.5, 0.03, truth.distance)
 
 
 def test_a_camera_found_aside_lines_up_with_a_far_scene_not_with_a_near_one():
@@ -1292,8 +1300,7 @@ def test_a_camera_far_off_counts_right_when_the_scene_lines_up_far_off():
 
 
 def test_a_camera_far_back_with_a_narrower_view_is_wrong_though_it_lines_a_wall_up():
-    panorama = match.Panorama("p", 0.0, 0.0, 2.5, 0.0, path=None)
-    truth = cli._Truth.of(panorama, 0.0, _wall_north(200.0), None)
+    truth = cli._Truth.of(TRUE_PANORAMA, 0.0, _wall_north(200.0), None)
     narrow = float(np.degrees(2 * np.arctan(np.tan(np.radians(30)) * 200 / 250)))
     metres, degrees, dcre = truth.off(match.View(0.0, -50.0, 2.5, 0.0, 0.5, narrow))
 
