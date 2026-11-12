@@ -20,14 +20,14 @@ def test_help_lists_the_pipeline():
     assert "Pipeline Flâneur" in result.output
 
 
-def test_a_trace_tells_which_camera_turned_down_was_the_right_one():
+def test_a_trace_tells_which_camera_turned_down_was_the_right_one(built):
     trace = match.Trace(points=40, verdict="aucune caméra")
     trace.candidates += [
         match.Candidate(0.5, 1.0, 2.0, 60.0, 0.5, 30, 0.9, "position incertaine"),
         match.Candidate(6.0, 0.0, 0.0, 60.0, 0.5, 25, 2.0, "position incertaine"),
         match.Candidate(40.0, 0.0, 10.0, 60.0, 0.5, 22, None, "ne peut se tenir là"),
     ]
-    truth = cli._Truth.of(TRUE_PANORAMA, 0.0, _wall_north(200.0), None)  # a wall 200 m off
+    truth = cli._Truth.of(TRUE_PANORAMA, 0.0, _wall_north(200.0), SEGMENTED)  # a wall 200 m off
 
     row = cli._traced(trace, truth)
 
@@ -1234,12 +1234,21 @@ def _north(distance: float, height: float = 100.0, west: float = -500.0, east: f
     )
 
 
-def _wall_north(distance: float, height: float = 100.0, west: float = -500.0, east: float = 500.0):
-    """A long building whose south wall stands `distance` m north of the origin."""
-    return blocks.Blocks.of([_north(distance, height, west, east)])
+def _wall_north(*args, **kwargs):
+    """A long building whose south wall stands north of the origin (see _north)."""
+    return blocks.Blocks.of([_north(*args, **kwargs)])
 
 
 TRUE_PANORAMA = match.Panorama("p", 0.0, 0.0, 2.5, 0.0, path=None)
+SEGMENTED = np.zeros(1)  # its classes: with `built`, a building wherever a ray goes
+
+
+@pytest.fixture
+def built(monkeypatch):
+    """Segmentation seeing a building wherever a ray meets one (see SEGMENTED)."""
+    monkeypatch.setattr(segment, "seen", lambda kinds, rays: np.full(len(rays), segment.BUILT))
+
+
 TRUE_VIEW = match.View(0.0, 0.0, 2.5, 0.0, 0.5, 60.0)  # its view facing north, as a check's
 
 
@@ -1259,23 +1268,56 @@ def test_a_check_view_sees_a_wall_only_where_its_panorama_shows_one():
     assert len(seen) < len(cli._seen_points(TRUE_VIEW, _wall_north(50.0)))
 
 
-def test_a_far_thin_band_of_facades_is_a_scene_known():
+def test_a_far_thin_band_of_facades_is_a_scene_known(built):
     quay = _wall_north(120.0, height=20.0, west=0.0, east=60.0)  # half the view: 6 % of it
 
-    truth = cli._Truth.of(TRUE_PANORAMA, 0.0, quay, None)
+    truth = cli._Truth.of(TRUE_PANORAMA, 0.0, quay, SEGMENTED)
 
     assert truth.seen is not None
     assert truth.distance == pytest.approx(120.0, abs=5.0)
 
 
-def test_a_near_building_in_a_far_view_keeps_the_position_to_metres():
+def test_a_near_building_in_a_far_view_keeps_the_position_to_metres(built):
     far = _north(150.0)  # across the river
     near = _north(25.0, height=30.0, west=5.0, east=40.0)  # a third of the walls seen
-    truth = cli._Truth.of(TRUE_PANORAMA, 0.0, blocks.Blocks.of([far, near]), None)
+    truth = cli._Truth.of(TRUE_PANORAMA, 0.0, blocks.Blocks.of([far, near]), SEGMENTED)
 
     assert float(np.median(np.hypot(*truth.seen[:, :2].T))) > 100  # most walls are far
     assert truth.distance < 60  # yet the near ones are what a position off would show
     assert not cli._right(6.0, 0.5, 0.03, truth.distance)
+
+
+@pytest.mark.parametrize(("near", "right"), [(None, True), ((5.0, 7.0), False)])
+def test_a_camera_found_aside_from_afar_is_right_unless_a_near_building_shows_it_askew(
+    built, near, right
+):
+    walls = [_north(150.0)] + (
+        [_north(25.0, height=30.0, west=near[0], east=near[1])] if near else []
+    )
+    truth = cli._Truth.of(TRUE_PANORAMA, 0.0, blocks.Blocks.of(walls), SEGMENTED)
+    aside = match.View(7.0, 0.0, 2.5, 0.0, 0.5, 60.0)  # 7 m aside, as a far quay allows
+
+    metres, degrees, dcre = truth.off(aside)
+
+    assert cli._right(metres, degrees, dcre, truth.distance) == right
+
+
+def test_a_panorama_not_segmented_gives_no_slack_from_afar():
+    truth = cli._Truth.of(TRUE_PANORAMA, 0.0, _wall_north(150.0), None)  # trees unknown
+
+    metres, degrees, dcre = truth.off(match.View(7.0, 0.0, 2.5, 0.0, 0.5, 60.0))
+
+    assert not cli._right(metres, degrees, dcre, truth.distance)
+
+
+def test_a_scene_is_known_from_scene_least_rays_on_a_wall(monkeypatch):
+    quay = _wall_north(120.0, height=20.0, west=0.0, east=60.0)
+    rays = len(cli._seen_points(TRUE_VIEW, quay))
+
+    monkeypatch.setattr(cli, "SCENE_LEAST", rays)
+    assert cli._Truth.of(TRUE_PANORAMA, 0.0, quay, None).seen is not None
+    monkeypatch.setattr(cli, "SCENE_LEAST", rays + 1)
+    assert cli._Truth.of(TRUE_PANORAMA, 0.0, quay, None).seen is None
 
 
 def test_a_camera_found_aside_lines_up_with_a_far_scene_not_with_a_near_one():
@@ -1299,8 +1341,8 @@ def test_a_camera_far_off_counts_right_when_the_scene_lines_up_far_off():
     assert not cli._right(20.0, 10.5, dcre=0.014, distance=100.0)  # aside and turned back to it
 
 
-def test_a_camera_far_back_with_a_narrower_view_is_wrong_though_it_lines_a_wall_up():
-    truth = cli._Truth.of(TRUE_PANORAMA, 0.0, _wall_north(200.0), None)
+def test_a_camera_far_back_with_a_narrower_view_is_wrong_though_it_lines_a_wall_up(built):
+    truth = cli._Truth.of(TRUE_PANORAMA, 0.0, _wall_north(200.0), SEGMENTED)
     narrow = float(np.degrees(2 * np.arctan(np.tan(np.radians(30)) * 200 / 250)))
     metres, degrees, dcre = truth.off(match.View(0.0, -50.0, 2.5, 0.0, 0.5, narrow))
 

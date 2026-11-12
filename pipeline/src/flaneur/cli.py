@@ -763,14 +763,15 @@ DCRE_PRECISE = 0.02  # and found precisely under this, as under CHECK_M and CHEC
 RIGHT_SHARE = 0.05  # 10 m for walls 200 m off, RIGHT_M at 60 m
 PRECISE_SHARE = 0.02  # 4 m for walls 200 m off, CHECK_M at 50 m
 SCENE_GRID = 48  # rays across and down a view, for the walls it shows: one every 1.25°
-# rays meeting a wall, for its scene to be known (the rest: sky, street, water, trees): 1.3 % of
-# the view, as far facades are a thin band of any (20 m high at 120 m: 9° of 60); the grid only
-# sets how finely they are seen
+# rays of that grid meeting a wall, for its scene to be known (the rest: sky, street, water,
+# trees): 1.3 % of the view, as far facades are a thin band of any (20 m high at 120 m: 9° of
+# 60); a count of SCENE_GRID's rays, to change with it
 SCENE_LEAST = 30
 # how far the walls a view shows stand, for the slack on its camera's position: this percentile
 # of their distances, not the median, as the nearest walls are what a camera off would show
-# askew (a near building, a third of the walls of a view over the river, keeps it to metres)
-WALLS_PERCENTILE = 15
+# askew (a building 25 m off, a seventh of the walls of a view over the river, keeps it to
+# metres; only what makes under a twentieth of them, a lamp post, is left out)
+WALLS_PERCENTILE = 5
 MARKED_TO = 0.015  # a landmark's column, marked by hand: off by this (a share of the width)
 RIGHT_M, RIGHT_DEG = 3.0, 5.0  # a camera found farther off than this is a wrong one
 WRONG_SHARE = 0.05  # of all the views, bands and decoys: at most this share wrong
@@ -2184,8 +2185,9 @@ def _traced(trace: match.Trace, truth: "_Truth | None" = None) -> dict:
 
 class _Truth(NamedTuple):
     """The true camera of a view of the known-answer check (cut from a panorama, see
-    _check_view), the walls it shows and how far they stand (metres, see WALLS_PERCENTILE; both
-    None: too few to judge by, see SCENE_LEAST), and whether its panorama's segmentation told
+    _check_view), the walls it shows (None: too few to judge by, see SCENE_LEAST) and how far
+    they stand (metres, see WALLS_PERCENTILE; None as well when its panorama is not segmented:
+    walls behind trees would give slack they do not show), and whether its segmentation told
     them."""
 
     panorama: str
@@ -2205,9 +2207,11 @@ class _Truth(NamedTuple):
         seen = _seen_points(view, blocks, sees)
         if len(seen) < SCENE_LEAST:
             return cls(panorama.id, view, None, None, kinds is not None)
+        if kinds is None:  # its walls may be behind trees: judged, but no slack from afar
+            return cls(panorama.id, view, seen, None, False)
         away = np.hypot(seen[:, 0] - view.x, seen[:, 1] - view.y)
         distance = float(np.percentile(away, WALLS_PERCENTILE))
-        return cls(panorama.id, view, seen, distance, kinds is not None)
+        return cls(panorama.id, view, seen, distance, True)
 
     def off(self, found: match.View) -> tuple[float, float, float | None]:
         """How far a camera `found` is from it (metres, degrees, see _moved) and how far off it
