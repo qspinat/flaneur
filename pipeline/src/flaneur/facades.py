@@ -507,12 +507,6 @@ def cast(scene: Scene, directions: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     return metres, met
 
 
-def prisms(scene: Scene) -> Blocks:
-    """A scene's walls as Blocks' prisms, from the street to their tops: for rays from anywhere
-    (see cast, from the scene's camera only)."""
-    return _prisms(scene.walls, scene.ground, [w.top for w in scene.walls])
-
-
 def _prisms(walls, ground: float, tops: list[float]) -> Blocks:
     """The walls as Blocks' prisms, from the street to their `tops`."""
     edges = [(*w.a, *w.b, ground, top) for w, top in zip(walls, tops, strict=True)]

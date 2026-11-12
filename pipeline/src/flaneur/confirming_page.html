@@ -39,7 +39,7 @@
   button:focus-visible, input:focus-visible { outline: 3px solid #1d5fa8; outline-offset: 2px; }
   button[aria-pressed=true] { background: var(--ink); color: var(--paper); border-color: var(--ink); }
   #views { margin: 0 0 8px; }
-  #walls { font-size: 13px; color: var(--quiet); margin: 0 0 8px; min-height: 1.4em; }
+  #walls { font-size: 13px; color: var(--quiet); margin: 0 0 8px; min-height: 1.4em; max-width: 64ch; }
   /* the pairs: the photo and today's view side by side, each pair's two ends numbered alike */
   #pairs { display: none; gap: 12px; align-items: start; }
   #pictures.pairs #pairs { display: flex; }
@@ -115,7 +115,7 @@
     <figure class="today-side"><div class="shot"><img id="pair-today" alt="La vue d'aujourd'hui, les mêmes points numérotés"><div class="marks"></div></div>
       <figcaption>Aujourd'hui : où le panorama voit le même point</figcaption></figure>
   </div>
-  <p id="no-pairs">Pas de points gardés pour cette caméra (proposée par « presque », ou enchaînée) : rien à apparier.</p>
+  <p id="no-pairs"></p>
   </section>
   <section id="judge">
   <div id="plan-box">
@@ -215,17 +215,24 @@ function showToday() {
     : parallax ? 'contours, où la vue d\'aujourd\'hui les voit →' : 'contours de la photo sur aujourd\'hui →';
   const p = photos[at];
   if (p) $('today').src = frameOf(p, todayPart());
-  if (p) sceneOf(p).then((scene) => { if (photos[at] === p) sayWalls(scene); });
+  whenShown(p, sayWalls);
 }
+// what is drawn once a photo's scene comes, if it is still the one shown
+const whenShown = (p, draw) => { if (p) sceneOf(p).then((scene) => { if (photos[at] === p) draw(scene); }); };
 function showOutlines(on) { outlines = on; if (!on) parallax = false; showToday(); }
 function showParallax(on) { parallax = on; if (on) outlines = true; showToday(); }
 $('outlines').addEventListener('click', () => showOutlines(!outlines));
 $('parallax').addEventListener('click', () => showParallax(!parallax));
 function sayWalls(scene) {
   $('walls').textContent = !parallax || !scene ? ''
-    : scene.walls ? `Contours corrigés d'après les murs ajustés autour de ${scene.walls} panorama${scene.walls > 1 ? 's' : ''} proche${scene.walls > 1 ? 's' : ''}, sinon BD TOPO.`
-    : 'Contours corrigés d\'après BD TOPO seule (aucun panorama proche n\'a ses murs ajustés) : elle peut être décalée d\'un mètre ou deux.';
+    : scene.walls === 'fitted' ? 'Contours corrigés d\'après les murs du panorama de la vue, ajustés avec ses voisins (comme sur la page pour placer), sinon BD TOPO.'
+    : 'Contours corrigés d\'après BD TOPO (le panorama de la vue n\'a pas ses murs ajustés) : elle peut être décalée d\'un mètre ou deux des panoramas.';
 }
+const NO_PAIRS = {
+  'enchaînée': 'Placée par enchaînement : pas de points d\'aujourd\'hui à apparier.',
+  'proposée': 'Caméra proposée par « presque » : pas de points gardés.',
+  'perdus': 'Les points de cette caméra ne sont plus gardés (refaite depuis) : rien à apparier.',
+};
 
 // the pairs: the photo and today's view side by side, each pair's two ends numbered alike
 function showPairing(on) {
@@ -233,12 +240,13 @@ function showPairing(on) {
   $('pairing').setAttribute('aria-pressed', String(on));
   $('pictures').classList.toggle('pairs', on);
   const p = photos[at];
-  if (on && p) sceneOf(p).then((scene) => { if (photos[at] === p) drawPairs(scene); });
+  if (on && p) { $('pair-old').src = frameOf(p, 'old'); $('pair-today').src = frameOf(p, 'today'); }
 }
 $('pairing').addEventListener('click', () => showPairing(!pairing));
 function drawPairs(scene) {
   const pairs = scene?.pairs ?? [];
   $('pictures').classList.toggle('empty', !pairs.length);
+  $('no-pairs').textContent = scene ? (NO_PAIRS[scene.no_pairs] ?? 'Aucun point dans les deux images.') : '';
   for (const [side, end] of [['.old-side', 'old'], ['.today-side', 'today']]) {
     const marks = document.querySelector(`${side} .marks`);
     marks.replaceChildren(...pairs.map((pair, n) => {
@@ -271,7 +279,8 @@ function drawPlan(plan) {
   const g = $('plan-drawn');
   if (!plan) { g.replaceChildren(); return; }
   const parts = plan.buildings.map((f) => drawn('polygon', { class: 'building', points: f.map(onPlan).join(' ') }));
-  const reach = 30, { heading, fov } = plan.camera;
+  const half = plan.reach, reach = half * 0.75, { heading, fov } = plan.camera;
+  $('plan').setAttribute('viewBox', `${-half} ${-half} ${2 * half} ${2 * half}`);
   const end = (a) => [reach * Math.sin(a * Math.PI / 180), -reach * Math.cos(a * Math.PI / 180)];
   const [l, r] = [end(heading - fov / 2), end(heading + fov / 2)];
   parts.push(drawn('path', { class: 'cone', d: `M0 0 L${l} A${reach} ${reach} 0 0 1 ${r} Z` }));
@@ -283,8 +292,9 @@ function drawPlan(plan) {
   parts.push(drawn('circle', { class: 'panorama', r: 1.1, cx: px, cy: py }));
   parts.push(drawn('path', { class: 'camera', d: 'M0 -2.2 L1.5 1.4 L-1.5 1.4 Z', transform: `rotate(${heading})` }));
   parts.push(drawn('text', { class: 'away', x: px / 2 + 1.5, y: py / 2 - 1 }, `${plan.panorama.away_m.toLocaleString('fr-FR')} m`));
-  parts.push(drawn('path', { d: 'M-36 36 L-26 36', stroke: '#1d1a16', 'stroke-width': 0.4 }), drawn('text', { x: -36, y: 34.5 }, '10 m'));
-  parts.push(drawn('text', { x: -37, y: -35 }, 'N ↑'));
+  const e = half * 0.9;  // the scale and north, in a corner
+  parts.push(drawn('path', { d: `M${-e} ${e} L${-e + 10} ${e}`, stroke: '#1d1a16', 'stroke-width': 0.4 }), drawn('text', { x: -e, y: e - 1.5 }, '10 m'));
+  parts.push(drawn('text', { x: -e, y: -e + 2 }, 'N ↑'));
   g.replaceChildren(...parts);
 }
 
@@ -307,18 +317,11 @@ function open(n) {
     $('frame').classList.add('loading');
     $('loading').textContent = 'Images en cours de dessin…';
     $('old').src = frameOf(p, 'old');
-    $('today').src = frameOf(p, todayPart());
-    $('pair-old').src = frameOf(p, 'old');
-    $('pair-today').src = frameOf(p, 'today');
+    showToday();
+    showPairing(pairing);
     drawPlan(null);
     drawPairs(null);
-    $('walls').textContent = '';
-    sceneOf(p).then((scene) => {
-      if (photos[at] !== p) return;
-      drawPlan(scene?.plan);
-      drawPairs(scene);
-      sayWalls(scene);
-    });
+    whenShown(p, (scene) => { drawPlan(scene?.plan); drawPairs(scene); });
   }
   const from = p.round === 0 ? 'contre les panoramas d\'aujourd\'hui' : `au tour ${p.round}, depuis ${p.from.join(', ')}`;
   const by = p.by ? ` par ${p.by}` + (p.check ? ` (${p.check} : à vérifier de près)` : '') : '';

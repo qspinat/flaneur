@@ -1210,35 +1210,6 @@ def _level(xs, ys):  # the street, level at 0
 EYE = match.View(0.0, 0.0, 1.5, 0.0, 0.5, 60.0)  # a camera facing north, as found
 
 
-def test_a_detail_stands_on_the_first_wall_else_on_the_street_else_in_the_sky():
-    ahead, low, high = [49.5, 49.5], [49.5, 99.0], [49.5, 0.0]
-
-    seen = cli._in_space(EYE, np.array([ahead, low, high]), (100, 100), [], _wall_ahead(), _level)
-
-    assert seen[0, 1] == pytest.approx(20.0, abs=0.01)  # on the wall
-    assert seen[1, 2] == pytest.approx(0.0, abs=0.05) and seen[1, 1] < 20.0  # on the street
-    assert np.isnan(seen[2]).all()  # the sky above the wall
-
-
-def test_the_photo_s_outlines_are_drawn_where_the_panorama_sees_them():
-    old = np.zeros((600, 600, 3), np.uint8)
-    old[150:330, 440:470] = 255  # an upright on the wall (above its foot, 4° below the horizon)
-    today = np.zeros((600, 600, 3), np.uint8)
-    aside = match.Panorama("p", 3.0, 0.0, 1.5, 0.0, path=None)  # 3 m east of the camera
-    walls = ([], _wall_ahead(height=40.0))
-
-    plain = cli._outlines(old, today)
-    moved = cli._parallax_outlines(old, today, EYE, aside, walls, _level)
-
-    def column(drawn):  # where the amber lines stand
-        return float(np.median(np.nonzero((drawn == cli.OUTLINE_COLOUR).all(axis=2))[1]))
-
-    on_wall = cli._in_space(EYE, np.array([[column(plain), 299.5]]), (600, 600), *walls, _level)
-    seen_from = match.project(cli._toward(EYE, aside), on_wall, (600, 600))[0, 0]
-    assert column(moved) == pytest.approx(seen_from, abs=3.0)
-    assert seen_from < column(plain) - 40  # the panorama, 3 m east, sees it well to the left
-
-
 def test_a_placement_s_pairs_are_drawn_on_the_photo_and_where_the_panorama_sees_them():
     world = np.array([[x, 20.0, 1.5] for x in np.linspace(-8.0, 8.0, 30)])
     shrunk = 1.0 * match.PHOTO_SIDE / 120  # the photo, 120 wide, matched at PHOTO_SIDE
@@ -1260,50 +1231,64 @@ def test_the_plan_puts_the_camera_at_its_centre_and_the_panorama_at_its_distance
     shown = match.Panorama("p", 13.0, 24.0, 2.5, 0.0, path=None)
     near = [[(0.0, 0.0), (5.0, 0.0), (5.0, 5.0)], [(900.0, 900.0), (905.0, 900.0), (905.0, 905.0)]]
 
-    plan = cli._plan(m, shown, {"q": (10.0, 30.0)}, (12.0, 15.0), near)
+    plan = cli._plan(m, shown, [(10.0, 30.0)], (12.0, 15.0), near)
 
-    assert plan["camera"] == {"heading": 90.0, "fov": 60.0}
+    assert plan["camera"] == {"heading": 90.0, "fov": 60.0} and plan["reach"] == cli.PLAN_M
     assert plan["panorama"] == {"at": [3.0, 4.0], "away_m": 5.0}
     assert plan["sources"] == [[0.0, 10.0]] and plan["caption"] == [2.0, -5.0]
     assert plan["buildings"] == [[[-10.0, -20.0], [-5.0, -20.0], [-5.0, -15.0]]]  # the far one left
 
 
-def test_a_detail_stands_on_the_walls_fitted_first_and_on_bd_topo_beyond_them():
-    fitted = _wall_ahead(distance=17.0, height=5.0)  # BD TOPO's facade, set back 3 m: seen so
-    bdtopo = _wall_ahead(distance=20.0, height=40.0)
-    rays = np.array([[49.5, 49.5], [49.5, 5.0]])
-
-    seen = cli._in_space(EYE, rays, (100, 100), [fitted], bdtopo, _level)
-
-    assert seen[0, 1] == pytest.approx(
-        17.0, abs=0.01
-    )  # the fitted wall, though BD TOPO's is behind
-    assert seen[1, 1] == pytest.approx(20.0, abs=0.01)  # above it: BD TOPO's
+ASIDE = match.Panorama("p", 3.0, 0.0, 1.5, 0.0, path=None)  # 3 m east of the camera
+F600 = 300 / np.tan(np.radians(30))  # the focal of a 600 px view 60° wide
 
 
-def test_a_fitted_wall_is_kept_only_near_the_panorama_it_was_fitted_around():
-    near = facades.Wall((-20.0, 5.0), (20.0, 5.0), 10.0, "fitted")
-    far = facades.Wall((-20.0, 17.0), (20.0, 17.0), 10.0, "fitted")  # beyond its neighbours' reach
-    drawn = facades.Wall((-20.0, 30.0), (20.0, 30.0), 10.0, "drawn")  # by hand: kept whole
-    scene = facades.Scene("p", (0.0, 0.0, 2.5), 0.0, (near, far, drawn), (), 0)
+def test_what_today_s_view_shows_stands_on_a_wall_else_on_the_street_else_far_off():
+    seen = cli._depth_of_view(cli._toward(EYE, ASIDE), (600, 600), None, _wall_ahead(), _level, 100)
 
-    kept = cli._near_home(scene, 15.0).walls
+    ahead, low, high = seen[2, 2], seen[5, 2], seen[0, 2]  # rows at 49.5, 249.5... 549.5 px
+    assert ahead[1] == pytest.approx(20.0, abs=0.01)  # the wall, 20 m north
+    assert low[2] == pytest.approx(0.0, abs=0.05) and low[1] < 20.0  # the street
+    assert np.hypot(*(high[:2] - ASIDE.x)) > 1e4  # over the wall: far off
 
-    assert [w.made for w in kept] == ["fitted", "drawn"]
-    reach = float(np.sqrt(15.0**2 - 5.0**2))
-    assert kept[0].a == pytest.approx((-reach, 5.0)) and kept[0].b == pytest.approx((reach, 5.0))
-    assert kept[1] == drawn
+
+def test_the_panorama_s_own_walls_come_before_bd_topo_s():
+    fitted = facades.Wall((-500.0, 17.0), (500.0, 17.0), 30.0, "fitted")  # BD TOPO's, set back 3 m
+    walls = facades.Scene("p", (ASIDE.x, ASIDE.y, ASIDE.z), 0.0, (fitted,), (), 0)
+    view = cli._toward(EYE, ASIDE)
+
+    seen = cli._depth_of_view(view, (600, 600), walls, _wall_ahead(height=40.0), _level, 100)
+
+    assert seen[2, 2, 1] == pytest.approx(17.0, abs=0.01)
+
+
+def test_the_photo_s_outlines_are_drawn_where_the_panorama_sees_them():
+    old = np.zeros((600, 600, 3), np.uint8)
+    old[150:330, 440:470] = 255  # an upright on the wall (above its foot, 4° below the horizon)
+    today = np.zeros((600, 600, 3), np.uint8)
+    wall = _wall_ahead(height=40.0)
+
+    plain = cli._outlines(old, today)
+    moved = cli._parallax_outlines(old, today, EYE, cli._toward(EYE, ASIDE), None, wall, _level)
+
+    def column(drawn):  # where the amber lines stand
+        return float(np.median(np.nonzero((drawn == cli.OUTLINE_COLOUR).all(axis=2))[1]))
+
+    east = (column(plain) + 0.5 - 300) / F600 * 20.0  # where the camera sees the upright, 20 m off
+    seen_from = 299.5 + F600 * (east - ASIDE.x) / 20.0  # and so the panorama, 3 m east of it
+    assert column(moved) == pytest.approx(seen_from, abs=3.0)
+    assert seen_from < column(plain) - 40
 
 
 def test_an_outline_against_the_sky_stays_where_it_is_as_anything_far_off():
     old = np.zeros((600, 600, 3), np.uint8)
-    old[40:120, 290:310] = 255  # a spire over the roofs: its rays meet no wall
+    old[40:120, 290:310] = 255  # a spire over the roofs
     today = np.zeros((600, 600, 3), np.uint8)
-    aside = match.Panorama("p", 3.0, 0.0, 1.5, 0.0, path=None)
-    walls = ([], _wall_ahead(height=5.0))  # low: the spire stands above it
+    low = _wall_ahead(height=5.0)
 
-    plain = cli._outlines(old, today)
-    moved = cli._parallax_outlines(old, today, EYE, aside, walls, _level)
+    plain = (cli._outlines(old, today) == cli.OUTLINE_COLOUR).all(axis=2)
+    moved = cli._parallax_outlines(old, today, EYE, cli._toward(EYE, ASIDE), None, low, _level)
+    moved = (moved == cli.OUTLINE_COLOUR).all(axis=2)
 
-    amber = (plain == cli.OUTLINE_COLOUR).all(axis=2)
-    assert amber.any() and ((moved == cli.OUTLINE_COLOUR).all(axis=2) == amber).all()
+    near = cv2.dilate(plain.astype(np.uint8), np.ones((5, 5), np.uint8)).astype(bool)
+    assert plain.any() and moved[near].sum() >= 0.9 * moved.sum() >= 0.9 * plain.sum() * 0.5
