@@ -1292,3 +1292,50 @@ def test_an_outline_against_the_sky_stays_where_it_is_as_anything_far_off():
 
     near = cv2.dilate(plain.astype(np.uint8), np.ones((5, 5), np.uint8)).astype(bool)
     assert plain.any() and moved[near].sum() >= 0.9 * moved.sum() >= 0.9 * plain.sum() * 0.5
+
+
+def test_a_ray_down_meets_bd_topo_s_wall_before_the_street_beyond_the_fitted_walls():
+    aside = facades.Wall((-500.0, 60.0), (-400.0, 60.0), 30.0, "fitted")  # far to the left
+    walls = facades.Scene("p", (ASIDE.x, ASIDE.y, ASIDE.z), 0.0, (aside,), (), 0)
+    low = [[299.5, 299.5 + 0.035 * F600]]  # 2° down: the street 43 m off, a facade at 10 m first
+    view = cli._toward(EYE, ASIDE)
+
+    seen = cli._where_shown(view, (600, 600), np.array(low), walls, _wall_ahead(10.0), _level)
+
+    assert seen[0, 1] == pytest.approx(10.0, abs=0.05)
+
+
+@pytest.mark.parametrize("height", [600, 602, 603])
+def test_a_map_sampled_every_few_pixels_is_spread_to_every_pixel_where_it_belongs(height):
+    step = 4
+    rows = np.arange(step / 2 - 0.5, height, step)
+    columns = np.arange(step / 2 - 0.5, 600, step)
+    at = np.stack(np.meshgrid(columns, rows), axis=-1)  # each sample looks where it stands
+
+    to_x, to_y = cli._spread(at, (height, 600), step)
+
+    inner = (slice(2, height - 3), slice(2, 597))  # within the samples' span
+    assert np.abs(to_y - np.arange(height)[:, None])[inner].max() < 0.01
+    assert np.abs(to_x - np.arange(600)[None, :])[inner].max() < 0.01
+
+
+def test_a_map_is_not_blended_across_a_break():
+    at = np.zeros((10, 10, 2))
+    at[:, :5, 0], at[:, 5:, 0] = 100.0, 500.0  # a wall's edge against the sky beyond it
+    at[:, :, 1] = 50.0
+    at[0, 0] = np.nan  # a sample seen nowhere (behind the camera)
+
+    to_x, _ = cli._spread(at, (40, 40), 4)
+
+    found = np.unique(np.round(to_x))
+    assert set(found) <= {100.0, 500.0} | set(found[found < 0])  # nothing in between
+
+
+def test_the_plan_keeps_a_long_building_whose_corners_are_all_off_it():
+    m = match.Situated(0.0, 0.0, 1.5, 0.0, 0.5, 60.0, 30, 2, 3.0, [], "i", 0.1)
+    shown = match.Panorama("p", 2.0, 0.0, 2.5, 0.0, path=None)
+    block = [(-100.0, 8.0), (100.0, 8.0), (100.0, 18.0), (-100.0, 18.0)]  # 8 m ahead, 200 m long
+
+    plan = cli._plan(m, shown, [], (0.0, 0.0), [block])
+
+    assert len(plan["buildings"]) == 1

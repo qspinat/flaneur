@@ -155,7 +155,8 @@ let photos = [], at = 0, shownAt = 0, saving = false, outlines = false, prefetch
 let parallax = false, pairing = false;  // the outlines where today's view sees them; pairs shown
 const scenes = {};  // each photo's pairs and plan, asked for once (see /scene)
 const sceneOf = (p) => (scenes[p.id] ??= fetch(`/scene/${encodeURIComponent(p.id)}`)
-  .then((r) => (r.ok ? r.json() : null)).catch(() => null));
+  .then((r) => (r.ok ? r.json() : null)).catch(() => null)
+  .then((scene) => { if (!scene) delete scenes[p.id]; return scene; }));  // asked again later
 const todayPart = () => (outlines ? (parallax ? 'parallax' : 'outlines') : 'today');
 const $ = (id) => document.getElementById(id);
 const frameOf = (p, part) => `/frame/${encodeURIComponent(p.id)}/${part}`;
@@ -189,12 +190,16 @@ new ResizeObserver(() => { $('under').style.width = `${$('frame').getBoundingCli
 function ready() {
   $('frame').classList.remove('loading');
   $('loading').textContent = '';
+  ahead();
+}
+// the next photo's pictures, as they would be shown now, asked for while this one is judged
+function ahead() {
   const next = photos[at + 1];
-  if (next && prefetched !== next.id) {
-    prefetched = next.id;
-    for (const part of ['old', todayPart()]) new Image().src = frameOf(next, part);
-    sceneOf(next);
-  }
+  const parts = ['old', pairing ? 'today' : todayPart()];
+  if (!next || prefetched === `${next.id} ${parts}`) return;
+  prefetched = `${next.id} ${parts}`;
+  for (const part of parts) new Image().src = frameOf(next, part);
+  sceneOf(next);
 }
 function wipe(percent) {
   const v = Math.max(0, Math.min(100, percent));
@@ -214,8 +219,9 @@ function showToday() {
   $('right-label').textContent = !outlines ? 'aujourd\'hui →'
     : parallax ? 'contours, où la vue d\'aujourd\'hui les voit →' : 'contours de la photo sur aujourd\'hui →';
   const p = photos[at];
-  if (p) $('today').src = frameOf(p, todayPart());
+  if (p) $('today').src = frameOf(p, pairing ? 'today' : todayPart());  // hidden while pairing
   whenShown(p, sayWalls);
+  ahead();
 }
 // what is drawn once a photo's scene comes, if it is still the one shown
 const whenShown = (p, draw) => { if (p) sceneOf(p).then((scene) => { if (photos[at] === p) draw(scene); }); };
@@ -225,7 +231,7 @@ $('outlines').addEventListener('click', () => showOutlines(!outlines));
 $('parallax').addEventListener('click', () => showParallax(!parallax));
 function sayWalls(scene) {
   $('walls').textContent = !parallax || !scene ? ''
-    : scene.walls === 'fitted' ? 'Contours corrigés d\'après les murs du panorama de la vue, ajustés avec ses voisins (comme sur la page pour placer), sinon BD TOPO.'
+    : scene.walls === 'fitted' ? 'Contours corrigés d\'après les murs du panorama de la vue (ajustés avec ses voisins, ou dessinés à la main, comme sur la page pour placer) là où il en a, sinon BD TOPO.'
     : 'Contours corrigés d\'après BD TOPO (le panorama de la vue n\'a pas ses murs ajustés) : elle peut être décalée d\'un mètre ou deux des panoramas.';
 }
 const NO_PAIRS = {
@@ -241,6 +247,7 @@ function showPairing(on) {
   $('pictures').classList.toggle('pairs', on);
   const p = photos[at];
   if (on && p) { $('pair-old').src = frameOf(p, 'old'); $('pair-today').src = frameOf(p, 'today'); }
+  showToday();
 }
 $('pairing').addEventListener('click', () => showPairing(!pairing));
 function drawPairs(scene) {
@@ -317,7 +324,6 @@ function open(n) {
     $('frame').classList.add('loading');
     $('loading').textContent = 'Images en cours de dessin…';
     $('old').src = frameOf(p, 'old');
-    showToday();
     showPairing(pairing);
     drawPlan(null);
     drawPairs(null);
