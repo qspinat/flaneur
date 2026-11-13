@@ -1310,7 +1310,7 @@ def test_a_ray_down_meets_bd_topo_s_wall_before_the_street_beyond_the_fitted_wal
     low = [[299.5, 299.5 + 0.035 * F600]]  # 2° down: the street 43 m off, a facade at 10 m first
     view = cli._toward(EYE, ASIDE)
 
-    seen = cli._where_shown(view, (600, 600), np.array(low), walls, _wall_ahead(10.0), _level)
+    seen, _ = cli._where_shown(view, (600, 600), np.array(low), walls, _wall_ahead(10.0), _level)
 
     assert seen[0, 1] == pytest.approx(10.0, abs=0.05)
 
@@ -1451,3 +1451,55 @@ def test_a_pair_matched_in_the_view_is_shown_wherever_its_point_would_project():
     pairs = cli._pairs_shown(points, (120, 120), (60, 60), cli._toward(EYE, ASIDE), matched)
 
     assert [p["index"] for p in pairs] == [4]
+
+
+def _by_elevation(*bands):
+    """What rays see by how high they look: the first of `bands` (up to this elevation, degrees:
+    kind) they look below, else the sky."""
+
+    def kinds(rays):
+        up = np.degrees(np.arcsin(rays[:, 2]))
+        return np.select([up <= top for top, _ in bands], [kind for _, kind in bands], segment.SKY)
+
+    return kinds
+
+
+def _column_ahead(kinds):
+    """The middle column of a 6 × 6 map of today's view from ASIDE, a BD TOPO wall 20 m north
+    topped at 6 m (its rows look 25.7°, 16.1°, 5.5° up, then down)."""
+    seen = cli._depth_of_view(
+        cli._toward(EYE, ASIDE), (600, 600), None, _wall_ahead(height=6.0), _level, 100, kinds
+    )
+    return seen[:, 3]
+
+
+def test_a_wall_rises_as_far_as_its_panorama_sees_building_over_it():
+    column = _column_ahead(_by_elevation((20.0, segment.BUILT)))  # a roof up to 20° over a 13° wall
+
+    assert column[1, 1] == pytest.approx(20.0, abs=0.01)  # 16°: on the wall's face, 20 m off
+
+
+def test_the_sky_right_over_a_wall_stands_on_its_face():
+    column = _column_ahead(_by_elevation((10.0, segment.BUILT)))  # sky from 10° up
+
+    assert column[0, 1] == pytest.approx(20.0, abs=0.01)
+    assert column[1, 1] == pytest.approx(20.0, abs=0.01)
+
+
+def test_trees_over_a_wall_stay_far():
+    column = _column_ahead(_by_elevation((10.0, segment.BUILT), (30.0, segment.OTHER)))
+
+    assert column[1, 1] > 1000 and column[0, 1] > 1000
+
+
+def test_a_building_seen_over_the_sky_over_a_wall_stays_far():
+    seen = _by_elevation((10.0, segment.BUILT), (20.0, segment.SKY), (30.0, segment.BUILT))
+    column = _column_ahead(seen)
+
+    assert column[1, 1] == pytest.approx(20.0, abs=0.01) and column[0, 1] > 1000  # 26°: a spire
+
+
+def test_a_panorama_not_segmented_leaves_the_walls_as_they_were():
+    column = _column_ahead(lambda rays: np.full(len(rays), segment.BUILT))  # building everywhere
+
+    assert column[1, 1] > 1000 and column[0, 1] > 1000

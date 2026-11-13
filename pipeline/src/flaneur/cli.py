@@ -1308,15 +1308,50 @@ def _depth_of_view(
     bdtopo: Blocks,
     street: Callable[[np.ndarray, np.ndarray], np.ndarray],
     step: int = DEPTH_STEP,
+    kinds: Callable[[np.ndarray], np.ndarray] | None = None,
 ) -> np.ndarray:
     """Where what a view of today (`view`: cut from a panorama, of `size`) shows stands, every
-    `step` pixels (rows × columns × east, north, up; see _where_shown)."""
+    `step` pixels (rows × columns × east, north, up; see _where_shown); the walls raised as far
+    as the panorama sees building over them (`kinds`: what rays from it see, segment.BUILT...;
+    see _up_the_walls)."""
     h, w = size
     rows = np.arange(step / 2 - 0.5, h, step)
     columns = np.arange(step / 2 - 0.5, w, step)
     pixels = np.stack(np.meshgrid(columns, rows), axis=-1).reshape(-1, 2)
-    stands = _where_shown(view, size, pixels, walls, bdtopo, street)
-    return stands.reshape(len(rows), len(columns), 3)
+    stands, on_wall = _where_shown(view, size, pixels, walls, bdtopo, street)
+    shape = (len(rows), len(columns))
+    stands = stands.reshape(*shape, 3)
+    if kinds is not None:
+        directions = match.rays(pixels, size, view.fov, view.horizon, view.heading)
+        seen = kinds(directions).reshape(shape)
+        stands = _up_the_walls(stands, on_wall.reshape(shape), seen, view)
+    return stands
+
+
+def _up_the_walls(
+    stands: np.ndarray, on_wall: np.ndarray, seen: np.ndarray, view: match.View
+) -> np.ndarray:
+    """Each column of a view's map (`stands`, rows top down; the view upright, each column a
+    vertical plane) raised over its topmost wall, up the wall's face: as long as the panorama
+    sees building there (`seen`: BD TOPO's walls stop at the gutter, a roof, its dormers and
+    chimneys above it; fitted walls, topped already, only gain their dormers), then the sky
+    right over it (measured 13/11: else the photo's own roofs, looked for far off, come out in
+    today's sky). Trees, or a building seen past the sky (a spire, a tower), stay as they were:
+    behind. A panorama not segmented (building everywhere, as segment.seen says it) leaves them
+    all as they were, as facades.topped does."""
+    if not np.any(seen == segment.SKY):
+        return stands
+    eye = np.array([view.x, view.y, view.z])
+    rows = np.arange(len(on_wall))[:, None]
+    top = on_wall.argmax(axis=0)  # each column's topmost wall (none: 0, nothing over it)
+    roof = np.where((rows < top) & (seen != segment.BUILT), rows, -1).max(axis=0)  # roof ends
+    sky = np.where((rows <= roof) & (seen != segment.SKY), rows, -1).max(axis=0)  # its sky ends
+    raised = (rows > sky) & (rows < top)
+    reach = np.hypot(*(stands[top, np.arange(len(top)), :2] - eye[:2]).T)  # the wall's face, level
+    d = stands - eye
+    with np.errstate(divide="ignore", invalid="ignore"):  # straight up: never raised, never read
+        face = eye + d * (reach / np.hypot(d[..., 0], d[..., 1]))[..., None]
+    return np.where(raised[..., None], face, stands)
 
 
 def _where_shown(
@@ -1326,11 +1361,11 @@ def _where_shown(
     walls: facades.Scene | None,
     bdtopo: Blocks,
     street: Callable[[np.ndarray, np.ndarray], np.ndarray],
-) -> np.ndarray:
+) -> tuple[np.ndarray, np.ndarray]:
     """Where what `pixels` of a view of today (`view`, from a panorama; of `size`) show stands
     (east, north, up): on the panorama's own walls (`walls`, fitted from its neighbours and seen
     from it, as the placing page takes them), else on BD TOPO's seen from it, else on the
-    street (`street`: its height at points), else SKY_M off."""
+    street (`street`: its height at points), else SKY_M off; and which stand on a wall."""
     directions = match.rays(pixels, size, view.fov, view.horizon, view.heading)
     eye = np.array([view.x, view.y, view.z])
     away = np.full(len(directions), np.inf)
@@ -1340,9 +1375,11 @@ def _where_shown(
     left = np.flatnonzero(~np.isfinite(away))
     met, edge = bdtopo.hit(eye, directions[left])
     away[left[edge >= 0]] = np.linalg.norm(met[edge >= 0] - eye, axis=1)
-    away = np.minimum(away, match._to_street(eye, directions, street))
+    to_street = match._to_street(eye, directions, street)
+    on_wall = np.isfinite(away) & (away <= to_street)
+    away = np.minimum(away, to_street)
     away = np.where(np.isfinite(away), away, SKY_M)
-    return eye + away[:, None] * directions
+    return eye + away[:, None] * directions, on_wall
 
 
 BREAK_PX = 4 * DEPTH_STEP  # samples of a map this far apart are a break (a wall's edge, the sky)
@@ -1388,14 +1425,15 @@ def _parallax_outlines(
     walls: facades.Scene | None,
     bdtopo: Blocks,
     street: Callable[[np.ndarray, np.ndarray], np.ndarray],
+    kinds: Callable[[np.ndarray], np.ndarray] | None = None,
 ) -> np.ndarray:
     """Today's view as _outlines draws it, the old photo's outlines drawn where today's view
     (`seen_from` its panorama) sees what they show: each of its pixels taken where it stands
-    (see _depth_of_view), then looked for in the photo through the `camera` found (see
-    _spread). What the panorama sees from elsewhere (parallax) no longer shifts them; what is
-    far stays."""
+    (see _depth_of_view; `kinds`: what its rays see), then looked for in the photo through the
+    `camera` found (see _spread). What the panorama sees from elsewhere (parallax) no longer
+    shifts them; what is far stays."""
     size = today.shape[:2]
-    stands = _depth_of_view(seen_from, size, walls, bdtopo, street)
+    stands = _depth_of_view(seen_from, size, walls, bdtopo, street, kinds=kinds)
     rows, columns = stands.shape[:2]
     at = match.project(camera, stands.reshape(-1, 3), size).reshape(rows, columns, 2)
     to_x, to_y = _spread(at, size, DEPTH_STEP)
@@ -2704,7 +2742,8 @@ def confirm_placed(port: int = 8768, open_browser: bool = True) -> None:
         if part == "parallax":
             seen_from = _toward(f.camera, f.panorama)
             own, bdtopo = walls.of(f.panorama)
-            args = (f.camera, seen_from, own, bdtopo, heights.streets)
+            kinds = functools.partial(walls.scenes.seen, f.panorama)
+            args = (f.camera, seen_from, own, bdtopo, heights.streets, kinds)
             picture = _parallax_outlines(f.photo, f.today, *args)
         elif part == "outlines":
             picture = _outlines(f.photo, f.today)
