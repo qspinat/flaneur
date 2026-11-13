@@ -195,13 +195,15 @@
   </section>
 </main>
 <script>
-let photos = [], at = 0, shownAt = 0, saving = false, outlines = false, prefetched = null;
-let parallax = false, pairing = false;  // the outlines where today's view sees them; pairs shown
+let photos = [], at = 0, shownAt = 0, saving = false, prefetched = null;
+// what the pictures show, one view at a time: today alone, the photo's outlines on it, those
+// outlines where today's view sees them (parallax), or the pairs side by side
+let view = 'today';
 const scenes = {};  // each photo's pairs and plan, asked for once (see /scene)
 const sceneOf = (p) => (scenes[p.id] ??= fetch(`/scene/${encodeURIComponent(p.id)}`)
   .then((r) => (r.ok ? r.json() : null)).catch(() => null)
   .then((scene) => { if (!scene) delete scenes[p.id]; return scene; }));  // asked again later
-const todayPart = () => (outlines ? (parallax ? 'parallax' : 'outlines') : 'today');
+const todayPart = () => (view === 'pairs' ? 'today' : view);  // the frame /frame/<id>/<part>
 const $ = (id) => document.getElementById(id);
 const frameOf = (p, part) => `/frame/${encodeURIComponent(p.id)}/${part}`;
 const LABEL = { yes: 'oui', near: 'bons bâtiments, caméra à corriger', no: 'non' };
@@ -239,7 +241,7 @@ function ready() {
 // the next photo's pictures, as they would be shown now, asked for while this one is judged
 function ahead() {
   const next = photos[at + 1];
-  const parts = ['old', pairing ? 'today' : todayPart()];
+  const parts = ['old', todayPart()];
   if (!next || prefetched === `${next.id} ${parts}`) return;
   prefetched = `${next.id} ${parts}`;
   for (const part of parts) new Image().src = frameOf(next, part);
@@ -258,23 +260,27 @@ function drag(e) {
 $('frame').addEventListener('pointerdown', (e) => { $('frame').setPointerCapture(e.pointerId); drag(e); });
 $('frame').addEventListener('pointermove', (e) => { if ($('frame').hasPointerCapture(e.pointerId)) drag(e); });
 function showToday() {
-  $('outlines').setAttribute('aria-pressed', String(outlines));
-  $('parallax').setAttribute('aria-pressed', String(parallax));
-  $('right-label').textContent = !outlines ? 'aujourd\'hui →'
-    : parallax ? 'contours, où la vue d\'aujourd\'hui les voit →' : 'contours de la photo sur aujourd\'hui →';
+  const BUTTON = { outlines: 'outlines', parallax: 'parallax', pairing: 'pairs' };
+  for (const [id, shows] of Object.entries(BUTTON)) $(id).setAttribute('aria-pressed', String(view === shows));
+  $('pictures').classList.toggle('pairs', view === 'pairs');
+  $('right-label').textContent = { outlines: 'contours de la photo sur aujourd\'hui →', parallax: 'contours, où la vue d\'aujourd\'hui les voit →' }[view] ?? 'aujourd\'hui →';
   const p = photos[at];
-  if (p) $('today').src = frameOf(p, pairing ? 'today' : todayPart());  // hidden while pairing
+  if (p) {
+    $('today').src = frameOf(p, todayPart());  // hidden with the pairs
+    if (view === 'pairs') { $('pair-old').src = frameOf(p, 'old'); $('pair-today').src = frameOf(p, 'today'); }
+  }
   whenShown(p, sayWalls);
   ahead();
 }
+// a view's button or key shows it; again, today alone
+function show(next) { view = view === next ? 'today' : next; showToday(); }
 // what is drawn once a photo's scene comes, if it is still the one shown
 const whenShown = (p, draw) => { if (p) sceneOf(p).then((scene) => { if (photos[at] === p) draw(scene); }); };
-function showOutlines(on) { outlines = on; if (!on) parallax = false; showToday(); }
-function showParallax(on) { parallax = on; if (on) outlines = true; showToday(); }
-$('outlines').addEventListener('click', () => showOutlines(!outlines));
-$('parallax').addEventListener('click', () => showParallax(!parallax));
+$('outlines').addEventListener('click', () => show('outlines'));
+$('parallax').addEventListener('click', () => show('parallax'));
+$('pairing').addEventListener('click', () => show('pairs'));
 function sayWalls(scene) {
-  $('walls').textContent = !parallax || !scene ? ''
+  $('walls').textContent = view !== 'parallax' || !scene ? ''
     : scene.walls === 'fitted' ? 'Contours corrigés d\'après les murs du panorama de la vue (ajustés avec ses voisins, ou dessinés à la main, comme sur la page pour placer) là où il en a, sinon BD TOPO.'
     : 'Contours corrigés d\'après BD TOPO (le panorama de la vue n\'a pas ses murs ajustés) : elle peut être décalée d\'un mètre ou deux des panoramas.';
 }
@@ -285,15 +291,6 @@ const NO_PAIRS = {
 };
 
 // the pairs: the photo and today's view side by side, each pair's two ends numbered alike
-function showPairing(on) {
-  pairing = on;
-  $('pairing').setAttribute('aria-pressed', String(on));
-  $('pictures').classList.toggle('pairs', on);
-  const p = photos[at];
-  if (on && p) { $('pair-old').src = frameOf(p, 'old'); $('pair-today').src = frameOf(p, 'today'); }
-  showToday();
-}
-$('pairing').addEventListener('click', () => showPairing(!pairing));
 function drawPairs(scene) {
   const pairs = scene?.pairs ?? [];
   const p = photos[at];
@@ -356,7 +353,7 @@ function lit(n) {
 }
 function stepPair(by) {
   const count = $('loupes').childElementCount;
-  if (!pairing || !count) return;
+  if (view !== 'pairs' || !count) return;
   chosen = chosen == null ? (by > 0 ? 0 : count - 1) : (chosen + by + count) % count;
   lit(chosen);
   document.querySelector(`.loupe[data-n="${chosen}"]`)?.scrollIntoView({ block: 'nearest' });
@@ -487,7 +484,7 @@ function open(n) {
     $('frame').classList.add('loading');
     $('loading').textContent = 'Images en cours de dessin…';
     $('old').src = frameOf(p, 'old');
-    showPairing(pairing);
+    showToday();
     for (const draw of [drawPlan, drawPairs, sayView]) draw(null);
     whenShown(p, (scene) => { drawPlan(scene); drawPairs(scene); sayView(scene); });
   }
@@ -528,7 +525,7 @@ $('no-plain').addEventListener('click', () => judge('no'));
 $('skip').addEventListener('click', () => open(at + 1));  // nothing written: a verdict given stays
 const KEYS = {
   Enter: () => judge('yes'), p: () => judge('near'), x: openReasons, s: () => open(at + 1),
-  o: () => showOutlines(!outlines), l: () => showParallax(!parallax), k: () => showPairing(!pairing),
+  o: () => show('outlines'), l: () => show('parallax'), k: () => show('pairs'),
   n: () => stepPair(1), N: () => stepPair(-1),
   ArrowRight: () => open(at + 1), ArrowLeft: () => open(at - 1),
 };
