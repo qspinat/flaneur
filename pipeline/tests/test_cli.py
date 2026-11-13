@@ -1440,3 +1440,14 @@ def test_pairs_matched_in_the_view_are_shown_alone_and_said_so():
     assert {tuple(p["today"]) for p in pairs} == {(11.0, 30.0), (22.0, 30.0)}
     unmatched = cli._pairs_shown(points, (120, 120), (60, 60), cli._toward(EYE, ASIDE))
     assert len(unmatched) == cli.PAIRS_SHOWN and not any(p["matched"] for p in unmatched)
+
+
+def test_a_pair_matched_in_the_view_is_shown_wherever_its_point_would_project():
+    points = _points_along_a_wall()
+    points.world[4] = [0.0, -20.0, 1.5]  # its point behind the view: it would project nowhere
+    matched = np.full((30, 2), np.nan)
+    matched[4] = [11.0, 30.0]
+
+    pairs = cli._pairs_shown(points, (120, 120), (60, 60), cli._toward(EYE, ASIDE), matched)
+
+    assert [p["index"] for p in pairs] == [4]

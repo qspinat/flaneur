@@ -430,7 +430,7 @@ function look(next) {
     const { x, y, half } = planView, plan = $('plan');
     plan.setAttribute('viewBox', `${x - half} ${y - half} ${2 * half} ${2 * half}`);
     plan.style.setProperty('--k', half / PLAN_HALF);
-    const bar = 10 ** Math.floor(Math.log10(half / 2));  // a round length, a tenth to a half of the plan
+    const bar = 10 ** Math.floor(Math.log10(half / 2));  // a round length, a fortieth to a quarter of the plan
     $('scale-bar').style.width = `${(bar / (2 * half)) * plan.getBoundingClientRect().width}px`;
     $('scale-text').textContent = `${bar.toLocaleString('fr-FR')} m`;
   });

@@ -1436,11 +1436,13 @@ def _pairs_shown(
     scale = size[1] / (photo[1] * match.PHOTO_SIDE / max(photo[:2]))
     old = points.pixels * scale
     today = match.project(seen_from, points.world, size)
-    inside = _inside(old, size) & _inside(today, size)
     here = np.zeros(len(old), bool) if matched is None else ~np.isnan(matched).any(axis=1)
-    if (inside & here).any():
-        today = np.where(here[:, None], matched, today)
-        inside &= here & _inside(today, size)
+    there = today if matched is None else np.where(here[:, None], matched, today)
+    seen = _inside(old, size) & here & _inside(there, size)
+    if seen.any():  # matched in the view: those alone, where it matched them
+        today, inside = there, seen
+    else:
+        inside = _inside(old, size) & _inside(today, size)
     kept = np.flatnonzero(inside)
     chosen: list[int] = []
     if len(kept):  # the farthest from those chosen, each in turn: spread over the photo
