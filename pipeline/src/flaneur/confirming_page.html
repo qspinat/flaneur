@@ -39,7 +39,9 @@
   button:focus-visible, input:focus-visible { outline: 3px solid #1d5fa8; outline-offset: 2px; }
   button[aria-pressed=true] { background: var(--ink); color: var(--paper); border-color: var(--ink); }
   #views { margin: 0 0 8px; }
-  #walls { font-size: 13px; color: var(--quiet); margin: 0 0 8px; min-height: 1.4em; max-width: 64ch; }
+  .note { font-size: 13px; color: var(--quiet); margin: 0 0 8px; max-width: 64ch; }
+  .note.warn { color: var(--no); }
+  #walls { min-height: 1.4em; }
   /* the pairs: the photo and today's view side by side, each pair's two ends numbered alike */
   #pairs { display: none; gap: 12px; align-items: start; }
   #pictures.pairs #pairs { display: flex; }
@@ -57,20 +59,53 @@
   .old-side .mark, .old-side .mark span { background: var(--amber); color: var(--ink); }
   .today-side .mark, .today-side .mark span { background: var(--enamel); color: var(--paper); }
   .mark.lit { box-shadow: 0 0 0 2px var(--paper), 0 0 0 5px var(--ink); z-index: 2; }
+  .today-side .mark.projected { background: var(--paper); box-shadow: 0 0 0 2px var(--enamel), 0 0 0 3px var(--paper); }
+  #pairs.focus .mark:not(.lit) { opacity: 0.25; }
+  #pairs { position: relative; }
+  #pair-line { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; overflow: visible; z-index: 3; }
+  #pair-line line { stroke: var(--ink); stroke-width: 2; stroke-dasharray: 6 4; }
+  #pair-line line.under { stroke: var(--paper); stroke-width: 5; stroke-dasharray: none; }
+  /* each pair's two details, enlarged, side by side: is it the same one? */
+  #loupes { display: none; flex-wrap: wrap; gap: 10px; margin-top: 12px; }
+  #pictures.pairs #loupes { display: flex; }
+  .loupe { display: flex; gap: 3px; align-items: flex-start; padding: 4px; border: 1px solid var(--line); background: none; cursor: pointer; font: inherit; }
+  .loupe.lit { border-color: var(--ink); box-shadow: 0 0 0 2px var(--ink); }
+  .loupe b { font: 600 12px/15px var(--plate); min-width: 20px; padding: 0 3px; border-radius: 3px; background: var(--ink); color: var(--paper); align-self: flex-start; }
+  .crop { position: relative; background-repeat: no-repeat; background-color: #ddd; }
+  .crop::after { content: ''; position: absolute; left: 50%; top: 50%; width: 14px; height: 14px; margin: -7px 0 0 -7px; border-radius: 50%; }
+  .crop.old::after { box-shadow: 0 0 0 2px var(--amber), 0 0 0 3px var(--ink); }
+  .crop.today::after { box-shadow: 0 0 0 2px var(--paper), 0 0 0 3px var(--enamel); }
+  .crop.today.projected::after { box-shadow: 0 0 0 2px var(--enamel); border: 1px dashed var(--paper); }
   #no-pairs { display: none; font-size: 14px; color: var(--quiet); }
   #pictures.pairs.empty #no-pairs { display: block; }
   /* the plan: drawn as a survey sheet, the camera found and the panorama its view comes from */
   #plan-box { margin: 0 0 12px; }
-  #plan { display: block; width: 100%; max-width: 440px; aspect-ratio: 1; background: #f8f4ec; border: 1px solid var(--line); }
-  #plan .building { fill: url(#hatch); stroke: #8c8272; stroke-width: 0.25; }
-  #plan .cone { fill: var(--amber); fill-opacity: 0.28; stroke: var(--amber); stroke-width: 0.35; }
+  #plan-frame { position: relative; max-width: 440px; }
+  #plan { display: block; width: 100%; aspect-ratio: 1; background: #f8f4ec; border: 1px solid var(--line); touch-action: none; cursor: grab; }
+  #plan.moving { cursor: grabbing; }
+  #zoom { position: absolute; right: 6px; top: 6px; display: flex; flex-direction: column; gap: 4px; }
+  #zoom button { width: 32px; height: 32px; font: 600 16px/1 var(--plate); padding: 0; cursor: pointer; background: var(--paper); border: 1px solid var(--line); }
+  /* lines keep their width on the screen; marks, drawn at unit size, follow the zoom (--k) */
+  #plan { --k: 1; font-size: calc(2.6px * var(--k)); }
+  #plan .line { vector-effect: non-scaling-stroke; fill: none; stroke-width: 1.5px; }
+  #plan .building { fill: url(#hatch); stroke: #8c8272; stroke-width: 1px; }
+  #plan .cone { fill: var(--amber); fill-opacity: 0.28; stroke: var(--amber); }
+  #plan .gap, #plan .seen { stroke: var(--enamel); stroke-dasharray: 5px 4px; }
+  #plan .points { stroke: var(--ink); stroke-opacity: 0.45; stroke-width: 3px; stroke-linecap: round; }
+  #plan .sized { transform: scale(var(--k)); }
+  #plan .sized text { font-size: 2.6px; }
   #plan .camera { fill: var(--amber); stroke: var(--ink); stroke-width: 0.35; }
-  #plan .gap { stroke: var(--enamel); stroke-width: 0.35; stroke-dasharray: 1 0.8; }
   #plan .panorama { fill: var(--enamel); stroke: var(--paper); stroke-width: 0.4; }
   #plan .source { fill: none; stroke: var(--enamel); stroke-width: 0.35; }
   #plan .caption { stroke: var(--ink); stroke-width: 0.45; }
-  #plan text { font-family: var(--plate); font-size: 2.6px; fill: var(--ink); }
+  #plan .tag { fill: var(--ink); } #plan .tag-text { fill: var(--paper); font-weight: 600; }
+  #plan text { font-family: var(--plate); fill: var(--ink); }
   #plan .away { fill: var(--enamel); font-weight: 600; }
+  /* north and the scale: on the plan's glass, whatever the zoom */
+  #north, #scale { position: absolute; left: 10px; font: 13px/1 var(--plate); color: var(--ink); pointer-events: none; }
+  #north { top: 10px; }
+  #scale { bottom: 10px; display: flex; flex-direction: column; gap: 3px; }
+  #scale i { display: block; height: 2px; background: var(--ink); }
   .legend { list-style: none; padding: 0; margin: 4px 0 0; display: flex; flex-wrap: wrap; gap: 2px 14px; font-size: 13px; color: var(--quiet); }
   .legend b { font-weight: normal; }
   .legend .c { color: #b8811a; } .legend .p { color: var(--enamel); }
@@ -99,7 +134,8 @@
     <button id="parallax" aria-pressed="false">Parallaxe (L)</button>
     <button id="pairing" aria-pressed="false">Paires (K)</button>
   </div>
-  <p id="walls"></p>
+  <p id="view-note" class="note"></p>
+  <p id="walls" class="note"></p>
   <div id="frame" class="loading" aria-label="La photo posée sur la vue d'aujourd'hui, cadrée comme sa caméra">
     <img id="today" alt="La vue d'aujourd'hui, cadrée comme la caméra trouvée">
     <img id="old" alt="La photo ancienne">
@@ -113,21 +149,29 @@
     <figure class="old-side"><div class="shot"><img id="pair-old" alt="La photo ancienne, ses points d'appui numérotés"><div class="marks"></div></div>
       <figcaption>La photo : où elle montre chaque point</figcaption></figure>
     <figure class="today-side"><div class="shot"><img id="pair-today" alt="La vue d'aujourd'hui, les mêmes points numérotés"><div class="marks"></div></div>
-      <figcaption>Aujourd'hui : où le panorama voit le même point</figcaption></figure>
+      <figcaption id="today-caption"></figcaption></figure>
+    <svg id="pair-line" aria-hidden="true"></svg>
   </div>
+  <div id="loupes" aria-label="Chaque paire, ses deux détails agrandis"></div>
   <p id="no-pairs"></p>
   </section>
   <section id="judge">
   <div id="plan-box">
-    <svg id="plan" viewBox="-40 -40 80 80" role="img" aria-label="Plan : la caméra trouvée, son champ, le panorama d'où vient la vue d'aujourd'hui">
+    <div id="plan-frame">
+    <svg id="plan" viewBox="-40 -40 80 80" role="img" aria-label="Plan : la caméra trouvée, son champ, le panorama d'où vient la vue d'aujourd'hui ; molette ou pincement pour zoomer, glisser pour déplacer">
       <defs><pattern id="hatch" width="1.2" height="1.2" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
         <rect width="1.2" height="1.2" fill="#ece4d6"/><line x1="0" y1="0" x2="0" y2="1.2" stroke="#a89c88" stroke-width="0.3"/></pattern></defs>
       <g id="plan-drawn"></g>
     </svg>
+    <span id="north">N ↑</span><span id="scale"><span id="scale-text"></span><i id="scale-bar"></i></span>
+    <div id="zoom"><button id="zoom-in" aria-label="Zoomer">+</button><button id="zoom-out" aria-label="Dézoomer">−</button><button id="zoom-reset" aria-label="Revenir au plan entier">⟲</button></div>
+    </div>
     <ul class="legend">
       <li><b class="c">▲</b> la caméra trouvée, son champ</li>
       <li><b class="p">●</b> le panorama de la vue</li>
       <li><b class="p">○</b> ceux de ses points</li>
+      <li><b>·</b> ses points dans l'espace, ceux des paires numérotés</li>
+      <li><b class="p">- -</b> le champ de la vue d'aujourd'hui</li>
       <li><b>×</b> la place de sa légende</li>
     </ul>
   </div>
@@ -146,18 +190,20 @@
     </div>
   </div>
   <p id="state"></p>
-  <p class="keys"><kbd>Entrée</kbd> oui · <kbd>P</kbd> bons bâtiments, caméra à corriger · <kbd>X</kbd> non, puis <kbd>1</kbd>–<kbd>5</kbd> pourquoi · <kbd>S</kbd> passer · <kbd>←</kbd> <kbd>→</kbd> précédente, suivante · <kbd>Espace</kbd> enfoncé : aujourd'hui seul · <kbd>O</kbd> contours · <kbd>L</kbd> contours corrigés de la parallaxe · <kbd>K</kbd> paires côte à côte.
-    La photo est posée sur la vue d'aujourd'hui prise du panorama le plus proche, cadrée comme sa caméra : glissez pour passer de l'une à l'autre. Le panorama ne se tient pas où se tenait le photographe (voir le plan) : les façades proches se décalent d'autant. L redessine les contours là où la vue d'aujourd'hui voit ce qu'ils montrent, d'après les murs ajustés entre panoramas (sinon BD TOPO) : jugez alors sur les façades encore debout ; un arbre, un réverbère, un bâtiment démoli depuis prennent la distance du mur derrière eux et restent décalés. Oui : les façades, les arêtes et les fuyantes se continuent d'une image à l'autre, la caméra au bon endroit à un mètre près (à quelques mètres du panorama, les façades proches se décalent un peu, les lointaines non). P : les bons bâtiments, mais la caméra à déplacer ou à tourner ; elle sera corrigée plus tard. Un « non » ou un P la retire ; les photos situées à partir d'elle le seront de nouveau sans elle.</p>
+  <p class="keys"><kbd>Entrée</kbd> oui · <kbd>P</kbd> bons bâtiments, caméra à corriger · <kbd>X</kbd> non, puis <kbd>1</kbd>–<kbd>5</kbd> pourquoi · <kbd>S</kbd> passer · <kbd>←</kbd> <kbd>→</kbd> précédente, suivante · <kbd>Espace</kbd> enfoncé : aujourd'hui seul · <kbd>O</kbd> contours · <kbd>L</kbd> contours corrigés de la parallaxe · <kbd>K</kbd> paires côte à côte, <kbd>N</kbd> (<kbd>Maj</kbd>+<kbd>N</kbd>) la paire suivante (précédente).
+    La photo est posée sur la vue d'aujourd'hui prise d'un panorama qui a servi à la placer (sinon du plus proche placé par COLMAP), cadrée comme sa caméra : glissez pour passer de l'une à l'autre. Le panorama ne se tient pas où se tenait le photographe (voir le plan) : les façades proches se décalent d'autant. L redessine les contours là où la vue d'aujourd'hui voit ce qu'ils montrent, d'après les murs ajustés entre panoramas (sinon BD TOPO) : jugez alors sur les façades encore debout ; un arbre, un réverbère, un bâtiment démoli depuis prennent la distance du mur derrière eux et restent décalés. Oui : les façades, les arêtes et les fuyantes se continuent d'une image à l'autre, la caméra au bon endroit à un mètre près (à quelques mètres du panorama, les façades proches se décalent un peu, les lointaines non). P : les bons bâtiments, mais la caméra à déplacer ou à tourner ; elle sera corrigée plus tard. Un « non » ou un P la retire ; les photos situées à partir d'elle le seront de nouveau sans elle.</p>
   </section>
 </main>
 <script>
-let photos = [], at = 0, shownAt = 0, saving = false, outlines = false, prefetched = null;
-let parallax = false, pairing = false;  // the outlines where today's view sees them; pairs shown
+let photos = [], at = 0, shownAt = 0, saving = false, prefetched = null;
+// what the pictures show, one view at a time: today alone, the photo's outlines on it, those
+// outlines where today's view sees them (parallax), or the pairs side by side
+let view = 'today';
 const scenes = {};  // each photo's pairs and plan, asked for once (see /scene)
 const sceneOf = (p) => (scenes[p.id] ??= fetch(`/scene/${encodeURIComponent(p.id)}`)
   .then((r) => (r.ok ? r.json() : null)).catch(() => null)
   .then((scene) => { if (!scene) delete scenes[p.id]; return scene; }));  // asked again later
-const todayPart = () => (outlines ? (parallax ? 'parallax' : 'outlines') : 'today');
+const todayPart = () => (view === 'pairs' ? 'today' : view);  // the frame /frame/<id>/<part>
 const $ = (id) => document.getElementById(id);
 const frameOf = (p, part) => `/frame/${encodeURIComponent(p.id)}/${part}`;
 const LABEL = { yes: 'oui', near: 'bons bâtiments, caméra à corriger', no: 'non' };
@@ -195,7 +241,7 @@ function ready() {
 // the next photo's pictures, as they would be shown now, asked for while this one is judged
 function ahead() {
   const next = photos[at + 1];
-  const parts = ['old', pairing ? 'today' : todayPart()];
+  const parts = ['old', todayPart()];
   if (!next || prefetched === `${next.id} ${parts}`) return;
   prefetched = `${next.id} ${parts}`;
   for (const part of parts) new Image().src = frameOf(next, part);
@@ -214,23 +260,27 @@ function drag(e) {
 $('frame').addEventListener('pointerdown', (e) => { $('frame').setPointerCapture(e.pointerId); drag(e); });
 $('frame').addEventListener('pointermove', (e) => { if ($('frame').hasPointerCapture(e.pointerId)) drag(e); });
 function showToday() {
-  $('outlines').setAttribute('aria-pressed', String(outlines));
-  $('parallax').setAttribute('aria-pressed', String(parallax));
-  $('right-label').textContent = !outlines ? 'aujourd\'hui →'
-    : parallax ? 'contours, où la vue d\'aujourd\'hui les voit →' : 'contours de la photo sur aujourd\'hui →';
+  const BUTTON = { outlines: 'outlines', parallax: 'parallax', pairing: 'pairs' };
+  for (const [id, shows] of Object.entries(BUTTON)) $(id).setAttribute('aria-pressed', String(view === shows));
+  $('pictures').classList.toggle('pairs', view === 'pairs');
+  $('right-label').textContent = { outlines: 'contours de la photo sur aujourd\'hui →', parallax: 'contours, où la vue d\'aujourd\'hui les voit →' }[view] ?? 'aujourd\'hui →';
   const p = photos[at];
-  if (p) $('today').src = frameOf(p, pairing ? 'today' : todayPart());  // hidden while pairing
+  if (p) {
+    $('today').src = frameOf(p, todayPart());  // hidden with the pairs
+    if (view === 'pairs') { $('pair-old').src = frameOf(p, 'old'); $('pair-today').src = frameOf(p, 'today'); }
+  }
   whenShown(p, sayWalls);
   ahead();
 }
+// a view's button or key shows it; again, today alone
+function show(next) { view = view === next ? 'today' : next; showToday(); }
 // what is drawn once a photo's scene comes, if it is still the one shown
 const whenShown = (p, draw) => { if (p) sceneOf(p).then((scene) => { if (photos[at] === p) draw(scene); }); };
-function showOutlines(on) { outlines = on; if (!on) parallax = false; showToday(); }
-function showParallax(on) { parallax = on; if (on) outlines = true; showToday(); }
-$('outlines').addEventListener('click', () => showOutlines(!outlines));
-$('parallax').addEventListener('click', () => showParallax(!parallax));
+$('outlines').addEventListener('click', () => show('outlines'));
+$('parallax').addEventListener('click', () => show('parallax'));
+$('pairing').addEventListener('click', () => show('pairs'));
 function sayWalls(scene) {
-  $('walls').textContent = !parallax || !scene ? ''
+  $('walls').textContent = view !== 'parallax' || !scene ? ''
     : scene.walls === 'fitted' ? 'Contours corrigés d\'après les murs du panorama de la vue (ajustés avec ses voisins, ou dessinés à la main, comme sur la page pour placer) là où il en a, sinon BD TOPO.'
     : 'Contours corrigés d\'après BD TOPO (le panorama de la vue n\'a pas ses murs ajustés) : elle peut être décalée d\'un mètre ou deux des panoramas.';
 }
@@ -241,39 +291,89 @@ const NO_PAIRS = {
 };
 
 // the pairs: the photo and today's view side by side, each pair's two ends numbered alike
-function showPairing(on) {
-  pairing = on;
-  $('pairing').setAttribute('aria-pressed', String(on));
-  $('pictures').classList.toggle('pairs', on);
-  const p = photos[at];
-  if (on && p) { $('pair-old').src = frameOf(p, 'old'); $('pair-today').src = frameOf(p, 'today'); }
-  showToday();
-}
-$('pairing').addEventListener('click', () => showPairing(!pairing));
 function drawPairs(scene) {
   const pairs = scene?.pairs ?? [];
+  const p = photos[at];
+  chosen = null;
   $('pictures').classList.toggle('empty', !pairs.length);
   $('no-pairs').textContent = scene ? (NO_PAIRS[scene.no_pairs] ?? 'Aucun point dans les deux images.') : '';
+  $('today-caption').textContent = pairs.length && !pairs.some((pair) => pair.matched)
+    ? 'Aujourd\'hui : où ce panorama verrait le point (projeté : il n\'a pas servi à l\'appariement)'
+    : 'Aujourd\'hui : où ce panorama a apparié le même détail';
+  const lights = (el, n) => {  // hovered, a pair lights up; left, the one chosen does again
+    el.dataset.n = n;
+    el.addEventListener('pointerenter', () => lit(n));
+    el.addEventListener('pointerleave', () => lit(chosen));
+    return el;
+  };
+  const projected = (pair, end) => (end === 'today' && !pair.matched ? ' projected' : '');
   for (const [side, end] of [['.old-side', 'old'], ['.today-side', 'today']]) {
-    const marks = document.querySelector(`${side} .marks`);
-    marks.replaceChildren(...pairs.map((pair, n) => {
+    document.querySelector(`${side} .marks`).replaceChildren(...pairs.map((pair, n) => {
       const mark = document.createElement('i');
-      mark.className = 'mark';
-      mark.dataset.n = n;
+      mark.className = `mark${projected(pair, end)}`;
       mark.style.left = `${(pair[end][0] / scene.size[0]) * 100}%`;
       mark.style.top = `${(pair[end][1] / scene.size[1]) * 100}%`;
-      const label = document.createElement('span');
-      label.textContent = n + 1;
-      mark.append(label);
-      mark.addEventListener('pointerenter', () => lit(n, true));
-      mark.addEventListener('pointerleave', () => lit(n, false));
-      return mark;
+      mark.append(Object.assign(document.createElement('span'), { textContent: n + 1 }));
+      return lights(mark, n);
     }));
   }
+  // each pair's two details, enlarged from the pictures as sent (80 px of them)
+  const side = matchMedia('(max-width: 599px)').matches ? 72 : 112, zoom = side / 80;
+  const crop = (pair, end) => {
+    const c = document.createElement('span');
+    c.className = `crop ${end}${projected(pair, end)}`;
+    c.style.width = c.style.height = `${side}px`;
+    c.style.backgroundImage = `url("${frameOf(p, end)}")`;
+    c.style.backgroundSize = `${scene.size[0] * zoom}px ${scene.size[1] * zoom}px`;
+    c.style.backgroundPosition = `${side / 2 - pair[end][0] * zoom}px ${side / 2 - pair[end][1] * zoom}px`;
+    return c;
+  };
+  $('loupes').replaceChildren(...pairs.map((pair, n) => {
+    const b = document.createElement('button');
+    b.className = 'loupe';
+    b.setAttribute('aria-label', `Paire ${n + 1} : le détail de la photo et celui d'aujourd'hui`);
+    b.append(Object.assign(document.createElement('b'), { textContent: n + 1 }), crop(pair, 'old'), crop(pair, 'today'));
+    b.addEventListener('click', () => { chosen = chosen === n ? null : n; lit(chosen); });
+    return lights(b, n);
+  }));
+  lit(null);
 }
-const lit = (n, on) => document.querySelectorAll(`.mark[data-n="${n}"]`).forEach((m) => m.classList.toggle('lit', on));
+// one pair lit: its two ends ringed, joined by a line, the others dimmed (none: all plain)
+let chosen = null;
+function lit(n) {
+  document.querySelectorAll('#pictures [data-n]').forEach((m) => m.classList.toggle('lit', n != null && Number(m.dataset.n) === n));
+  $('pairs').classList.toggle('focus', n != null);
+  const line = $('pair-line');
+  line.replaceChildren();
+  const ends = n == null ? [] : [...document.querySelectorAll(`#pairs .mark[data-n="${n}"]`)];
+  if (ends.length !== 2) return;
+  const box = $('pairs').getBoundingClientRect();
+  const [a, b] = ends.map((e) => { const r = e.getBoundingClientRect(); return [r.left + r.width / 2 - box.left, r.top + r.height / 2 - box.top]; });
+  for (const cls of ['under', '']) line.append(drawn('line', { class: cls, x1: a[0], y1: a[1], x2: b[0], y2: b[1] }));
+}
+function stepPair(by) {
+  const count = $('loupes').childElementCount;
+  if (view !== 'pairs' || !count) return;
+  chosen = chosen == null ? (by > 0 ? 0 : count - 1) : (chosen + by + count) % count;
+  lit(chosen);
+  document.querySelector(`.loupe[data-n="${chosen}"]`)?.scrollIntoView({ block: 'nearest' });
+}
+new ResizeObserver(() => lit(chosen)).observe($('pairs'));
 
-// the plan: metres east and north of the camera found, north up
+// where today's view comes from: said, and a warning when it is not in the frame of the points
+function sayView(scene) {
+  const v = scene?.view, note = $('view-note');
+  const warn = !!v && (!v.colmap || (v.of != null && !v.points));
+  note.classList.toggle('warn', warn);
+  if (!v) { note.textContent = ''; return; }
+  const who = [v.producer, v.year].filter(Boolean).join(', ');
+  const used = v.of == null ? '' : v.points ? `, l'un de ceux de l'appariement (${v.points} des ${v.of} points)` : ', qui n\'a pas servi à l\'appariement';
+  note.textContent = `Vue d'aujourd'hui : panorama ${v.panorama}${who ? ` (${who})` : ''}, ${v.colmap ? 'placé par COLMAP' : 'placé par son GPS, sans COLMAP'}${used}.`
+    + (warn ? ' Contours et paires peuvent en être décalés.' : '');
+}
+
+// the plan: metres east and north of the camera found, north up; drawn once a photo, then
+// zoomed and moved by hand (the view box alone changes; marks follow --k, see the styles)
 const SVG = 'http://www.w3.org/2000/svg';
 const drawn = (tag, attrs, text) => {
   const e = document.createElementNS(SVG, tag);
@@ -282,28 +382,88 @@ const drawn = (tag, attrs, text) => {
   return e;
 };
 const onPlan = ([east, north]) => [east, -north];
-function drawPlan(plan) {
-  const g = $('plan-drawn');
+const PLAN_HALF = 40, MIN_HALF = 4, MAX_HALF = 160;  // metres from the plan's centre to its edge
+let planView = { x: 0, y: 0, half: PLAN_HALF }, planReach = PLAN_HALF, framing = 0;
+// a mark of a fixed size on the screen at a place of the plan (its parts drawn about 0, 0)
+const markAt = ([x, y], ...parts) => {
+  const g = drawn('g', { transform: `translate(${x} ${y})` });
+  g.append(drawn('g', { class: 'sized' }));
+  g.firstChild.append(...parts);
+  return g;
+};
+function drawPlan(scene) {
+  const g = $('plan-drawn'), plan = scene?.plan;
+  planReach = plan?.reach ?? PLAN_HALF;
+  look({ x: 0, y: 0, half: planReach });
   if (!plan) { g.replaceChildren(); return; }
-  const parts = plan.buildings.map((f) => drawn('polygon', { class: 'building', points: f.map(onPlan).join(' ') }));
-  const half = plan.reach, reach = half * 0.75, { heading, fov } = plan.camera;
-  $('plan').setAttribute('viewBox', `${-half} ${-half} ${2 * half} ${2 * half}`);
-  const end = (a) => [reach * Math.sin(a * Math.PI / 180), -reach * Math.cos(a * Math.PI / 180)];
+  const parts = plan.buildings.map((f) => drawn('polygon', { class: 'line building', points: f.map(onPlan).join(' ') }));
+  const reach = plan.reach * 0.75, { heading, fov } = plan.camera;
+  const end = (a, [x0, y0] = [0, 0]) => [x0 + reach * Math.sin(a * Math.PI / 180), y0 - reach * Math.cos(a * Math.PI / 180)];
   const [l, r] = [end(heading - fov / 2), end(heading + fov / 2)];
-  parts.push(drawn('path', { class: 'cone', d: `M0 0 L${l} A${reach} ${reach} 0 0 1 ${r} Z` }));
-  const [px, py] = onPlan(plan.panorama.at);
-  parts.push(drawn('line', { class: 'gap', x1: 0, y1: 0, x2: px, y2: py }));
-  for (const s of plan.sources) parts.push(drawn('circle', { class: 'source', r: 0.9, cx: onPlan(s)[0], cy: onPlan(s)[1] }));
-  const [cx, cy] = onPlan(plan.caption);
-  parts.push(drawn('path', { class: 'caption', d: `M${cx - 1.2} ${cy - 1.2} L${cx + 1.2} ${cy + 1.2} M${cx - 1.2} ${cy + 1.2} L${cx + 1.2} ${cy - 1.2}` }));
-  parts.push(drawn('circle', { class: 'panorama', r: 1.1, cx: px, cy: py }));
-  parts.push(drawn('path', { class: 'camera', d: 'M0 -2.2 L1.5 1.4 L-1.5 1.4 Z', transform: `rotate(${heading})` }));
-  parts.push(drawn('text', { class: 'away', x: px / 2 + 1.5, y: py / 2 - 1 }, `${plan.panorama.away_m.toLocaleString('fr-FR')} m`));
-  const e = half * 0.9;  // the scale and north, in a corner
-  parts.push(drawn('path', { d: `M${-e} ${e} L${-e + 10} ${e}`, stroke: '#1d1a16', 'stroke-width': 0.4 }), drawn('text', { x: -e, y: e - 1.5 }, '10 m'));
-  parts.push(drawn('text', { x: -e, y: -e + 2 }, 'N ↑'));
+  parts.push(drawn('path', { class: 'line cone', d: `M0 0 L${l} A${reach} ${reach} 0 0 1 ${r} Z` }));
+  const at = onPlan(plan.panorama.at);
+  parts.push(drawn('path', { class: 'line seen', d: `M${end(heading - fov / 2, at)} L${at} L${end(heading + fov / 2, at)}` }));
+  parts.push(drawn('path', { class: 'line points', d: (plan.points ?? []).map((pt) => `M${onPlan(pt)} h0`).join(' ') }));
+  parts.push(drawn('line', { class: 'line gap', x1: 0, y1: 0, x2: at[0], y2: at[1] }));
+  for (const s of plan.sources) parts.push(markAt(onPlan(s), drawn('circle', { class: 'source', r: 0.9 })));
+  parts.push(markAt(onPlan(plan.caption), drawn('path', { class: 'caption', d: 'M-1.2 -1.2 L1.2 1.2 M-1.2 1.2 L1.2 -1.2' })));
+  parts.push(markAt(at, drawn('circle', { class: 'panorama', r: 1.1 })));
+  parts.push(markAt([0, 0], drawn('path', { class: 'camera', d: 'M0 -2.2 L1.5 1.4 L-1.5 1.4 Z', transform: `rotate(${heading})` })));
+  parts.push(markAt([at[0] / 2, at[1] / 2], drawn('text', { class: 'away', x: 1.5, y: -1 }, `${plan.panorama.away_m.toLocaleString('fr-FR')} m`)));
+  (scene.pairs ?? []).forEach((pair, n) => {  // the pairs' points, numbered as on the pictures
+    const pt = plan.points?.[pair.index];
+    if (pt) {
+      parts.push(markAt(onPlan(pt), drawn('rect', { class: 'tag', x: -1.6, y: -4.4, width: 3.2, height: 3, rx: 0.5 }),
+        drawn('text', { class: 'tag-text', x: 0, y: -2.1, 'text-anchor': 'middle' }, n + 1)));
+    }
+  });
   g.replaceChildren(...parts);
 }
+// the view box, the marks' size and the scale follow the view: once a frame at most
+function look(next) {
+  planView = { ...next, half: Math.max(MIN_HALF, Math.min(MAX_HALF, next.half)) };
+  framing ||= requestAnimationFrame(() => {
+    framing = 0;
+    const { x, y, half } = planView, plan = $('plan');
+    plan.setAttribute('viewBox', `${x - half} ${y - half} ${2 * half} ${2 * half}`);
+    plan.style.setProperty('--k', half / PLAN_HALF);
+    const bar = 10 ** Math.floor(Math.log10(half / 2));  // a round length, a fortieth to a quarter of the plan
+    $('scale-bar').style.width = `${(bar / (2 * half)) * plan.getBoundingClientRect().width}px`;
+    $('scale-text').textContent = `${bar.toLocaleString('fr-FR')} m`;
+  });
+}
+// zoom about a point of the plan (screen px), move by dragging; two fingers pinch
+const toPlan = (clientX, clientY) => {
+  const r = $('plan').getBoundingClientRect(), { x, y, half } = planView;
+  return [x - half + ((clientX - r.left) / r.width) * 2 * half, y - half + ((clientY - r.top) / r.height) * 2 * half];
+};
+function zoomAt([x, y], factor) {
+  const f = Math.max(MIN_HALF, Math.min(MAX_HALF, planView.half * factor)) / planView.half;
+  look({ x: x + (planView.x - x) * f, y: y + (planView.y - y) * f, half: planView.half * f });
+}
+$('plan').addEventListener('wheel', (e) => { e.preventDefault(); zoomAt(toPlan(e.clientX, e.clientY), Math.exp(e.deltaY * 0.0015)); }, { passive: false });
+const touching = new Map();
+let pinched = null;
+$('plan').addEventListener('pointerdown', (e) => { $('plan').setPointerCapture(e.pointerId); touching.set(e.pointerId, [e.clientX, e.clientY]); $('plan').classList.add('moving'); });
+$('plan').addEventListener('pointermove', (e) => {
+  if (!touching.has(e.pointerId)) return;
+  const before = touching.get(e.pointerId);
+  touching.set(e.pointerId, [e.clientX, e.clientY]);
+  if (touching.size === 1) {
+    const unit = (2 * planView.half) / $('plan').getBoundingClientRect().width;
+    look({ ...planView, x: planView.x - (e.clientX - before[0]) * unit, y: planView.y - (e.clientY - before[1]) * unit });
+  } else if (touching.size === 2) {
+    const [a, b] = [...touching.values()], apart = Math.hypot(a[0] - b[0], a[1] - b[1]);
+    if (pinched) zoomAt(toPlan((a[0] + b[0]) / 2, (a[1] + b[1]) / 2), pinched / apart);
+    pinched = apart;
+  }
+});
+for (const type of ['pointerup', 'pointercancel']) {
+  $('plan').addEventListener(type, (e) => { touching.delete(e.pointerId); pinched = null; if (!touching.size) $('plan').classList.remove('moving'); });
+}
+$('zoom-in').addEventListener('click', () => zoomAt([planView.x, planView.y], 1 / 1.5));
+$('zoom-out').addEventListener('click', () => zoomAt([planView.x, planView.y], 1.5));
+$('zoom-reset').addEventListener('click', () => look({ x: 0, y: 0, half: planReach }));
 
 async function load() {
   showReasons(await (await fetch('/api/reasons')).json());
@@ -324,10 +484,9 @@ function open(n) {
     $('frame').classList.add('loading');
     $('loading').textContent = 'Images en cours de dessin…';
     $('old').src = frameOf(p, 'old');
-    showPairing(pairing);
-    drawPlan(null);
-    drawPairs(null);
-    whenShown(p, (scene) => { drawPlan(scene?.plan); drawPairs(scene); });
+    showToday();
+    for (const draw of [drawPlan, drawPairs, sayView]) draw(null);
+    whenShown(p, (scene) => { drawPlan(scene); drawPairs(scene); sayView(scene); });
   }
   const from = p.round === 0 ? 'contre les panoramas d\'aujourd\'hui' : `au tour ${p.round}, depuis ${p.from.join(', ')}`;
   const by = p.by ? ` par ${p.by}` + (p.check ? ` (${p.check} : à vérifier de près)` : '') : '';
@@ -366,14 +525,15 @@ $('no-plain').addEventListener('click', () => judge('no'));
 $('skip').addEventListener('click', () => open(at + 1));  // nothing written: a verdict given stays
 const KEYS = {
   Enter: () => judge('yes'), p: () => judge('near'), x: openReasons, s: () => open(at + 1),
-  o: () => showOutlines(!outlines), l: () => showParallax(!parallax), k: () => showPairing(!pairing),
+  o: () => show('outlines'), l: () => show('parallax'), k: () => show('pairs'),
+  n: () => stepPair(1), N: () => stepPair(-1),
   ArrowRight: () => open(at + 1), ArrowLeft: () => open(at - 1),
 };
 const SLIDER_KEYS = ['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End', 'PageUp', 'PageDown'];
 document.addEventListener('keydown', (e) => {
   if (e.ctrlKey || e.metaKey || e.altKey) return;  // the browser's own (Cmd+2: another tab)
   if (e.target === $('wipe') && SLIDER_KEYS.includes(e.key)) return;  // the slider keeps its own
-  const key = e.key.length === 1 ? e.key.toLowerCase() : e.key;
+  const key = KEYS[e.key] || e.key.length !== 1 ? e.key : e.key.toLowerCase();  // N: Shift+N
   if (key === ' ') {  // today alone while held; no button pressed by it
     document.activeElement?.blur();
     $('frame').classList.add('today');

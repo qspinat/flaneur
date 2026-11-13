@@ -597,7 +597,8 @@ def test_no_view_of_today_is_shown_from_a_panorama_too_far_from_the_camera(tmp_p
     m = match.Situated(0.0, 0.0, 1.5, 90.0, 0.5, 60.0, 30, 2, 3.0, [], "i", 0.1)
     heights = type("H", (), {"street": staticmethod(lambda x, y: 0.0)})()
 
-    row = cli._sheet_row("pm:1", m, heights, [far], lambda path: np.zeros((512, 1024, 3), np.uint8))
+    views = cli._viewed_from([far], m, (), set())
+    row = cli._sheet_row("pm:1", m, heights, views, lambda path: np.zeros((512, 1024, 3), np.uint8))
 
     assert row is None
 
@@ -1210,11 +1211,19 @@ def _level(xs, ys):  # the street, level at 0
 EYE = match.View(0.0, 0.0, 1.5, 0.0, 0.5, 60.0)  # a camera facing north, as found
 
 
-def test_a_placement_s_pairs_are_drawn_on_the_photo_and_where_the_panorama_sees_them():
+SHRUNK = 1.0 * match.PHOTO_SIDE / 120  # a photo 120 wide, matched at PHOTO_SIDE
+
+
+def _points_along_a_wall() -> match.Points:
+    """30 points on a wall 20 m north of EYE, seen by q, at their pixels of a 120 px photo."""
     world = np.array([[x, 20.0, 1.5] for x in np.linspace(-8.0, 8.0, 30)])
-    shrunk = 1.0 * match.PHOTO_SIDE / 120  # the photo, 120 wide, matched at PHOTO_SIDE
-    pixels = np.array([[(x / 20.0 * 51.96 + 60) * shrunk, 60 * shrunk] for x, _, _ in world])
-    points = match.Points(pixels, world, np.array([frozenset({"q"})] * 30, dtype=object))
+    pixels = np.array([[(x / 20.0 * 51.96 + 60) * SHRUNK, 60 * SHRUNK] for x, _, _ in world])
+    return match.Points(pixels, world, np.array([frozenset({"q"})] * 30, dtype=object))
+
+
+def test_a_placement_s_pairs_are_drawn_on_the_photo_and_where_the_panorama_sees_them():
+    points = _points_along_a_wall()
+    world, pixels, shrunk = points.world, points.pixels, SHRUNK
     aside = match.Panorama("p", 3.0, 0.0, 1.5, 0.0, path=None)
 
     pairs = cli._pairs_shown(points, (120, 120), (60, 60), cli._toward(EYE, aside))
@@ -1231,9 +1240,10 @@ def test_the_plan_puts_the_camera_at_its_centre_and_the_panorama_at_its_distance
     shown = match.Panorama("p", 13.0, 24.0, 2.5, 0.0, path=None)
     near = [[(0.0, 0.0), (5.0, 0.0), (5.0, 5.0)], [(900.0, 900.0), (905.0, 900.0), (905.0, 905.0)]]
 
-    plan = cli._plan(m, shown, [(10.0, 30.0)], (12.0, 15.0), near)
+    plan = cli._plan(m, shown, [(10.0, 30.0)], (12.0, 15.0), near, [(15.0, 26.04, 3.0)])
 
     assert plan["camera"] == {"heading": 90.0, "fov": 60.0} and plan["reach"] == cli.PLAN_M
+    assert plan["points"] == [[5.0, 6.0]]  # where the camera's points stand
     assert plan["panorama"] == {"at": [3.0, 4.0], "away_m": 5.0}
     assert plan["sources"] == [[0.0, 10.0]] and plan["caption"] == [2.0, -5.0]
     assert plan["buildings"] == [[[-10.0, -20.0], [-5.0, -20.0], [-5.0, -15.0]]]  # the far one left
@@ -1300,7 +1310,7 @@ def test_a_ray_down_meets_bd_topo_s_wall_before_the_street_beyond_the_fitted_wal
     low = [[299.5, 299.5 + 0.035 * F600]]  # 2° down: the street 43 m off, a facade at 10 m first
     view = cli._toward(EYE, ASIDE)
 
-    seen = cli._where_shown(view, (600, 600), np.array(low), walls, _wall_ahead(10.0), _level)
+    seen, _ = cli._where_shown(view, (600, 600), np.array(low), walls, _wall_ahead(10.0), _level)
 
     assert seen[0, 1] == pytest.approx(10.0, abs=0.05)
 
@@ -1339,3 +1349,157 @@ def test_the_plan_keeps_a_long_building_whose_corners_are_all_off_it():
     plan = cli._plan(m, shown, [], (0.0, 0.0), [block])
 
     assert len(plan["buildings"]) == 1
+
+
+def _situated_at_origin():
+    return match.Situated(0.0, 0.0, 1.5, 0.0, 0.5, 60.0, 30, 2, 3.0, [], "i", 0.1)
+
+
+def _standing_at(name, x, y):
+    return match.Panorama(name, x, y, 2.5, 0.0, path=None)
+
+
+def _seen_by(*seen) -> match.Points:
+    """Points seen by these sets of panoramas (where they stand: no matter)."""
+    n = len(seen)
+    return match.Points(np.zeros((n, 2)), np.zeros((n, 3)), np.array(seen, dtype=object))
+
+
+def test_the_panoramas_a_camera_was_found_from_come_most_points_first_then_nearest():
+    east = {"a": 9.0, "b": 3.0, "c": 6.0, "far": 1.0}
+    by_id = {name: _standing_at(name, x, 0.0) for name, x in east.items()}
+    points = _seen_by({"a"}, {"a", "c"}, {"b"}, {"c"}, {"photo:x"})  # an old photo: no panorama
+
+    first = cli._sources_first(points, by_id, _situated_at_origin(), set())
+
+    assert [p.id for p in first] == ["c", "a", "b"]  # c 2 points, a 2 (farther), b 1
+    assert cli._sources_first(None, by_id, _situated_at_origin(), set()) == []
+
+
+def test_a_source_colmap_placed_comes_before_one_that_saw_more():
+    by_id = {"gps": _standing_at("gps", 2.0, 0.0), "colmap": _standing_at("colmap", 5.0, 0.0)}
+    points = _seen_by({"gps"}, {"gps"}, {"gps", "colmap"})
+
+    first = cli._sources_first(points, by_id, _situated_at_origin(), {"colmap"})
+
+    assert [p.id for p in first] == ["colmap", "gps"]
+
+
+def test_today_s_view_comes_from_a_source_however_far_before_any_nearer_panorama():
+    source = _standing_at("source", cli.SHEET_MOST_M + 5, 0.0)  # it matched what the photo shows
+    near_by = [_standing_at("gps", 1.0, 0.0), source]
+
+    views = cli._viewed_from(near_by, _situated_at_origin(), [source], set())
+
+    assert [p.id for p in views] == ["source", "gps"]
+
+
+def test_without_a_source_today_s_view_comes_from_a_panorama_colmap_placed():
+    near_by = [_standing_at("gps", 1.0, 0.0), _standing_at("colmap", 9.0, 0.0)]
+
+    views = cli._viewed_from(near_by, _situated_at_origin(), (), {"colmap"})
+
+    assert [p.id for p in views] == ["colmap", "gps"]  # the other kept, last
+
+
+def _observed(pixels, rows):
+    """An observation whose rays are `rows` of (key, source, origin, direction)."""
+    keys, sources, origins, directions = (np.array(c) for c in zip(*rows, strict=True))
+    casts, walls = np.full((len(rows), 3), np.nan), np.full((len(rows), 6), np.nan)
+    rays = match.Rays(keys, sources.astype(object), origins, directions, casts, walls)
+    return match.Observed(np.array(pixels, np.float32), (100, 100), rays)
+
+
+def test_a_pair_s_today_end_is_where_the_view_s_panorama_matched_it():
+    pixels = [[10.0, 10.0], [20.0, 20.0], [30.0, 30.0]]
+    p = _standing_at("p", 0.0, 0.0)
+    ahead = [0.0, 1.0, 0.0]  # north, level: the view's centre
+    rays = [(0, "p", [0.0, 0.0, 2.5], ahead), (1, "q", [5.0, 0.0, 2.5], ahead)]
+    observed = _observed(pixels, rays)
+    points = match.Points(  # their pixels as kept on disk: within a rounding of the details'
+        np.array([[20.0004, 20.0], [10.0, 9.9996]]),
+        np.array([[5.0, 30.0, 2.5], [3.0, 30.0, 2.5]]),
+        np.array([{"q"}, {"p", "q"}], dtype=object),
+    )
+    seen_from = match.View(p.x, p.y, p.z, 0.0, 0.5, 60.0)
+
+    matched = cli._matched_in(points, observed, p, seen_from, (60, 60))
+
+    assert np.isnan(matched[0]).all()  # seen by q only
+    assert matched[1] == pytest.approx([29.5, 29.5], abs=0.01)  # p's own ray: straight ahead
+
+
+def test_pairs_matched_in_the_view_are_shown_alone_and_said_so():
+    points = _points_along_a_wall()
+    matched = np.full((30, 2), np.nan)
+    matched[[4, 9]] = [[11.0, 30.0], [22.0, 30.0]]
+
+    pairs = cli._pairs_shown(points, (120, 120), (60, 60), cli._toward(EYE, ASIDE), matched)
+
+    assert sorted(p["index"] for p in pairs) == [4, 9] and all(p["matched"] for p in pairs)
+    assert {tuple(p["today"]) for p in pairs} == {(11.0, 30.0), (22.0, 30.0)}
+    unmatched = cli._pairs_shown(points, (120, 120), (60, 60), cli._toward(EYE, ASIDE))
+    assert len(unmatched) == cli.PAIRS_SHOWN and not any(p["matched"] for p in unmatched)
+
+
+def test_a_pair_matched_in_the_view_is_shown_wherever_its_point_would_project():
+    points = _points_along_a_wall()
+    points.world[4] = [0.0, -20.0, 1.5]  # its point behind the view: it would project nowhere
+    matched = np.full((30, 2), np.nan)
+    matched[4] = [11.0, 30.0]
+
+    pairs = cli._pairs_shown(points, (120, 120), (60, 60), cli._toward(EYE, ASIDE), matched)
+
+    assert [p["index"] for p in pairs] == [4]
+
+
+def _by_elevation(*bands):
+    """What rays see by how high they look: the first of `bands` (up to this elevation, degrees:
+    kind) they look below, else the sky."""
+
+    def kinds(rays):
+        up = np.degrees(np.arcsin(rays[:, 2]))
+        return np.select([up <= top for top, _ in bands], [kind for _, kind in bands], segment.SKY)
+
+    return kinds
+
+
+def _column_ahead(kinds):
+    """The middle column of a 6 × 6 map of today's view from ASIDE, a BD TOPO wall 20 m north
+    topped at 6 m (its rows look 25.7°, 16.1°, 5.5° up, then down)."""
+    seen = cli._depth_of_view(
+        cli._toward(EYE, ASIDE), (600, 600), None, _wall_ahead(height=6.0), _level, 100, kinds
+    )
+    return seen[:, 3]
+
+
+def test_a_wall_rises_as_far_as_its_panorama_sees_building_over_it():
+    column = _column_ahead(_by_elevation((20.0, segment.BUILT)))  # a roof up to 20° over a 13° wall
+
+    assert column[1, 1] == pytest.approx(20.0, abs=0.01)  # 16°: on the wall's face, 20 m off
+
+
+def test_the_sky_right_over_a_wall_stands_on_its_face():
+    column = _column_ahead(_by_elevation((10.0, segment.BUILT)))  # sky from 10° up
+
+    assert column[0, 1] == pytest.approx(20.0, abs=0.01)
+    assert column[1, 1] == pytest.approx(20.0, abs=0.01)
+
+
+def test_trees_over_a_wall_stay_far():
+    column = _column_ahead(_by_elevation((10.0, segment.BUILT), (30.0, segment.OTHER)))
+
+    assert column[1, 1] > 1000 and column[0, 1] > 1000
+
+
+def test_a_building_seen_over_the_sky_over_a_wall_stays_far():
+    seen = _by_elevation((10.0, segment.BUILT), (20.0, segment.SKY), (30.0, segment.BUILT))
+    column = _column_ahead(seen)
+
+    assert column[1, 1] == pytest.approx(20.0, abs=0.01) and column[0, 1] > 1000  # 26°: a spire
+
+
+def test_a_panorama_not_segmented_leaves_the_walls_as_they_were():
+    column = _column_ahead(lambda rays: np.full(len(rays), segment.BUILT))  # building everywhere
+
+    assert column[1, 1] > 1000 and column[0, 1] > 1000
