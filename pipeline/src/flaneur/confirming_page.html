@@ -390,8 +390,10 @@ function sayView(scene) {
   $('source').hidden = !(v && (v.other || v.source));
   if (!v) { note.textContent = ''; return; }
   const who = [v.producer, v.year].filter(Boolean).join(', ');
-  if (v.other && !v.source) {
-    note.textContent = `Vue d'aujourd'hui depuis le panorama le plus proche de la caméra (${v.panorama}, à ${v.away_m} m${who ? `, ${who}` : ''}) : ses paires sont projetées par la caméra trouvée ; V montre la vue de la source et ses paires appariées.`;
+  if (v.other && !v.source) {  // not one the camera was found from, as a rule: no warning
+    note.classList.toggle('warn', !v.colmap);
+    const pairs = v.points ? `${v.points} de ses points sont de l'appariement` : 'ses paires sont projetées par la caméra trouvée';
+    note.textContent = `Vue d'aujourd'hui depuis le panorama le plus proche de la caméra (${v.panorama}, à ${v.away_m} m${who ? `, ${who}` : ''}) : ${pairs} ; V montre l'autre vue.`;
     return;
   }
   const used = v.of == null ? '' : v.points ? `, l'un de ceux de l'appariement (${v.points} des ${v.of} points)` : ', qui n\'a pas servi à l\'appariement';

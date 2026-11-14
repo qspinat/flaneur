@@ -2459,7 +2459,10 @@ def _viewed_from(
     views = [*sources, *walls_near, *near[:SHEET_PANORAMAS]]
     if nearest_first and (shown := _first_read(views)) is not None:
         close = _first_read(p for p in near if p.id in fixed)  # near: COLMAP's, nearest first
-        away = lambda p: math.hypot(p.x - m.x, p.y - m.y)  # noqa: E731
+
+        def away(p: match.Panorama) -> float:
+            return math.hypot(p.x - m.x, p.y - m.y)
+
         if close is not None and away(close) + NEARER_M <= away(shown):
             return [close, *views]
     return views
