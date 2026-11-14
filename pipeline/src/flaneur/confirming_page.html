@@ -39,6 +39,17 @@
   button:focus-visible, input:focus-visible { outline: 3px solid #1d5fa8; outline-offset: 2px; }
   button[aria-pressed=true] { background: var(--ink); color: var(--paper); border-color: var(--ink); }
   #views { margin: 0 0 8px; }
+  /* where today's view is taken from: each panorama an enamel house-number plaque, its number
+     the metres from the camera found; the one shown filled, its white inner line as on the
+     street's, the other on paper (a click, or V, shows it) */
+  #vantage { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; margin: 0 0 6px; font-size: 14px; color: var(--quiet); }
+  .plaque { display: inline-flex; flex-direction: column; align-items: center; justify-content: center; min-height: 44px; min-width: 76px;
+            padding: 4px 12px 5px; border: 1.5px solid var(--enamel); border-radius: 7px; background: var(--paper); color: var(--enamel);
+            font: 600 12px/1.15 var(--plate); cursor: pointer; }
+  .plaque b { font-size: 21px; font-weight: 600; font-variant-numeric: tabular-nums; letter-spacing: 0.01em; }
+  .plaque:hover { background: #e4e9f1; }
+  .plaque[aria-checked=true] { background: var(--enamel); color: var(--paper); box-shadow: inset 0 0 0 2px var(--enamel), inset 0 0 0 3.5px var(--paper); cursor: default; }
+  #vantage .plaques { display: inline-flex; align-items: center; gap: 8px; }  /* together, the phrase's end with them */
   .note { font-size: 13px; color: var(--quiet); margin: 0 0 8px; max-width: 64ch; }
   .note.warn { color: var(--no); }
   #walls { min-height: 1.4em; }
@@ -133,8 +144,8 @@
     <button id="outlines" aria-pressed="false">Contours (O)</button>
     <button id="parallax" aria-pressed="false">Parallaxe (L)</button>
     <button id="pairing" aria-pressed="false">Paires (K)</button>
-    <button id="source" aria-pressed="false" hidden>Vue de la source (V)</button>
   </div>
+  <div id="vantage" role="radiogroup" aria-label="Panorama d'où la vue d'aujourd'hui est prise"></div>
   <p id="view-note" class="note"></p>
   <p id="walls" class="note"></p>
   <div id="frame" class="loading" aria-label="La photo posée sur la vue d'aujourd'hui, cadrée comme sa caméra">
@@ -269,7 +280,6 @@ $('frame').addEventListener('pointermove', (e) => { if ($('frame').hasPointerCap
 function showToday() {
   const BUTTON = { outlines: 'outlines', parallax: 'parallax', pairing: 'pairs' };
   for (const [id, shows] of Object.entries(BUTTON)) $(id).setAttribute('aria-pressed', String(view === shows));
-  $('source').setAttribute('aria-pressed', String(fromSource));
   $('pictures').classList.toggle('pairs', view === 'pairs');
   $('right-label').textContent = { outlines: 'contours de la photo sur aujourd\'hui →', parallax: 'contours, où la vue d\'aujourd\'hui les voit →' }[view] ?? 'aujourd\'hui →';
   const p = photos[at];
@@ -290,14 +300,14 @@ function redraw(p) {
   whenShown(p, (scene) => { drawPlan(scene); drawPairs(scene); sayView(scene); });
 }
 // today's view from the camera's source (its pairs matched), or back to the nearest panorama
+let otherView = null;  // the other panorama of the photo shown (see /scene: view.other)
 function toggleSource() {
   const p = photos[at];
-  if (!p || $('source').hidden) return;
+  if (!p || !otherView) return;
   fromSource = !fromSource;
   showToday();
   redraw(p);
 }
-$('source').addEventListener('click', toggleSource);
 $('outlines').addEventListener('click', () => show('outlines'));
 $('parallax').addEventListener('click', () => show('parallax'));
 $('pairing').addEventListener('click', () => show('pairs'));
@@ -383,22 +393,41 @@ function stepPair(by) {
 new ResizeObserver(() => lit(chosen)).observe($('pairs'));
 
 // where today's view comes from: said, and a warning when it is not in the frame of the points
+const metres = (m) => `${m.toLocaleString('fr-FR', { maximumFractionDigits: 1 })} m`;
+// the plaques: the panorama shown, and the other one when there is one, nearest first
+function sayVantage(v) {
+  const box = $('vantage');
+  otherView = v?.other ?? null;
+  box.replaceChildren();
+  if (!v) return;
+  const views = [{ away: v.away_m, source: v.source, shown: true }];
+  if (otherView) views.push({ away: otherView.away_m, source: !v.source, shown: false });
+  views.sort((a, b) => a.away - b.away);
+  box.append(Object.assign(document.createElement('span'), { textContent: 'Vue d\'aujourd\'hui prise à' }));
+  const plaques = Object.assign(document.createElement('span'), { className: 'plaques' });
+  for (const w of views) {
+    const plaque = Object.assign(document.createElement('button'), { className: 'plaque', type: 'button' });
+    plaque.setAttribute('role', 'radio');
+    plaque.setAttribute('aria-checked', String(w.shown));
+    plaque.append(Object.assign(document.createElement('b'), { textContent: metres(w.away) }));
+    if (otherView) plaque.append(document.createTextNode(w.source ? 'la source' : 'le plus proche'));
+    if (!w.shown) {
+      plaque.title = 'Montrer la vue depuis ce panorama (V)';
+      plaque.addEventListener('click', toggleSource);
+    }
+    plaques.append(plaque);
+  }
+  plaques.append(Object.assign(document.createElement('span'), { textContent: 'de la caméra' }));
+  box.append(plaques);
+}
 function sayView(scene) {
   const v = scene?.view, note = $('view-note');
-  const warn = !!v && (!v.colmap || (v.of != null && !v.points));
-  note.classList.toggle('warn', warn);
-  $('source').hidden = !(v && (v.other || v.source));
+  sayVantage(v);
+  note.classList.toggle('warn', !!v && !v.colmap);
   if (!v) { note.textContent = ''; return; }
   const who = [v.producer, v.year].filter(Boolean).join(', ');
-  if (v.other && !v.source) {  // not one the camera was found from, as a rule: no warning
-    note.classList.toggle('warn', !v.colmap);
-    const pairs = v.points ? `${v.points} de ses points sont de l'appariement` : 'ses paires sont projetées par la caméra trouvée';
-    note.textContent = `Vue d'aujourd'hui depuis le panorama le plus proche de la caméra (${v.panorama}, à ${v.away_m} m${who ? `, ${who}` : ''}) : ${pairs} ; V montre l'autre vue.`;
-    return;
-  }
-  const used = v.of == null ? '' : v.points ? `, l'un de ceux de l'appariement (${v.points} des ${v.of} points)` : ', qui n\'a pas servi à l\'appariement';
-  note.textContent = `${v.source ? 'Vue de la source' : 'Vue d\'aujourd\'hui'} : panorama ${v.panorama}${who ? ` (${who})` : ''}, ${v.colmap ? 'placé par COLMAP' : 'placé par son GPS, sans COLMAP'}${used}.`
-    + (warn ? ' Contours et paires peuvent en être décalés.' : '');
+  const pairs = v.of == null ? '' : v.points ? ` ; ses paires sont celles de l'appariement (${v.points} des ${v.of} points)` : ' ; n\'ayant pas servi à l\'appariement, ses paires sont projetées par la caméra trouvée';
+  note.textContent = `Panorama ${v.panorama}${who ? ` (${who})` : ''}, ${v.colmap ? 'placé par COLMAP' : 'placé par son GPS, sans COLMAP : contours et paires peuvent en être décalés'}${pairs}.`;
 }
 
 // the plan: metres east and north of the camera found, north up; drawn once a photo, then

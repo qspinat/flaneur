@@ -1524,3 +1524,18 @@ def test_today_s_view_comes_from_the_panorama_next_to_the_camera_when_well_neare
     assert shown([source], [source, next_to], {"source"}) == "source"  # not COLMAP's
     assert shown([source], [source, unread], {"source", "unread"}) == "source"  # not at hand
     assert shown([at("near", 8.0)], [next_to], {"near", "next"}) == "near"  # 6 m: kept
+
+
+def test_the_other_view_says_how_far_it_stands_and_how_many_points_it_saw(tmp_path):
+    def at(name, y):
+        (tmp_path / f"{name}.jpg").write_bytes(b"jpg")
+        return match.Panorama(name, 0.0, y, 2.5, 0.0, tmp_path / f"{name}.jpg")
+
+    camera = SimpleNamespace(x=0.0, y=0.0)
+    source, next_to = at("source", 37.7), at("next", 2.2)
+    points = SimpleNamespace(seen=[frozenset({"source"})] * 12 + [frozenset({"next", "source"})])
+
+    other = cli._other_view([source, next_to], next_to, camera, points)
+
+    assert other == {"away_m": 37.7, "points": 13}
+    assert cli._other_view([next_to], next_to, camera, points) is None  # the one shown
