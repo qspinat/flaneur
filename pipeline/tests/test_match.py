@@ -302,6 +302,7 @@ def test_solve_turns_down_a_camera_it_is_unsure_of():
     unsure = [c for c in trace.candidates if c.why == "position incertaine"]
     assert unsure and unsure[0].agree >= match.MIN_AGREE
     assert unsure[0].spread_m > match.MOST_SPREAD_M
+    assert unsure[0].far_m > 60 and unsure[0].spread_deg is not None  # far, its heading measured
 
 
 def test_matches_with_no_two_view_geometry_count_as_none(monkeypatch):
@@ -402,7 +403,11 @@ def test_a_camera_found_is_traced_as_found():
     )
 
     assert found is not None and trace.verdict == "située"
-    assert any(c.why == "" and c.agree == found.agree for c in trace.candidates)
+    traced = next(c for c in trace.candidates if c.why == "" and c.agree == found.agree)
+    away = np.linalg.norm(walls[found.inliers] - camera, axis=1)
+    assert traced.far_m == pytest.approx(np.percentile(away, 15), abs=0.5)  # its points, near
+    assert traced.error_px < 0.5  # no noise: they fall on their pixels
+    assert traced.spread_deg == pytest.approx(found.spread_deg)
 
 
 def test_too_few_points_are_traced_before_any_camera():
