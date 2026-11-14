@@ -9,7 +9,7 @@ Local use only."""
 from collections.abc import Callable
 from http.server import HTTPServer
 from pathlib import Path
-from urllib.parse import unquote
+from urllib.parse import parse_qs, unquote
 
 from flaneur import localpage
 from flaneur.sources import append_row, seconds_taken
@@ -79,23 +79,25 @@ def serve(
     placed: list[dict],
     path: Path,
     verdicts: Callable[[], dict[str, dict]],
-    frame: Callable[[str, str], bytes | None],
-    scene: Callable[[str], dict | None],
+    frame: Callable[..., bytes | None],
+    scene: Callable[..., dict | None],
     port: int,
 ) -> HTTPServer:
     """`frame(photo_id, part)`: one of its pictures (JPEG), all of one size: the photo
     ("old"), today's real view framed as its camera ("today"), the photo's outlines on that
     view ("outlines"), and drawn where that view sees what they show ("parallax"); None when they
     cannot be drawn. `scene(photo_id)`: what the page draws over them (the pairs its camera was
-    found from, the plan around it); None when there is none."""
+    found from, the plan around it); None when there is none. Asked with `?from=source`, both
+    are given `source=True`: today's view from the panorama the camera was found from, not the
+    one next to it."""
     by_id = {photo["id"]: photo for photo in placed}
 
     class Handler(localpage.Handler):
         def do_GET(self) -> None:  # noqa: N802 (http.server's naming)
-            route = unquote(self.path.split("?")[0])
-            parts = [
-                unquote(p) for p in self.path.split("?")[0].strip("/").split("/")
-            ]  # ids may hold "/"
+            path, _, query = self.path.partition("?")
+            route = unquote(path)
+            source = parse_qs(query).get("from") == ["source"]
+            parts = [unquote(p) for p in path.strip("/").split("/")]  # ids may hold "/"
             if route == "/":
                 self._send(200, PAGE.read_bytes(), "text/html; charset=utf-8")
             elif route == "/api/queue":
@@ -107,14 +109,14 @@ def serve(
                 and len(parts) == 3
                 and parts[1] in by_id
                 and parts[2] in FRAMES
-                and (jpeg := frame(parts[1], parts[2]))
+                and (jpeg := frame(parts[1], parts[2], source=source))
             ):
                 self._send(200, jpeg, "image/jpeg")
             elif (
                 parts[0] == "scene"
                 and len(parts) == 2
                 and parts[1] in by_id
-                and (found := scene(parts[1])) is not None
+                and (found := scene(parts[1], source=source)) is not None
             ):
                 self._json(found)
             else:

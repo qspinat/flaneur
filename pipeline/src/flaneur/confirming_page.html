@@ -39,6 +39,19 @@
   button:focus-visible, input:focus-visible { outline: 3px solid #1d5fa8; outline-offset: 2px; }
   button[aria-pressed=true] { background: var(--ink); color: var(--paper); border-color: var(--ink); }
   #views { margin: 0 0 8px; }
+  /* where today's view is taken from: each panorama an enamel house-number plaque, its number
+     the metres from the camera found; the one shown filled, its white inner line as on the
+     street's, the other on paper (a click, or V, shows it) */
+  #vantage { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; margin: 0 0 6px; font-size: 14px; color: var(--quiet); }
+  .plaque { display: inline-flex; flex-direction: column; align-items: center; justify-content: center; min-height: 44px; min-width: 76px;
+            padding: 4px 12px 5px; border: 1.5px solid var(--enamel); border-radius: 7px; background: var(--paper); color: var(--enamel);
+            font: 600 12px/1.15 var(--plate); cursor: pointer; }
+  .plaque b { font-size: 21px; font-weight: 600; font-variant-numeric: tabular-nums; letter-spacing: 0.01em; }
+  button.plaque:hover { background: #e4e9f1; }
+  .plaque.shown { background: var(--enamel); color: var(--paper); box-shadow: inset 0 0 0 2px var(--enamel), inset 0 0 0 3.5px var(--paper); cursor: default; }
+  #vantage[hidden] { display: none; }
+  #plaques { display: inline-flex; align-items: center; gap: 8px; }  /* together, with the phrase's end */
+  span.plaque { cursor: auto; }
   .note { font-size: 13px; color: var(--quiet); margin: 0 0 8px; max-width: 64ch; }
   .note.warn { color: var(--no); }
   #walls { min-height: 1.4em; }
@@ -134,6 +147,7 @@
     <button id="parallax" aria-pressed="false">Parallaxe (L)</button>
     <button id="pairing" aria-pressed="false">Paires (K)</button>
   </div>
+  <div id="vantage" role="group" aria-label="Panorama d'où la vue d'aujourd'hui est prise" hidden>Vue d'aujourd'hui prise à <span id="plaques"></span></div>
   <p id="view-note" class="note"></p>
   <p id="walls" class="note"></p>
   <div id="frame" class="loading" aria-label="La photo posée sur la vue d'aujourd'hui, cadrée comme sa caméra">
@@ -190,8 +204,8 @@
     </div>
   </div>
   <p id="state"></p>
-  <p class="keys"><kbd>Entrée</kbd> oui · <kbd>P</kbd> bons bâtiments, caméra à corriger · <kbd>X</kbd> non, puis <kbd>1</kbd>–<kbd>5</kbd> pourquoi · <kbd>S</kbd> passer · <kbd>←</kbd> <kbd>→</kbd> précédente, suivante · <kbd>Espace</kbd> enfoncé : aujourd'hui seul · <kbd>O</kbd> contours · <kbd>L</kbd> contours corrigés de la parallaxe · <kbd>K</kbd> paires côte à côte, <kbd>N</kbd> (<kbd>Maj</kbd>+<kbd>N</kbd>) la paire suivante (précédente).
-    La photo est posée sur la vue d'aujourd'hui prise d'un panorama qui a servi à la placer (sinon du plus proche placé par COLMAP), cadrée comme sa caméra : glissez pour passer de l'une à l'autre. Le panorama ne se tient pas où se tenait le photographe (voir le plan) : les façades proches se décalent d'autant. L redessine les contours là où la vue d'aujourd'hui voit ce qu'ils montrent, d'après les murs ajustés entre panoramas (sinon BD TOPO) : jugez alors sur les façades encore debout ; un arbre, un réverbère, un bâtiment démoli depuis prennent la distance du mur derrière eux et restent décalés. Oui : les façades, les arêtes et les fuyantes se continuent d'une image à l'autre, la caméra au bon endroit à un mètre près (à quelques mètres du panorama, les façades proches se décalent un peu, les lointaines non). P : les bons bâtiments, mais la caméra à déplacer ou à tourner ; elle sera corrigée plus tard. Un « non » ou un P la retire ; les photos situées à partir d'elle le seront de nouveau sans elle.</p>
+  <p class="keys"><kbd>Entrée</kbd> oui · <kbd>P</kbd> bons bâtiments, caméra à corriger · <kbd>X</kbd> non, puis <kbd>1</kbd>–<kbd>5</kbd> pourquoi · <kbd>S</kbd> passer · <kbd>←</kbd> <kbd>→</kbd> précédente, suivante · <kbd>Espace</kbd> enfoncé : aujourd'hui seul · <kbd>O</kbd> contours · <kbd>L</kbd> contours corrigés de la parallaxe · <kbd>K</kbd> paires côte à côte, <kbd>N</kbd> (<kbd>Maj</kbd>+<kbd>N</kbd>) la paire suivante (précédente) · <kbd>V</kbd> la vue de l'autre panorama.
+    La photo est posée sur la vue d'aujourd'hui prise du panorama placé par COLMAP le plus proche de sa caméra quand il l'est nettement plus que ceux qui ont servi à la placer (sinon de l'un d'eux), cadrée comme sa caméra : glissez pour passer de l'une à l'autre. Les plaques disent à combien de mètres de la caméra se tient le panorama ; l'autre plaque (ou V) montre la vue de l'autre. Le panorama ne se tient pas où se tenait le photographe (voir le plan) : les façades proches se décalent d'autant. L redessine les contours là où la vue d'aujourd'hui voit ce qu'ils montrent, d'après les murs ajustés entre panoramas (sinon BD TOPO) : jugez alors sur les façades encore debout ; un arbre, un réverbère, un bâtiment démoli depuis prennent la distance du mur derrière eux et restent décalés. Oui : les façades, les arêtes et les fuyantes se continuent d'une image à l'autre, la caméra au bon endroit à un mètre près (à quelques mètres du panorama, les façades proches se décalent un peu, les lointaines non). P : les bons bâtiments, mais la caméra à déplacer ou à tourner ; elle sera corrigée plus tard. Un « non » ou un P la retire ; les photos situées à partir d'elle le seront de nouveau sans elle.</p>
   </section>
 </main>
 <script>
@@ -199,13 +213,20 @@ let photos = [], at = 0, shownAt = 0, saving = false, prefetched = null;
 // what the pictures show, one view at a time: today alone, the photo's outlines on it, those
 // outlines where today's view sees them (parallax), or the pairs side by side
 let view = 'today';
-const scenes = {};  // each photo's pairs and plan, asked for once (see /scene)
-const sceneOf = (p) => (scenes[p.id] ??= fetch(`/scene/${encodeURIComponent(p.id)}`)
-  .then((r) => (r.ok ? r.json() : null)).catch(() => null)
-  .then((scene) => { if (!scene) delete scenes[p.id]; return scene; }));  // asked again later
+// today's view from the panorama next to the camera (the server's choice), or from its source
+let fromSource = false;
+const viewQuery = (source = fromSource) => (source ? '?from=source' : '');
+const scenes = {};  // each photo's pairs and plan, asked for once a view (see /scene)
+function sceneOf(p, source = fromSource) {
+  const key = p.id + viewQuery(source);
+  return (scenes[key] ??= fetch(`/scene/${encodeURIComponent(p.id)}${viewQuery(source)}`)
+    .then((r) => (r.ok ? r.json() : null)).catch(() => null)
+    .then((scene) => { if (!scene) delete scenes[key]; return scene; }));  // asked again later
+}
 const todayPart = () => (view === 'pairs' ? 'today' : view);  // the frame /frame/<id>/<part>
 const $ = (id) => document.getElementById(id);
-const frameOf = (p, part) => `/frame/${encodeURIComponent(p.id)}/${part}`;
+const metres = (m) => `${m.toLocaleString('fr-FR', { maximumFractionDigits: 1 })} m`;
+const frameOf = (p, part, source = fromSource) => `/frame/${encodeURIComponent(p.id)}/${part}${part === 'old' ? '' : viewQuery(source)}`;
 const LABEL = { yes: 'oui', near: 'bons bâtiments, caméra à corriger', no: 'non' };
 // why a placement is wrong: the server's reasons (/api/reasons), in its order (their keys),
 // each said here
@@ -244,8 +265,8 @@ function ahead() {
   const parts = ['old', todayPart()];
   if (!next || prefetched === `${next.id} ${parts}`) return;
   prefetched = `${next.id} ${parts}`;
-  for (const part of parts) new Image().src = frameOf(next, part);
-  sceneOf(next);
+  for (const part of parts) new Image().src = frameOf(next, part, false);  // it opens on its own
+  sceneOf(next, false);
 }
 function wipe(percent) {
   const v = Math.max(0, Math.min(100, percent));
@@ -276,6 +297,23 @@ function showToday() {
 function show(next) { view = view === next ? 'today' : next; showToday(); }
 // what is drawn once a photo's scene comes, if it is still the one shown
 const whenShown = (p, draw) => { if (p) sceneOf(p).then((scene) => { if (photos[at] === p) draw(scene); }); };
+// what a photo's scene draws: none until it comes
+function redraw(p) {
+  const source = fromSource;  // a scene coming once the view changed again is not this one
+  for (const draw of [drawPlan, drawPairs, sayView]) draw(null);
+  whenShown(p, (scene) => { if (fromSource === source) { drawPlan(scene); drawPairs(scene); sayView(scene); } });
+}
+// today's view from the camera's source (its pairs matched), or back to the nearest panorama
+let otherView = null;  // the other panorama of the photo shown (see /scene: view.other)
+let refocus = false;  // a plaque pressed keeps the focus on the one then shown
+function toggleSource() {
+  const p = photos[at];
+  if (!p || !otherView) return;
+  refocus = $('vantage').contains(document.activeElement);
+  fromSource = !fromSource;
+  showToday();
+  redraw(p);
+}
 $('outlines').addEventListener('click', () => show('outlines'));
 $('parallax').addEventListener('click', () => show('parallax'));
 $('pairing').addEventListener('click', () => show('pairs'));
@@ -361,15 +399,38 @@ function stepPair(by) {
 new ResizeObserver(() => lit(chosen)).observe($('pairs'));
 
 // where today's view comes from: said, and a warning when it is not in the frame of the points
+// the plaques: the panorama shown, and the other one when there is one, nearest first; a lone
+// one is said, not pressed
+function sayVantage(v) {
+  otherView = v?.other ?? null;
+  $('vantage').hidden = !v;
+  if (!v) { $('plaques').replaceChildren(); return; }
+  const views = [{ away: v.away_m, source: v.source, shown: true }];
+  if (otherView) views.push({ away: otherView.away_m, source: !v.source, shown: false });
+  views.sort((a, b) => a.away - b.away);
+  const plaques = views.map((w) => {
+    const plaque = document.createElement(otherView ? 'button' : 'span');
+    plaque.className = w.shown ? 'plaque shown' : 'plaque';
+    plaque.append(Object.assign(document.createElement('b'), { textContent: metres(w.away) }));
+    if (!otherView) return plaque;
+    plaque.type = 'button';
+    plaque.setAttribute('aria-pressed', String(w.shown));
+    plaque.append(w.source ? 'la source' : 'le plus proche');
+    if (!w.shown) { plaque.title = 'Montrer la vue depuis ce panorama (V)'; plaque.addEventListener('click', toggleSource); }
+    return plaque;
+  });
+  $('plaques').replaceChildren(...plaques, ' de la caméra');
+  if (refocus) { refocus = false; $('plaques').querySelector('.shown')?.focus(); }
+}
 function sayView(scene) {
   const v = scene?.view, note = $('view-note');
-  const warn = !!v && (!v.colmap || (v.of != null && !v.points));
-  note.classList.toggle('warn', warn);
+  sayVantage(v);
+  note.classList.toggle('warn', !!v && !v.colmap);
   if (!v) { note.textContent = ''; return; }
   const who = [v.producer, v.year].filter(Boolean).join(', ');
-  const used = v.of == null ? '' : v.points ? `, l'un de ceux de l'appariement (${v.points} des ${v.of} points)` : ', qui n\'a pas servi à l\'appariement';
-  note.textContent = `Vue d'aujourd'hui : panorama ${v.panorama}${who ? ` (${who})` : ''}, ${v.colmap ? 'placé par COLMAP' : 'placé par son GPS, sans COLMAP'}${used}.`
-    + (warn ? ' Contours et paires peuvent en être décalés.' : '');
+  const matched = scene.pairs?.filter((pair) => pair.matched).length ?? 0;
+  const pairs = !scene.pairs?.length ? '' : matched ? ` ; ${matched} de ses ${scene.pairs.length} paires sont celles de l'appariement` : ' ; ses paires sont projetées par la caméra trouvée';
+  note.textContent = `Panorama ${v.panorama}${who ? ` (${who})` : ''}, ${v.colmap ? 'placé par COLMAP' : 'placé par son GPS, sans COLMAP : contours et paires peuvent en être décalés'}${pairs}.`;
 }
 
 // the plan: metres east and north of the camera found, north up; drawn once a photo, then
@@ -409,7 +470,7 @@ function drawPlan(scene) {
   parts.push(markAt(onPlan(plan.caption), drawn('path', { class: 'caption', d: 'M-1.2 -1.2 L1.2 1.2 M-1.2 1.2 L1.2 -1.2' })));
   parts.push(markAt(at, drawn('circle', { class: 'panorama', r: 1.1 })));
   parts.push(markAt([0, 0], drawn('path', { class: 'camera', d: 'M0 -2.2 L1.5 1.4 L-1.5 1.4 Z', transform: `rotate(${heading})` })));
-  parts.push(markAt([at[0] / 2, at[1] / 2], drawn('text', { class: 'away', x: 1.5, y: -1 }, `${plan.panorama.away_m.toLocaleString('fr-FR')} m`)));
+  parts.push(markAt([at[0] / 2, at[1] / 2], drawn('text', { class: 'away', x: 1.5, y: -1 }, metres(plan.panorama.away_m))));
   (scene.pairs ?? []).forEach((pair, n) => {  // the pairs' points, numbered as on the pictures
     const pt = plan.points?.[pair.index];
     if (pt) {
@@ -429,7 +490,7 @@ function look(next) {
     plan.style.setProperty('--k', half / PLAN_HALF);
     const bar = 10 ** Math.floor(Math.log10(half / 2));  // a round length, a fortieth to a quarter of the plan
     $('scale-bar').style.width = `${(bar / (2 * half)) * plan.getBoundingClientRect().width}px`;
-    $('scale-text').textContent = `${bar.toLocaleString('fr-FR')} m`;
+    $('scale-text').textContent = metres(bar);
   });
 }
 // zoom about a point of the plan (screen px), move by dragging; two fingers pinch
@@ -484,15 +545,14 @@ function open(n) {
     $('frame').classList.add('loading');
     $('loading').textContent = 'Images en cours de dessin…';
     $('old').src = frameOf(p, 'old');
+    fromSource = false;  // each photo opens on the panorama next to its camera
     showToday();
-    for (const draw of [drawPlan, drawPairs, sayView]) draw(null);
-    whenShown(p, (scene) => { drawPlan(scene); drawPairs(scene); sayView(scene); });
+    redraw(p);
   }
   const from = p.round === 0 ? 'contre les panoramas d\'aujourd\'hui' : `au tour ${p.round}, depuis ${p.from.join(', ')}`;
   const by = p.by ? ` par ${p.by}` + (p.check ? ` (${p.check} : à vérifier de près)` : '') : '';
   $('meta').textContent = `${at + 1} / ${photos.length} · ${p.id} · ${p.title || ''}`;
   $('why').textContent = `Située ${from}${by} : ${p.agree} points d'accord, à ${p.moved_m} m de sa légende.`
-    + (p.away_m != null ? ` Vue d'aujourd'hui prise d'un panorama à ${p.away_m} m de la caméra.` : '')
     + (p.doubt ? ` En désaccord avec les autres photos : ${p.doubt}.` : '');
   $('state').textContent = p.verdict ? `Déjà jugée : ${LABEL[p.verdict]}${p.reason ? ` (${labelOf(p.reason)})` : ''}` : '';
   shownAt = performance.now();
@@ -525,7 +585,7 @@ $('no-plain').addEventListener('click', () => judge('no'));
 $('skip').addEventListener('click', () => open(at + 1));  // nothing written: a verdict given stays
 const KEYS = {
   Enter: () => judge('yes'), p: () => judge('near'), x: openReasons, s: () => open(at + 1),
-  o: () => show('outlines'), l: () => show('parallax'), k: () => show('pairs'),
+  o: () => show('outlines'), l: () => show('parallax'), k: () => show('pairs'), v: toggleSource,
   n: () => stepPair(1), N: () => stepPair(-1),
   ArrowRight: () => open(at + 1), ArrowLeft: () => open(at - 1),
 };
