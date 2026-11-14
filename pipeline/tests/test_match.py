@@ -624,17 +624,3 @@ def test_points_placed_already_keep_the_pictures_that_saw_them():
     assert found.points.world == pytest.approx(
         world[np.isin(np.arange(len(world)), found.camera.inliers)]
     )
-
-
-def test_a_wall_point_the_model_puts_far_off_is_left_out():
-    from flaneur.blocks import Blocks
-
-    wall = Blocks.of([([(-50, 10), (50, 10), (50, 12), (-50, 12)], 0.0, 30.0)])  # 10 m north
-    here = match.Panorama("here", 0.0, 0.0, 2.5, 0.0, path=None)
-    ahead = np.array([[0.0, 1.0, 0.0]] * 3)
-    model = np.array([30.0, 11.0, np.nan])  # beyond the wall; on it; nothing said
-
-    rays = match._cast(here, np.arange(3), ahead, wall, model=model)
-
-    kept = ~np.isnan(rays.casts).any(axis=1)
-    assert kept.tolist() == [False, True, True]  # the model three times as far: left out

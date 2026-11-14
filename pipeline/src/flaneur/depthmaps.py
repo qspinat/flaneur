@@ -56,30 +56,6 @@ def scales(raw: np.ndarray, walls: np.ndarray) -> np.ndarray | None:
     return found
 
 
-def scale_on_blocks(
-    maps: np.ndarray, parts: np.ndarray, around, origin: np.ndarray
-) -> np.ndarray | None:
-    """Each view's scale for a panorama's maps by the model, to the walls of `around` (BD TOPO's
-    blocks near it, seen from `origin`) within NEAR_M, fitted on what stands only (see scales;
-    the placing page's Filler fits to the scene's fitted walls instead); None when too few
-    walls are seen."""
-    step = max(1, maps.shape[1] // SCALED_ON)
-    cells = slice(step // 2, None, step)
-    coarse = np.where(np.isin(parts[:, cells, cells], segment.STILL), maps[:, cells, cells], np.nan)
-    hit, edge = around.hit(origin, grid_rays(coarse.shape[1]).reshape(-1, 3))
-    metres = np.where(edge >= 0, np.linalg.norm(hit - origin, axis=1), np.nan)
-    return scales(coarse, np.where(metres < NEAR_M, metres, np.nan).reshape(coarse.shape))
-
-
-def at_rays(maps: np.ndarray, parts: np.ndarray, scale: np.ndarray, rays: np.ndarray) -> np.ndarray:
-    """How far each world ray goes by the model's maps scaled view by view (`scale`), on what
-    stands only, up to FAR_M (NaN elsewhere): read at the rays alone."""
-    each = np.broadcast_to(scale.astype(np.float32)[:, None, None], maps.shape)
-    metres = filled(maps, rays) * filled(each, rays)
-    still = np.isin(segment.at_rays(parts, rays, -1), segment.STILL)
-    return np.where(still & (metres <= FAR_M), metres, np.nan)
-
-
 def filled(maps: np.ndarray, rays: np.ndarray) -> np.ndarray:
     """How far along each world ray (unit rows, from the panorama), by the views' maps (see
     grid_rays); NaN for a ray in no view."""
