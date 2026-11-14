@@ -10,9 +10,8 @@ where the buildings are gone, little matches and the photo keeps its placement."
 
 import functools
 import heapq
-import math
 import sys
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Sequence, Set
 from dataclasses import dataclass, field, fields, replace
 from operator import itemgetter
 from pathlib import Path
@@ -731,35 +730,34 @@ def solve(
 
 
 # a camera found this far from its caption's place, or this far from every panorama its points
-# were seen from, is matched again with the panoramas around it (109472: 48.8 m from its place,
-# found from a panorama 37.7 m behind it, 8 m too far forward; the panoramas next to it never
-# compared); the second camera is kept when it agrees with the first, as it stands nearer
+# were seen from, is matched again with the panoramas around it not compared yet, and placed
+# once more from all its rays (109472: 48.8 m from its place, found from a panorama 37.7 m
+# behind it, 8 m too far forward; the panoramas next to it never compared)
 FOCUS_PLACE_M = 20.0
 FOCUS_SOURCES_M = 15.0
 FOCUS_NEAR_M = 15.0  # the panoramas around the camera matched again
 FOCUS_PANORAMAS = 8  # at most, COLMAP's first
-FOCUS_AGREE_M, FOCUS_AGREE_DEG = 10.0, 10.0
 
 
-def needs_focus(camera, place: tuple[float, float], sources: Sequence["Panorama"]) -> bool:
+def needs_focus(camera: View, place: tuple[float, float], sources: np.ndarray) -> bool:
     """Whether a camera found is to be matched again around it: far from its caption's `place`,
-    or far from every panorama its points were seen from (`sources`)."""
-    if math.hypot(camera.x - place[0], camera.y - place[1]) > FOCUS_PLACE_M:
+    or far from every panorama its points were seen from (`sources`: where they stand, rows of
+    x, y, …)."""
+    if np.hypot(camera.x - place[0], camera.y - place[1]) > FOCUS_PLACE_M:
         return True
-    return bool(sources) and all(
-        math.hypot(p.x - camera.x, p.y - camera.y) > FOCUS_SOURCES_M for p in sources
-    )
+    away = np.hypot(sources[:, 0] - camera.x, sources[:, 1] - camera.y)
+    return bool(len(away)) and bool((away > FOCUS_SOURCES_M).all())
 
 
-def focused(first, again):
-    """The camera kept once matched again around the first (`again`: none when nothing was found),
-    and what the second pass said: the second when it agrees with the first, else the first."""
-    if again is None:
-        return first, "sans caméra"
-    near = math.hypot(again.x - first.x, again.y - first.y) <= FOCUS_AGREE_M
-    if near and abs(angle(again.heading, first.heading)) <= FOCUS_AGREE_DEG:
-        return again, "d'accord"
-    return first, "en désaccord"
+def around(
+    camera: View, panoramas: Sequence["Panorama"], fixed: Set[str], but: Set[str]
+) -> list["Panorama"]:
+    """The panoramas a camera found is matched again with: those within FOCUS_NEAR_M of it but
+    those already compared (`but`), COLMAP's (`fixed`) first, nearest first, FOCUS_PANORAMAS of
+    them."""
+    away = {p.id: float(np.hypot(p.x - camera.x, p.y - camera.y)) for p in panoramas}
+    near = (p for p in panoramas if away[p.id] <= FOCUS_NEAR_M and p.id not in but)
+    return sorted(near, key=lambda p: (p.id not in fixed, away[p.id]))[:FOCUS_PANORAMAS]
 
 
 def _rivals(other: Camera, best: Camera) -> bool:
@@ -1216,6 +1214,57 @@ def place(
         np.unique(on_walls[~np.isnan(on_walls).any(axis=1)], axis=0),
         Points(pixels[camera.inliers], world[camera.inliers], seen[camera.inliers]),
     )
+
+
+class Focused(NamedTuple):
+    observed: Observed  # what the photo was placed from, the panoramas around it included
+    found: Found
+    focus: dict | None  # the second pass: panoramas matched, how far the camera moved (None: none)
+
+
+def focus(
+    photo: np.ndarray,
+    observed: Observed,
+    found: Found,
+    here: tuple[float, float],
+    panoramas: Sequence[Panorama],
+    fixed: Set[str],
+    but: Set[str],
+    blocks,
+    views: Views,
+    where: Where,
+    trace: Trace,
+    mine: Features,
+    origin_z: float = 0.0,
+) -> Focused:
+    """A photo's placement (`found`, from `observed`) once focused: a camera standing far from
+    its caption's place (`here`) or from its sources (see needs_focus) is placed again from the
+    rays of the first pass and those of the panoramas around it (see around: `fixed`, `but`),
+    kept when one is found. The second pass is not zoomed on the landmarks (the first was): its
+    details are the photo's keypoints (`mine`), the first rows of the first pass's."""
+    camera = found.camera
+    if camera is None:
+        return Focused(observed, found, None)
+    rays = observed.rays
+    sources = dict(zip(rays.sources, rays.origins, strict=True))  # panoramas only: no `more`
+    seen = [sources[i] for i in frozenset().union(*found.points.seen) if i in sources]
+    if not needs_focus(camera, here, np.array(seen).reshape(-1, 3)):
+        return Focused(observed, found, None)
+    near = around(camera, panoramas, fixed, but)
+    again = Trace()
+    more = observe(photo, near, blocks, views, replace(where, sights=()), again, mine, origin_z)
+    both = Observed(
+        observed.pixels, observed.size, Rays.of([rays, more.rays]), observed.views + more.views
+    )
+    second = place(both, where, again)
+    if second.camera is None:
+        return Focused(observed, found, {"panoramas": len(near), "moved_m": None})
+    trace.views += again.views
+    trace.matched += again.matched
+    trace.matches += again.matches
+    trace.points, trace.candidates, trace.verdict = again.points, again.candidates, again.verdict
+    moved = float(np.hypot(second.camera.x - camera.x, second.camera.y - camera.y))
+    return Focused(both, second, {"panoramas": len(near), "moved_m": round(moved, 2)})
 
 
 def _zoom(

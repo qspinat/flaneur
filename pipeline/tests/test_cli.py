@@ -658,6 +658,9 @@ def _match_world(tmp_path, monkeypatch, previous: dict, places) -> None:
     monkeypatch.setattr(
         cli.match, "place", lambda observed, where, trace: (places(observed), [], None)
     )
+    monkeypatch.setattr(
+        cli.match, "focus", lambda photo, observed, found, *rest: (observed, found, None)
+    )
 
 
 CAMERA = match.Camera(1.0, 2.0, 1.5, 90.0, 0.5, 60.0, agree=30, panoramas=2)
@@ -1129,8 +1132,8 @@ def test_an_area_without_decoys_is_left_unchecked_and_the_others_checked(tmp_pat
             near_by,
             lambda year: SimpleNamespace(blocks=None, free=None),
         ),
-        "_views": lambda matcher="disk": None,
-        "_fixed_by_colmap": lambda pictures, fixes: {p.id for p in near_by},
+        "_views": lambda matcher="disk": SimpleNamespace(matcher=SimpleNamespace(features=len)),
+        "_colmap_fixed": lambda: {p.id for p in near_by},
         "_cut_view": lambda panorama, heading: np.zeros((2, 2, 3), np.uint8),
         "_check_view": lambda panorama, heading: None,
         "_marked_by_hand": lambda view, shown, rng: (),
@@ -1142,8 +1145,11 @@ def test_an_area_without_decoys_is_left_unchecked_and_the_others_checked(tmp_pat
     monkeypatch.setattr(cli.fakes, "mixed", lambda a, b, span: a)
     monkeypatch.setattr(cli.fakes, "aged", lambda image, rng: image)
     monkeypatch.setattr(cli.match, "Where", lambda *args: None)
-    monkeypatch.setattr(cli.match, "observe", lambda *args, **kw: None)
+    monkeypatch.setattr(cli.match, "observe", lambda *args: None)
     monkeypatch.setattr(cli.match, "place", lambda *args: (None, None, None))
+    monkeypatch.setattr(
+        cli.match, "focus", lambda photo, observed, found, *rest: (observed, found, None)
+    )
 
     cli.match_check(tries=20, seed=0, matcher="disk", area=None)
 
@@ -1540,53 +1546,28 @@ def test_the_other_view_says_how_far_it_stands(tmp_path):
     assert cli._other_view([next_to], next_to, camera) is None  # the one shown
 
 
-def test_the_focusing_pass_takes_the_panoramas_around_the_camera_colmap_s_first():
-    camera = SimpleNamespace(x=0.0, y=0.0)
-    near_by = [
-        match.Panorama(n, x, 0.0, 2.5, 0.0, None)
-        for n, x in [("phone", 2.0), ("survey", 6.0), ("far", 40.0), ("next", 9.0)]
-    ]
-
-    around = cli._around_camera(near_by, camera, {"survey", "next"})
-
-    assert [p.id for p in around] == ["survey", "next", "phone"]  # COLMAP's first; 40 m: out
-
-
-def test_a_camera_s_sources_are_the_panoramas_its_points_were_seen_from():
-    by_id = {n: match.Panorama(n, 0.0, 0.0, 2.5, 0.0, None) for n in ("a", "b")}
-    points = SimpleNamespace(seen=[frozenset({"a"}), frozenset({"a", "photo:pm:7"}), frozenset()])
-
-    assert [p.id for p in cli._sources_of(points, by_id)] == ["a"]
-
-
-def test_a_camera_found_far_from_its_place_is_matched_again_around_it_and_kept_if_it_agrees(
+def test_a_photo_is_placed_where_its_focusing_pass_puts_it_and_the_pass_traced(
     tmp_path, monkeypatch
 ):
     _match_world(tmp_path, monkeypatch, {}, lambda matcher: None)
-    next_to = match.Panorama("next", 3.0, 2.0, 2.5, 0.0, None)  # 2 m from the camera found
+    compared = match.Panorama("compared", 3.0, 2.0, 2.5, 0.0, None)
     heights = SimpleNamespace(street=lambda x, y: 0.0, origin_z=0.0)
-
-    def then(year):
-        return SimpleNamespace(blocks=None)
-
-    monkeypatch.setattr(cli, "_matching", lambda: (heights, [next_to], then))
-    monkeypatch.setattr(cli, "_place_of", lambda me: (60.0, 2.0))  # its caption: 59 m off
-    nearer = match.Camera(4.0, 2.0, 1.5, 92.0, 0.5, 60.0, agree=40, panoramas=1)
-    asked = []
-
-    def observe(image, near, *rest):
-        asked.append([p.id for p in near])
-        return "around" if near and near[0].id == "next" else "first"
-
-    monkeypatch.setattr(cli.match, "observe", observe)
     monkeypatch.setattr(
-        cli.match, "place", lambda o, w, t: ((nearer if o == "around" else CAMERA), [], None)
+        cli, "_matching", lambda: (heights, [compared], lambda year: SimpleNamespace(blocks=None))
     )
+    nearer = match.Camera(4.0, 2.0, 1.5, 92.0, 0.5, 60.0, agree=40, panoramas=1)
+    left_out = []
+
+    def focus(photo, observed, found, here, panoramas, fixed, but, *rest):
+        left_out.append(but)
+        return observed, (nearer, [], None), {"panoramas": 1, "moved_m": 3.0}
+
+    monkeypatch.setattr(cli.match, "focus", focus)
 
     cli.match_photos(photo=["pm:1"], again=False, force=True)
 
     kept = json.loads((tmp_path / "matches.json").read_text())["pm:1"]
-    assert ["next"] in asked  # matched again with the panorama next to the camera
-    assert (kept["x"], kept["heading"]) == (4.0, 92.0)  # the second camera: 3 m, 2° off
+    assert (kept["x"], kept["heading"]) == (4.0, 92.0)
+    assert left_out == [{"compared"}]  # the panoramas compared already: not matched again
     trace = json.loads((tmp_path / "trace.json").read_text())["pm:1"]
-    assert trace["focus"] == "d'accord"
+    assert trace["focus"] == {"panoramas": 1, "moved_m": 3.0}
