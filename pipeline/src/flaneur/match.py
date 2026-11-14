@@ -1240,8 +1240,7 @@ def focus(
     """A photo's placement (`found`, from `observed`) once focused: a camera standing far from
     its caption's place (`here`) or from its sources (see needs_focus) is placed again from the
     rays of the first pass and those of the panoramas around it (see around: `fixed`, `but`),
-    kept when one is found. The second pass is not zoomed on the landmarks (the first was): its
-    details are the photo's keypoints (`mine`), the first rows of the first pass's."""
+    kept when one is found. The second pass is not zoomed on the landmarks (the first was)."""
     camera = found.camera
     if camera is None:
         return Focused(observed, found, None)
@@ -1251,10 +1250,17 @@ def focus(
     if not needs_focus(camera, here, np.array(seen).reshape(-1, 3)):
         return Focused(observed, found, None)
     near = around(camera, panoramas, fixed, but)
+    if not near:
+        return Focused(observed, found, {"panoramas": 0, "moved_m": None})
     again = Trace()
     more = observe(photo, near, blocks, views, replace(where, sights=()), again, mine, origin_z)
+    # their details rows of their own, as a landmark's band's (see observe): a detail's rays
+    # must all meet (see placed), and one ray of theirs matched wrongly would take its point away
     both = Observed(
-        observed.pixels, observed.size, Rays.of([rays, more.rays]), observed.views + more.views
+        np.concatenate([observed.pixels, more.pixels]),
+        observed.size,
+        Rays.of([rays, replace(more.rays, keys=more.rays.keys + len(observed.pixels))]),
+        observed.views + more.views,
     )
     second = place(both, where, again)
     if second.camera is None:

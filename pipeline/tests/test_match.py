@@ -742,3 +742,74 @@ def test_a_camera_near_its_place_and_its_sources_is_not_matched_again(monkeypatc
     )
 
     assert focused.observed is observed and focused.found is first and focused.focus is None
+
+
+def test_rays_of_the_panoramas_around_never_take_away_a_point_of_the_first_pass(monkeypatch):
+    world, pixels = facade_seen_from_the_origin()
+    keys = np.arange(len(world))
+    behind = match.Rays.of(
+        [
+            panorama_rays(world, keys, (8.0, -35.0, 2.5), "a"),
+            panorama_rays(world, keys, (-8.0, -35.0, 2.5), "b"),
+        ]
+    )
+    observed = match.Observed(pixels, (600, 800), behind, views=2)
+    where = match.Where(on_street)
+    first = match.place(observed, where, match.Trace())
+    wrong = world + np.random.default_rng(2).uniform(-4, 4, world.shape)  # matched wrongly
+
+    def observe(photo, near, blocks, views, where, trace, mine, origin_z):
+        return match.Observed(pixels, (600, 800), panorama_rays(wrong, keys, (3, -4, 2.5), "c"))
+
+    monkeypatch.setattr(match, "observe", observe)
+    near = [match.Panorama("c", 3.0, -4.0, 2.5, 0.0, None)]
+
+    focused = match.focus(
+        None,
+        observed,
+        first,
+        (60.0, 0.0),
+        near,
+        set(),
+        set(),
+        None,
+        None,
+        where,
+        match.Trace(),
+        None,
+    )
+
+    assert focused.focus["moved_m"] is not None  # placed from both passes, not the first kept
+    assert focused.found.camera.agree >= first.camera.agree
+
+
+def test_with_no_panorama_around_left_to_compare_nothing_is_matched_again(monkeypatch):
+    world, pixels = facade_seen_from_the_origin()
+    keys = np.arange(len(world))
+    behind = match.Rays.of(
+        [
+            panorama_rays(world, keys, (8.0, -35.0, 2.5), "a"),
+            panorama_rays(world, keys, (-8.0, -35.0, 2.5), "b"),
+        ]
+    )
+    observed = match.Observed(pixels, (600, 800), behind, views=2)
+    where = match.Where(on_street)
+    first = match.place(observed, where, match.Trace())
+    monkeypatch.setattr(match, "observe", None)  # never called
+
+    focused = match.focus(
+        None,
+        observed,
+        first,
+        (60.0, 0.0),
+        [],
+        set(),
+        set(),
+        None,
+        None,
+        where,
+        match.Trace(),
+        None,
+    )
+
+    assert focused.found is first and focused.focus == {"panoramas": 0, "moved_m": None}
