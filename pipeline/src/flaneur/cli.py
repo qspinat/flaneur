@@ -2469,19 +2469,15 @@ def _viewed_from(
 
 
 def _other_view(
-    views: Sequence[match.Panorama],
-    shown: match.Panorama,
-    m: match.Situated,
-    points: match.Points | None,
+    views: Sequence[match.Panorama], shown: match.Panorama, m: match.Situated
 ) -> dict | None:
     """The other panorama today's view of a placement may be shown from (see _viewed_from: the
-    one next to its camera, or its source), how far from the camera and how many of its points
-    it saw; none when it is the one shown."""
+    one next to its camera, or its source), how far from the camera; none when it is the one
+    shown."""
     other = _first_read(views)
     if other is None or other.id == shown.id:
         return None
-    seen = None if points is None else sum(other.id in s for s in points.seen)
-    return {"away_m": round(math.hypot(other.x - m.x, other.y - m.y), 1), "points": seen}
+    return {"away_m": _away([other], m)}
 
 
 def _first_read(views: Iterable[match.Panorama]) -> match.Panorama | None:
@@ -2826,7 +2822,7 @@ def confirm_placed(port: int = 8768, open_browser: bool = True) -> None:
                 "colmap": f.panorama.id in fixed,
                 "away_m": round(f.away_m, 1),
                 "source": source,
-                "other": _other_view(views_of(photo_id, not source), f.panorama, m, points),
+                "other": _other_view(views_of(photo_id, not source), f.panorama, m),
                 **counted,
             },
             "pairs": pairs,
