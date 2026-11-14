@@ -21,7 +21,12 @@ def _confirming(tmp_path, photo_id="pm:1"):
     frames = {"old": b"O", "today": b"T", "outlines": b"L", "parallax": b"P"}
     scenes = {photo_id: {"pairs": [], "plan": {}}}
     server = confirming.serve(
-        placed, tmp_path / "anchors.jsonl", dict, lambda _, part: frames[part], scenes.get, 0
+        placed,
+        tmp_path / "anchors.jsonl",
+        dict,
+        lambda _, part, source=False: b"S" + frames[part] if source else frames[part],
+        lambda k, source=False: {**scenes[k], "source": True} if source else scenes.get(k),
+        0,
     )
     threading.Thread(target=server.handle_request, daemon=True).start()
     return server
@@ -105,3 +110,10 @@ def test_a_photo_s_scene_and_its_outlines_corrected_are_served(tmp_path):
 
     status, _ = _ask(_confirming(tmp_path), "GET", "/scene/pm:2")  # not on the page
     assert status == 404
+
+
+def test_today_s_view_from_the_camera_s_source_is_served_when_asked(tmp_path):
+    assert _ask(_confirming(tmp_path), "GET", "/frame/pm:1/today?from=source") == (200, b"ST")
+    assert _ask(_confirming(tmp_path), "GET", "/frame/pm:1/today") == (200, b"T")
+    scene = _ask(_confirming(tmp_path), "GET", "/scene/pm:1?from=source")[1]
+    assert json.loads(scene)["source"] is True

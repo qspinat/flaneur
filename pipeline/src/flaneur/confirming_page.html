@@ -133,6 +133,7 @@
     <button id="outlines" aria-pressed="false">Contours (O)</button>
     <button id="parallax" aria-pressed="false">Parallaxe (L)</button>
     <button id="pairing" aria-pressed="false">Paires (K)</button>
+    <button id="source" aria-pressed="false" hidden>Vue de la source (V)</button>
   </div>
   <p id="view-note" class="note"></p>
   <p id="walls" class="note"></p>
@@ -199,13 +200,19 @@ let photos = [], at = 0, shownAt = 0, saving = false, prefetched = null;
 // what the pictures show, one view at a time: today alone, the photo's outlines on it, those
 // outlines where today's view sees them (parallax), or the pairs side by side
 let view = 'today';
-const scenes = {};  // each photo's pairs and plan, asked for once (see /scene)
-const sceneOf = (p) => (scenes[p.id] ??= fetch(`/scene/${encodeURIComponent(p.id)}`)
-  .then((r) => (r.ok ? r.json() : null)).catch(() => null)
-  .then((scene) => { if (!scene) delete scenes[p.id]; return scene; }));  // asked again later
+// today's view from the panorama next to the camera (the server's choice), or from its source
+let fromSource = false;
+const viewQuery = (source = fromSource) => (source ? '?from=source' : '');
+const scenes = {};  // each photo's pairs and plan, asked for once a view (see /scene)
+function sceneOf(p, source = fromSource) {
+  const key = p.id + viewQuery(source);
+  return (scenes[key] ??= fetch(`/scene/${encodeURIComponent(p.id)}${viewQuery(source)}`)
+    .then((r) => (r.ok ? r.json() : null)).catch(() => null)
+    .then((scene) => { if (!scene) delete scenes[key]; return scene; }));  // asked again later
+}
 const todayPart = () => (view === 'pairs' ? 'today' : view);  // the frame /frame/<id>/<part>
 const $ = (id) => document.getElementById(id);
-const frameOf = (p, part) => `/frame/${encodeURIComponent(p.id)}/${part}`;
+const frameOf = (p, part, source = fromSource) => `/frame/${encodeURIComponent(p.id)}/${part}${part === 'old' ? '' : viewQuery(source)}`;
 const LABEL = { yes: 'oui', near: 'bons bâtiments, caméra à corriger', no: 'non' };
 // why a placement is wrong: the server's reasons (/api/reasons), in its order (their keys),
 // each said here
@@ -244,8 +251,8 @@ function ahead() {
   const parts = ['old', todayPart()];
   if (!next || prefetched === `${next.id} ${parts}`) return;
   prefetched = `${next.id} ${parts}`;
-  for (const part of parts) new Image().src = frameOf(next, part);
-  sceneOf(next);
+  for (const part of parts) new Image().src = frameOf(next, part, false);  // it opens on its own
+  sceneOf(next, false);
 }
 function wipe(percent) {
   const v = Math.max(0, Math.min(100, percent));
@@ -262,6 +269,7 @@ $('frame').addEventListener('pointermove', (e) => { if ($('frame').hasPointerCap
 function showToday() {
   const BUTTON = { outlines: 'outlines', parallax: 'parallax', pairing: 'pairs' };
   for (const [id, shows] of Object.entries(BUTTON)) $(id).setAttribute('aria-pressed', String(view === shows));
+  $('source').setAttribute('aria-pressed', String(fromSource));
   $('pictures').classList.toggle('pairs', view === 'pairs');
   $('right-label').textContent = { outlines: 'contours de la photo sur aujourd\'hui →', parallax: 'contours, où la vue d\'aujourd\'hui les voit →' }[view] ?? 'aujourd\'hui →';
   const p = photos[at];
@@ -276,6 +284,20 @@ function showToday() {
 function show(next) { view = view === next ? 'today' : next; showToday(); }
 // what is drawn once a photo's scene comes, if it is still the one shown
 const whenShown = (p, draw) => { if (p) sceneOf(p).then((scene) => { if (photos[at] === p) draw(scene); }); };
+// what a photo's scene draws: none until it comes
+function redraw(p) {
+  for (const draw of [drawPlan, drawPairs, sayView]) draw(null);
+  whenShown(p, (scene) => { drawPlan(scene); drawPairs(scene); sayView(scene); });
+}
+// today's view from the camera's source (its pairs matched), or back to the nearest panorama
+function toggleSource() {
+  const p = photos[at];
+  if (!p || $('source').hidden) return;
+  fromSource = !fromSource;
+  showToday();
+  redraw(p);
+}
+$('source').addEventListener('click', toggleSource);
 $('outlines').addEventListener('click', () => show('outlines'));
 $('parallax').addEventListener('click', () => show('parallax'));
 $('pairing').addEventListener('click', () => show('pairs'));
@@ -365,10 +387,15 @@ function sayView(scene) {
   const v = scene?.view, note = $('view-note');
   const warn = !!v && (!v.colmap || (v.of != null && !v.points));
   note.classList.toggle('warn', warn);
+  $('source').hidden = !(v && (v.other || v.source));
   if (!v) { note.textContent = ''; return; }
   const who = [v.producer, v.year].filter(Boolean).join(', ');
+  if (v.other && !v.source) {
+    note.textContent = `Vue d'aujourd'hui depuis le panorama le plus proche de la caméra (${v.panorama}, à ${v.away_m} m${who ? `, ${who}` : ''}) : ses paires sont projetées par la caméra trouvée ; V montre la vue de la source et ses paires appariées.`;
+    return;
+  }
   const used = v.of == null ? '' : v.points ? `, l'un de ceux de l'appariement (${v.points} des ${v.of} points)` : ', qui n\'a pas servi à l\'appariement';
-  note.textContent = `Vue d'aujourd'hui : panorama ${v.panorama}${who ? ` (${who})` : ''}, ${v.colmap ? 'placé par COLMAP' : 'placé par son GPS, sans COLMAP'}${used}.`
+  note.textContent = `${v.source ? 'Vue de la source' : 'Vue d\'aujourd\'hui'} : panorama ${v.panorama}${who ? ` (${who})` : ''}, ${v.colmap ? 'placé par COLMAP' : 'placé par son GPS, sans COLMAP'}${used}.`
     + (warn ? ' Contours et paires peuvent en être décalés.' : '');
 }
 
@@ -484,9 +511,9 @@ function open(n) {
     $('frame').classList.add('loading');
     $('loading').textContent = 'Images en cours de dessin…';
     $('old').src = frameOf(p, 'old');
+    fromSource = false;  // each photo opens on the panorama next to its camera
     showToday();
-    for (const draw of [drawPlan, drawPairs, sayView]) draw(null);
-    whenShown(p, (scene) => { drawPlan(scene); drawPairs(scene); sayView(scene); });
+    redraw(p);
   }
   const from = p.round === 0 ? 'contre les panoramas d\'aujourd\'hui' : `au tour ${p.round}, depuis ${p.from.join(', ')}`;
   const by = p.by ? ` par ${p.by}` + (p.check ? ` (${p.check} : à vérifier de près)` : '') : '';
@@ -525,7 +552,7 @@ $('no-plain').addEventListener('click', () => judge('no'));
 $('skip').addEventListener('click', () => open(at + 1));  // nothing written: a verdict given stays
 const KEYS = {
   Enter: () => judge('yes'), p: () => judge('near'), x: openReasons, s: () => open(at + 1),
-  o: () => show('outlines'), l: () => show('parallax'), k: () => show('pairs'),
+  o: () => show('outlines'), l: () => show('parallax'), k: () => show('pairs'), v: toggleSource,
   n: () => stepPair(1), N: () => stepPair(-1),
   ArrowRight: () => open(at + 1), ArrowLeft: () => open(at - 1),
 };

@@ -1503,3 +1503,24 @@ def test_a_panorama_not_segmented_leaves_the_walls_as_they_were():
     column = _column_ahead(lambda rays: np.full(len(rays), segment.BUILT))  # building everywhere
 
     assert column[1, 1] > 1000 and column[0, 1] > 1000
+
+
+def test_today_s_view_comes_from_the_panorama_next_to_the_camera_when_well_nearer(tmp_path):
+    def at(name, y, read=True):
+        path = tmp_path / f"{name}.jpg"
+        if read:
+            path.write_bytes(b"jpg")
+        return match.Panorama(name, 0.0, y, 2.5, 0.0, path)
+
+    camera = SimpleNamespace(x=0.0, y=0.0)
+    source, next_to, unread = at("source", 37.0), at("next", 2.0), at("unread", 1.0, read=False)
+
+    def shown(sources, near_by, fixed, first=True):
+        views = cli._viewed_from(near_by, camera, sources, fixed, nearest_first=first)
+        return cli._first_read(views).id
+
+    assert shown([source], [source, next_to], {"source", "next"}) == "next"  # 35 m nearer
+    assert shown([source], [source, next_to], {"source", "next"}, first=False) == "source"
+    assert shown([source], [source, next_to], {"source"}) == "source"  # not COLMAP's
+    assert shown([source], [source, unread], {"source", "unread"}) == "source"  # not at hand
+    assert shown([at("near", 8.0)], [next_to], {"near", "next"}) == "near"  # 6 m: kept
