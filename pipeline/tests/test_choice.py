@@ -70,3 +70,16 @@ def test_a_place_s_choice_is_made_once_for_every_matcher():
     pool = [_panorama("p", 0.0)]
 
     assert chooser.views((0.0, 0.0), pool) is chooser.views((0.0, 0.0), pool)
+
+
+def test_what_a_camera_looks_at_does_not_depend_on_the_others_asked_with_it():
+    far_wall = [([(-205, -50), (-200, -50), (-200, 50), (-205, 50)], 0.0, 15.0)]
+    chooser = _chooser([], far_wall)
+    west = np.array([[-60.0, 0.0, 270.0]])  # 140 m from the wall
+    east = np.array([[x, 0.0, 90.0] for x in range(30, 61, 5)])  # pulling their mean away
+
+    alone = chooser.aims(west)[0]
+    together = chooser.aims(np.vstack([west, east]))[0]
+
+    assert alone[0] == -200.0
+    np.testing.assert_allclose(together, alone)

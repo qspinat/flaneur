@@ -9,7 +9,7 @@ cameras first (Max-k-Cover: the greedy choice is within 63 % of the best), from 
 placed; one it did not place only fills a hole no placed one covers (its place is borrowed, or
 its phone's). Measured offline on 120 views with a known answer, the caption's place drawn off
 the truth as measured: 48 views chosen this way cover 99 cameras, the 192 views of the 16
-nearest panoramas 90 (docs: plan choix-des-panoramas)."""
+nearest panoramas 90."""
 
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
@@ -82,7 +82,8 @@ class Chooser:
         spots, at = np.unique(cameras[:, :2], axis=0, return_inverse=True)
         z = np.asarray(self.ground(spots[:, 0], spots[:, 1]), float) + EYE_M
         centre = spots.mean(axis=0)
-        around = self.blocks.near(centre[0], centre[1], SEEN_M + REACH_M)  # the spots' walls
+        spread = float(np.hypot(*(spots - centre).T).max())
+        around = self.blocks.near(centre[0], centre[1], SEEN_M + spread)  # every spot's walls
         h = np.radians(cameras[:, 2])
         ahead = np.column_stack([np.sin(h), np.cos(h), np.zeros_like(h)])
         for k, (x, y) in enumerate(spots):
@@ -123,7 +124,7 @@ def _cameras(
     gx, gy = (g.ravel() for g in np.meshgrid(span + place[0], span + place[1]))
     away = np.hypot(gx - place[0], gy - place[1])
     keep = (away <= REACH_M) & np.asarray(free(gx, gy), bool)
-    gx, gy, away = gx[keep], gy[keep], np.maximum(away[keep], GRID_M / 2)
+    gx, gy, away = gx[keep], gy[keep], np.maximum(away[keep], 0.5)  # as measured
     n = len(HEADINGS)
     cameras = np.column_stack([np.repeat(gx, n), np.repeat(gy, n), np.tile(HEADINGS, len(gx))])
     r = np.repeat(away, n)
