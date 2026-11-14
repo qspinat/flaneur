@@ -4,6 +4,7 @@ import functools
 import hashlib
 import io
 import json
+import math
 import re
 import shutil
 import socket
@@ -1456,6 +1457,11 @@ def _inside(at: np.ndarray, size: tuple[int, int]) -> np.ndarray:
 
 
 PAIRS_SHOWN = 12  # pairs on the confirmation page: as many as the eye follows
+# today's view comes from the panorama COLMAP placed next to the camera when it stands this much
+# nearer than the source: it frames the photo as its camera does, and shows where the camera is
+# off along its view (109472: from 2.2 m, 8 m too far forward; from its source 37.7 m behind,
+# nothing seen); its pairs are projected, the source's matched ones a key away
+NEARER_M = 10.0
 PLAN_M = 40.0  # the confirmation page's plan: so far each way from its camera
 
 
@@ -2427,7 +2433,7 @@ class Framed(NamedTuple):
 def _away(views: Sequence[match.Panorama], m: match.Situated) -> float | None:
     """How far from a photo's camera stands the panorama its view of today comes from: the
     first of `views` (see _viewed_from) whose picture is at hand, as _framed takes it."""
-    shown = next((p for p in views if p.path.exists()), None)
+    shown = _first_read(views)
     return None if shown is None else round(float(np.hypot(shown.x - m.x, shown.y - m.y)), 1)
 
 
@@ -2437,18 +2443,31 @@ def _viewed_from(
     sources: Sequence[match.Panorama],
     fixed: Set[str],
     walled: Callable[[match.Panorama], bool] | None = None,
+    nearest_first: bool = False,
 ) -> list[match.Panorama]:
     """The panoramas today's view of a placement may come from, the first whose picture is read
     taken: those its camera was found from (`sources`, see _sources_first), wherever they stand
     (in the frame of its points, they matched what the photo shows); then the nearest
     SHEET_PANORAMAS within SHEET_MOST_M, those within VIEW_WALLS_M whose walls are fitted
     (`walled`) before them, COLMAP's (`fixed`) before those that only borrow their run's place
-    (see _placed)."""
+    (see _placed). `nearest_first`: COLMAP's nearest the camera before them all, when it stands
+    NEARER_M nearer than the one that would be shown."""
     near = sorted(_nearest(near_by, m.x, m.y, SHEET_MOST_M), key=lambda p: p.id not in fixed)
     walls_near = [
         p for p in near if np.hypot(p.x - m.x, p.y - m.y) <= VIEW_WALLS_M and walled and walled(p)
     ]
-    return [*sources, *walls_near, *near[:SHEET_PANORAMAS]]
+    views = [*sources, *walls_near, *near[:SHEET_PANORAMAS]]
+    if nearest_first and (shown := _first_read(views)) is not None:
+        close = _first_read(p for p in near if p.id in fixed)  # near: COLMAP's, nearest first
+        away = lambda p: math.hypot(p.x - m.x, p.y - m.y)  # noqa: E731
+        if close is not None and away(close) + NEARER_M <= away(shown):
+            return [close, *views]
+    return views
+
+
+def _first_read(views: Iterable[match.Panorama]) -> match.Panorama | None:
+    """The first of `views` whose picture is at hand (as _framed takes it)."""
+    return next((p for p in views if p.path.exists()), None)
 
 
 def _sources_first(
@@ -2569,7 +2588,8 @@ def match_sheet(per_page: int = 10) -> None:
 
     def views(photo_id: str, m: match.Situated) -> list[match.Panorama]:
         points = _points_of(photo_id, m, kept.get(photo_id))
-        return _viewed_from(near_by, m, _sources_first(points, by_id, m, fixed), fixed)
+        sources = _sources_first(points, by_id, m, fixed)
+        return _viewed_from(near_by, m, sources, fixed, nearest_first=True)  # as the page
 
     rows = [
         row
@@ -2703,9 +2723,13 @@ def confirm_placed(port: int = 8768, open_browser: bool = True) -> None:
     def first_of(photo_id: str) -> list[match.Panorama]:
         return _sources_first(points_of(photo_id), by_id, situated[photo_id], fixed)
 
-    def views_of(photo_id: str) -> list[match.Panorama]:
+    def views_of(photo_id: str, source: bool = False) -> list[match.Panorama]:
+        """Today's view of a placement: from COLMAP's panorama next to its camera, or (`source`)
+        from those it was found from."""
         m = situated[photo_id]
-        return _viewed_from(near_by, m, first_of(photo_id), fixed, walls.fitted)
+        return _viewed_from(
+            near_by, m, first_of(photo_id), fixed, walls.fitted, nearest_first=not source
+        )
 
     placed = [
         {
@@ -2730,14 +2754,16 @@ def confirm_placed(port: int = 8768, open_browser: bool = True) -> None:
     ]
     read = functools.lru_cache(maxsize=16)(lambda path: cv2.imread(str(path)))
 
-    @functools.lru_cache(maxsize=2)  # the heavy part, in arrays: the photo shown and the next
-    def framed(photo_id: str) -> Framed | None:
+    @functools.lru_cache(
+        maxsize=4
+    )  # the heavy part, in arrays: the photo shown and the next, each from either panorama
+    def framed(photo_id: str, source: bool = False) -> Framed | None:
         m = situated[photo_id]
-        return _framed(photo_id, m, heights, views_of(photo_id), read, CONFIRM_WIDTH)
+        return _framed(photo_id, m, heights, views_of(photo_id, source), read, CONFIRM_WIDTH)
 
     @functools.lru_cache(maxsize=192)  # the pictures as sent, a few hundred kB a photo
-    def frame(photo_id: str, part: str) -> bytes | None:
-        if (f := framed(photo_id)) is None:
+    def frame(photo_id: str, part: str, source: bool = False) -> bytes | None:
+        if (f := framed(photo_id, source)) is None:
             return None
         if part == "parallax":
             seen_from = _toward(f.camera, f.panorama)
@@ -2752,8 +2778,8 @@ def confirm_placed(port: int = 8768, open_browser: bool = True) -> None:
         return cv2.imencode(".jpg", picture, SHEET_JPEG)[1].tobytes()
 
     @functools.lru_cache(maxsize=192)
-    def scene(photo_id: str) -> dict | None:
-        if (f := framed(photo_id)) is None:
+    def scene(photo_id: str, source: bool = False) -> dict | None:
+        if (f := framed(photo_id, source)) is None:
             return None
         m = situated[photo_id]
         chained = rounds[photo_id]["round"] > 0
@@ -2779,6 +2805,9 @@ def confirm_placed(port: int = 8768, open_browser: bool = True) -> None:
                 "producer": producer,
                 "year": year,
                 "colmap": f.panorama.id in fixed,
+                "away_m": round(f.away_m, 1),
+                "source": source,
+                "other": _first_read(views_of(photo_id)) != _first_read(views_of(photo_id, True)),
                 **counted,
             },
             "pairs": pairs,
