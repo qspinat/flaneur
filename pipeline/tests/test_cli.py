@@ -1594,10 +1594,16 @@ def test_without_maps_made_ahead_the_model_says_nothing(tmp_path, monkeypatch):
 
 
 def test_a_photos_fingerprint_changes_once_its_panoramas_maps_are_made(tmp_path, monkeypatch):
-    monkeypatch.setattr(cli, "VIEW_DEPTH", tmp_path)
+    monkeypatch.setattr(cli, "VIEW_DEPTH", tmp_path / "depth")
+    monkeypatch.setattr(cli, "VIEW_STRUCTURE", tmp_path / "parts")
     near_by = [_panorama(n, 10.0 * n) for n in range(1, 4)]
+    name = f"{cli._levelled_name(near_by[0])}.npz"
     before = _scene(near_by)
+    (tmp_path / "depth").mkdir()
+    (tmp_path / "depth" / name).write_bytes(b"made")
+    depth_only = _scene(near_by)
+    (tmp_path / "parts").mkdir()
+    (tmp_path / "parts" / name).write_bytes(b"made")
 
-    (tmp_path / f"{cli._levelled_name(near_by[0])}.npz").write_bytes(b"made")
-
-    assert _scene(near_by) != before  # the model may now leave some of its casts out
+    assert depth_only == before  # without what it shows, the model checks nothing
+    assert _scene(near_by) != before  # with both, it may leave some of its casts out

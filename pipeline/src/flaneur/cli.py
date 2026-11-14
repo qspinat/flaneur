@@ -776,6 +776,7 @@ def _code() -> str:
         Path(buildings.__file__),
         Path(landmarks.__file__),
         Path(depthmaps.__file__),
+        Path(segment.__file__),
     ):
         digest.update(path.read_bytes())
     return digest.hexdigest()[:16]
@@ -796,6 +797,13 @@ def _setup() -> str:
     return hashlib.sha1(f"{where!r}{_code()}".encode()).hexdigest()[:16]
 
 
+def _modelled(p: match.Panorama) -> bool:
+    """Whether the model can check a panorama's casts: its maps and what its views show are
+    made (see _model_depth)."""
+    name = f"{_levelled_name(p)}.npz"
+    return (VIEW_DEPTH / name).exists() and (VIEW_STRUCTURE / name).exists()
+
+
 def _scene_of(near: Sequence[match.Panorama], here: tuple[float, float], code: str) -> str:
     """What one photo's match is found from besides the photo itself: the panoramas it is
     compared with (`near`, see _compared_with: where each stands, faces and leans, whether the
@@ -810,7 +818,7 @@ def _scene_of(near: Sequence[match.Panorama], here: tuple[float, float], code: s
             round(p.azimuth, 2),
             round(p.roll or 0.0, 3),
             round(p.pitch or 0.0, 3),
-            (VIEW_DEPTH / f"{_levelled_name(p)}.npz").exists(),  # the model checks its casts
+            _modelled(p),  # the model checks its casts
         )
         for p in near
     ]
