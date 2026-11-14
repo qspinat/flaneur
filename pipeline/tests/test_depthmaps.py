@@ -256,3 +256,17 @@ def test_a_model_that_fails_leaves_the_walls_alone_and_is_not_asked_again(tmp_pa
     assert maker.maps(_panorama(tmp_path)) is None
     assert maker.maps(_panorama(tmp_path)) is None
     assert len(calls) == 1
+
+
+def test_maps_kept_on_disk_are_still_read_after_the_model_failed(tmp_path):
+    calls = []
+    _kept_in(tmp_path, calls).maps(_panorama(tmp_path))  # kept on disk, by an earlier run
+
+    def broken(view: np.ndarray) -> np.ndarray:
+        raise RuntimeError("no memory left")
+
+    maker = depthmaps.Depthmaps(threading.Lock(), estimate=broken, side=SIDE, folder=tmp_path)
+    other = match.Panorama("p2", 0.0, 0.0, 0.0, 0.0, _panorama(tmp_path).path)
+    assert maker.maps(other) is None  # made live: the model fails
+
+    assert maker.maps(_panorama(tmp_path)) is not None

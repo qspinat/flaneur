@@ -209,17 +209,16 @@ class Depthmaps:
         self.loaded = None
         self.broken: Exception | None = None
         self.kept: OrderedDict[str, np.ndarray] = OrderedDict()  # levelled name: maps
+        self.memory = threading.Lock()  # around `kept` (the model's `lock` is held for long)
 
     def maps(self, panorama: match.Panorama) -> np.ndarray | None:
         """The panorama's maps (metres along each ray, as the model says), made the first time;
         None if its picture cannot be read, or the model failed."""
-        if self.broken is not None:
-            return None
         key = self.name(panorama)
         found = self._kept(key)
         if found is None and (found := self._read(panorama)) is not None:
             self._keep(key, found)
-        if found is not None or not self.make:
+        if found is not None or not self.make or self.broken is not None:
             return found
         picture = cv2.imread(str(panorama.path))
         if picture is None:
@@ -263,15 +262,17 @@ class Depthmaps:
         return None if self.folder is None else self.folder / f"{self.name(panorama)}.npz"
 
     def _keep(self, key: str, maps: np.ndarray) -> None:
-        self.kept[key] = maps
-        while len(self.kept) > KEPT:
-            self.kept.popitem(last=False)
+        with self.memory:
+            self.kept[key] = maps
+            while len(self.kept) > KEPT:
+                self.kept.popitem(last=False)
 
     def _kept(self, key: str) -> np.ndarray | None:
-        found = self.kept.get(key)
-        if found is not None:
-            self.kept.move_to_end(key)
-        return found
+        with self.memory:  # the page's requests come on several threads
+            found = self.kept.get(key)
+            if found is not None:
+                self.kept.move_to_end(key)
+            return found
 
     def _moge(self, view: np.ndarray) -> np.ndarray:
         """MoGe-2's depth along the axis of a view (BGR, square), at its size."""
