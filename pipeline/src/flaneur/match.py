@@ -564,6 +564,9 @@ class Candidate:
     agree: int
     spread_m: float | None  # None when not measured
     why: str
+    far_m: float | None = None  # how far its points of agreement stand (15th percentile)
+    error_px: float | None = None  # how far they fall from their pixels, on average
+    spread_deg: float | None = None  # how sure its heading is (see spread), when measured
 
     @classmethod
     def of(cls, view: View, agree: int, metres: float | None, why: str) -> "Candidate":
@@ -771,8 +774,8 @@ def _checked(
     """A guessed camera refined on the points that agree with it (twice: more agree once it
     is nearer), or None if it fails a check (`trace` keeps which)."""
 
-    def note(why: str, view: View, agree: int, metres: float | None = None) -> None:
-        trace.candidates.append(Candidate.of(view, agree, metres, why))
+    def note(why: str, view: View, agree: int, metres: float | None = None, **measured) -> None:
+        trace.candidates.append(replace(Candidate.of(view, agree, metres, why), **measured))
 
     view = rough
     for _ in range(2):
@@ -785,6 +788,10 @@ def _checked(
     off = np.linalg.norm(project(view, world, size) - pixels, axis=1)
     inliers = np.flatnonzero(off < REPROJECTION_PX)
     agree = len(inliers)
+    fit = {}  # how far its points of agreement stand, and how well they fall
+    if agree:
+        away = np.linalg.norm(world[inliers] - [view.x, view.y, view.z], axis=1)
+        fit = {"far_m": float(np.percentile(away, 15)), "error_px": float(off[inliers].mean())}
     seen_from = sum(1 for s in frozenset().union(*sources[inliers]) if not s.startswith(VIA))
     checks = [  # the first failed says why it is turned down
         (agree < MIN_AGREE, "trop peu de points d'accord"),
@@ -796,13 +803,13 @@ def _checked(
     ]
     why = next((why for failed, why in checks if failed), "")
     if why:
-        note(why, view, agree)
+        note(why, view, agree, **fit)
         return None
     metres, degrees = spread(view, world[inliers], pixels[inliers], size)
     if metres > MOST_SPREAD_M:
-        note("position incertaine", view, agree, metres)
+        note("position incertaine", view, agree, metres, spread_deg=degrees, **fit)
         return None
-    note("", view, agree, metres)
+    note("", view, agree, metres, spread_deg=degrees, **fit)
     return Camera(
         view.x,
         view.y,
