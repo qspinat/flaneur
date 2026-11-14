@@ -661,20 +661,44 @@ def test_the_panoramas_around_a_camera_are_colmap_s_first_and_new_ones_only():
     assert [p.id for p in around] == ["survey", "next", "phone"]  # 40 m: out; "old": compared
 
 
+def placed_first(keys: np.ndarray, at: float = -35.0):
+    """The facade's details `keys` seen from two panoramas `at` metres north of the camera (35 m
+    behind it, by default), and the camera placed from them: the first pass."""
+    world, pixels = facade_seen_from_the_origin()
+    rays = match.Rays.of(
+        [
+            panorama_rays(world, keys, (8.0, at, 2.5), "a"),
+            panorama_rays(world, keys, (-8.0, at, 2.5), "b"),
+        ]
+    )
+    observed = match.Observed(pixels, (600, 800), rays, views=2)
+    where = match.Where(on_street)
+    return world, pixels, observed, where, match.place(observed, where, match.Trace())
+
+
+def focused_of(observed, first, where, here, panoramas, trace=None, fixed=(), but=()):
+    """match.focus with nothing to match (observe is faked by the tests)."""
+    trace = match.Trace() if trace is None else trace
+    return match.focus(
+        None,
+        observed,
+        first,
+        here,
+        panoramas,
+        set(fixed),
+        set(but),
+        None,
+        None,
+        where,
+        trace,
+        None,
+    )
+
+
 def test_a_camera_far_from_its_place_is_placed_again_from_the_panoramas_around_it_too(
     monkeypatch,
 ):
-    world, pixels = facade_seen_from_the_origin()
-    first_half, second_half = np.arange(30), np.arange(30, len(world))
-    behind = match.Rays.of(  # the first pass: two panoramas 35 m behind the camera
-        [
-            panorama_rays(world, first_half, (8.0, -35.0, 2.5), "a"),
-            panorama_rays(world, first_half, (-8.0, -35.0, 2.5), "b"),
-        ]
-    )
-    observed = match.Observed(pixels, (600, 800), behind, views=2)
-    where, trace = match.Where(on_street), match.Trace()
-    first = match.place(observed, where, trace)
+    world, pixels, observed, where, first = placed_first(np.arange(30))
     panoramas = [
         match.Panorama(n, x, y, 2.5, 0.0, None)
         for n, x, y in [("c", 3.0, -4.0), ("d", -3.0, -5.0), ("a", 8.0, -35.0), ("e", 50.0, 0)]
@@ -684,25 +708,14 @@ def test_a_camera_far_from_its_place_is_placed_again_from_the_panoramas_around_i
     def observe(photo, near, blocks, views, where, trace, mine, origin_z):
         asked.append([p.id for p in near])
         trace.views = len(near)
-        more = [panorama_rays(world, second_half, (p.x, p.y, p.z), p.id) for p in near]
-        return match.Observed(pixels[: len(world)], (600, 800), match.Rays.of(more), len(near))
+        rest = np.arange(30, len(world))
+        more = [panorama_rays(world, rest, (p.x, p.y, p.z), p.id) for p in near]
+        return match.Observed(pixels, (600, 800), match.Rays.of(more), len(near))
 
     monkeypatch.setattr(match, "observe", observe)
+    trace = match.Trace()
 
-    focused = match.focus(
-        None,
-        observed,
-        first,
-        (60.0, 0.0),
-        panoramas,
-        {"d"},
-        {"a", "b"},
-        None,
-        None,
-        where,
-        trace,
-        None,
-    )
+    focused = focused_of(observed, first, where, (60.0, 0.0), panoramas, trace, {"d"}, {"a", "b"})
 
     assert asked == [["d", "c"]]  # COLMAP's first; "a" compared already, "e" 50 m off
     assert focused.found.camera.agree > first.camera.agree  # both passes' points
@@ -713,103 +726,38 @@ def test_a_camera_far_from_its_place_is_placed_again_from_the_panoramas_around_i
 
 
 def test_a_camera_near_its_place_and_its_sources_is_not_matched_again(monkeypatch):
-    world, pixels = facade_seen_from_the_origin()
-    keys = np.arange(len(world))
-    rays = match.Rays.of(
-        [
-            panorama_rays(world, keys, (4.0, -3.0, 2.5), "a"),
-            panorama_rays(world, keys, (-4.0, -3.0, 2.5), "b"),
-        ]
-    )
-    observed = match.Observed(pixels, (600, 800), rays, views=2)
-    where = match.Where(on_street)
-    first = match.place(observed, where, match.Trace())
+    _, _, observed, where, first = placed_first(np.arange(60), at=-3.0)
     monkeypatch.setattr(match, "observe", None)  # never called
 
-    focused = match.focus(
-        None,
-        observed,
-        first,
-        (5.0, 0.0),
-        [],
-        set(),
-        set(),
-        None,
-        None,
-        where,
-        match.Trace(),
-        None,
-    )
+    focused = focused_of(observed, first, where, (5.0, 0.0), [])
 
     assert focused.observed is observed and focused.found is first and focused.focus is None
 
 
 def test_rays_of_the_panoramas_around_never_take_away_a_point_of_the_first_pass(monkeypatch):
-    world, pixels = facade_seen_from_the_origin()
-    keys = np.arange(len(world))
-    behind = match.Rays.of(
-        [
-            panorama_rays(world, keys, (8.0, -35.0, 2.5), "a"),
-            panorama_rays(world, keys, (-8.0, -35.0, 2.5), "b"),
-        ]
-    )
-    observed = match.Observed(pixels, (600, 800), behind, views=2)
-    where = match.Where(on_street)
-    first = match.place(observed, where, match.Trace())
+    keys = np.arange(60)
+    world, pixels, observed, where, first = placed_first(keys)
     wrong = world + np.random.default_rng(2).uniform(-4, 4, world.shape)  # matched wrongly
 
     def observe(photo, near, blocks, views, where, trace, mine, origin_z):
         return match.Observed(pixels, (600, 800), panorama_rays(wrong, keys, (3, -4, 2.5), "c"))
 
     monkeypatch.setattr(match, "observe", observe)
-    near = [match.Panorama("c", 3.0, -4.0, 2.5, 0.0, None)]
+    trace = match.Trace()
 
-    focused = match.focus(
-        None,
-        observed,
-        first,
-        (60.0, 0.0),
-        near,
-        set(),
-        set(),
-        None,
-        None,
-        where,
-        match.Trace(),
-        None,
+    focused = focused_of(
+        observed, first, where, (60.0, 0.0), [match.Panorama("c", 3, -4, 2.5, 0, None)], trace
     )
 
     assert focused.focus["moved_m"] is not None  # placed from both passes, not the first kept
-    assert focused.found.camera.agree >= first.camera.agree
+    assert trace.points == len(world)  # every detail still placed
+    assert np.hypot(focused.found.camera.x, focused.found.camera.y) < 0.2
 
 
 def test_with_no_panorama_around_left_to_compare_nothing_is_matched_again(monkeypatch):
-    world, pixels = facade_seen_from_the_origin()
-    keys = np.arange(len(world))
-    behind = match.Rays.of(
-        [
-            panorama_rays(world, keys, (8.0, -35.0, 2.5), "a"),
-            panorama_rays(world, keys, (-8.0, -35.0, 2.5), "b"),
-        ]
-    )
-    observed = match.Observed(pixels, (600, 800), behind, views=2)
-    where = match.Where(on_street)
-    first = match.place(observed, where, match.Trace())
+    _, _, observed, where, first = placed_first(np.arange(60))
     monkeypatch.setattr(match, "observe", None)  # never called
 
-    focused = match.focus(
-        None,
-        observed,
-        first,
-        (60.0, 0.0),
-        [],
-        set(),
-        set(),
-        None,
-        None,
-        where,
-        match.Trace(),
-        None,
-    )
+    focused = focused_of(observed, first, where, (60.0, 0.0), [])
 
     assert focused.found is first and focused.focus == {"panoramas": 0, "moved_m": None}
