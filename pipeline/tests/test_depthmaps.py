@@ -109,6 +109,57 @@ def test_maps_are_made_live_once_along_each_ray_and_kept_in_memory(tmp_path):
     assert again is first
 
 
+def _kept_in(folder, calls: list, **given) -> depthmaps.Depthmaps:
+    """A maker of 4 m everywhere, keeping its maps in `folder`, counting its `calls`."""
+
+    def estimate(view: np.ndarray) -> np.ndarray:
+        calls.append(1)
+        return np.full(view.shape[:2], 4.0)
+
+    return depthmaps.Depthmaps(
+        threading.Lock(), estimate=estimate, side=SIDE, folder=folder, **given
+    )
+
+
+def test_maps_made_once_are_kept_on_disk_for_the_next_run(tmp_path):
+    calls = []
+    made = _kept_in(tmp_path / "kept", calls).maps(_panorama(tmp_path))
+
+    again = _kept_in(tmp_path / "kept", calls).maps(_panorama(tmp_path))
+
+    assert len(calls) == VIEWS  # made once, by the first
+    np.testing.assert_allclose(again, made, rtol=1e-3)
+
+
+def test_a_reader_that_does_not_make_has_only_the_maps_kept(tmp_path):
+    calls = []
+
+    assert _kept_in(tmp_path, calls, make=False).maps(_panorama(tmp_path)) is None
+    assert calls == []
+
+
+def test_maps_kept_are_named_as_their_panorama_is_levelled(tmp_path):
+    calls = []
+    level = {"name": "p1_0.0"}
+    maker = _kept_in(tmp_path / "kept", calls, name=lambda p: level["name"])
+    maker.maps(_panorama(tmp_path))
+    level["name"] = "p1_2.0"  # levelled again: its views are not the same
+
+    maker.maps(_panorama(tmp_path))
+
+    assert len(calls) == 2 * VIEWS  # not the maps kept in memory for the old levelling
+    assert sorted(f.name for f in (tmp_path / "kept").iterdir()) == ["p1_0.0.npz", "p1_2.0.npz"]
+
+
+def test_maps_kept_by_another_model_or_resolution_are_made_again(tmp_path):
+    calls = []
+    np.savez_compressed(tmp_path / "p1.npz", depth=np.zeros((VIEWS, SIDE, SIDE)), model="old")
+
+    made = _kept_in(tmp_path, calls).maps(_panorama(tmp_path))
+
+    assert len(calls) == VIEWS and made[0, SIDE // 2, SIDE // 2] == pytest.approx(4.0, abs=0.05)
+
+
 def test_an_unreadable_picture_has_no_maps(tmp_path):
     maker = depthmaps.Depthmaps(threading.Lock(), estimate=lambda v: np.ones(v.shape[:2]))
     missing = match.Panorama("gone", 0.0, 0.0, 0.0, 0.0, tmp_path / "gone.jpg")

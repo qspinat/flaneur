@@ -87,6 +87,9 @@ POSES = DATA / "pilot" / "panorama_poses.json"  # panoramas set right on two sur
 VIEW_STRUCTURE = (  # each panorama's views' pixel classes (see segment), as views are cut now
     DATA / "raw" / "view_structure" / f"{match.VIEW_SIDE}_{match.VIEW_FOV}_{match.VIEW_PITCH}"
 )
+VIEW_DEPTH = (  # each panorama's views' depth by the model (see depthmaps), as views are cut now
+    DATA / "raw" / "view_depth" / f"{match.VIEW_SIDE}_{match.VIEW_FOV}_{match.VIEW_PITCH}"
+)
 PAIR_MATCHES = (  # each pair's raw matches, made once (matcher), as views are cut now
     DATA / "raw" / "pair_matches" / f"{match.VIEW_SIDE}_{match.VIEW_FOV}_{match.VIEW_PITCH}"
 )
@@ -3117,15 +3120,52 @@ def segment_panoramas(answers: Path = PLACINGS, page: int = 8772) -> None:
         return
     left = [p for p in reached if not segmenter.kept(p)]
     typer.echo(f"{len(reached)} panoramas à moins de {reach:g} m d'une photo, {len(left)} à faire")
+    _made_ahead(left, segmenter.made)
+
+
+def _made_ahead(left: list[match.Panorama], make: Callable[[match.Panorama], object]) -> None:
+    """`make` for each panorama `left` (None: its picture unreadable), said as it goes; one that
+    fails (memory, a picture) is left, the others go on."""
     started = time.monotonic()
     for n, panorama in enumerate(left, 1):
         try:
-            if segmenter.made(panorama) is None:
+            if make(panorama) is None:
                 typer.echo(f"{panorama.id} : image illisible")
-        except Exception as error:  # this one left (memory, a picture): the others go on
+        except Exception as error:
             typer.echo(f"{panorama.id} : laissé ({error})", err=True)
         if n % 50 == 0 or n == len(left):
             typer.echo(f"{n}/{len(left)} ({time.monotonic() - started:.0f} s)")
+
+
+@app.command("profondeurs")
+def depth_panoramas(page: int = 8772) -> None:
+    """Fait d'avance, pour les panoramas que `match` compare aux photos, ce qu'il lit sans
+    pouvoir le faire (le modèle ne tient pas à côté de son apparieur) : la segmentation de
+    leurs vues, puis leur profondeur (MoGe-2), un modèle après l'autre. Reprend où il s'était
+    arrêté ; refuse de tourner la page ouverte (sur le port `page`) : mémoire."""
+    _page_closed(page)
+    with closing(db.connect(DB_PATH)) as conn:
+        walk = export.photos(conn, DATA / "pilot", REVIEWS)
+    used = _used_by_matching(walk, _spheres())
+    segmenter = segment.Segmenter(VIEW_STRUCTURE, threading.Lock(), _levelled_name, make=True)
+    left = [p for p in used if not segmenter.kept(p)]
+    typer.echo(f"{len(used)} panoramas que `match` compare ; {len(left)} à segmenter")
+    _made_ahead(left, segmenter.made)
+    del segmenter
+    from flaneur import lomag
+
+    lomag.released()  # the segmenter's model let go before the depth's
+    maps = depthmaps.Depthmaps(threading.Lock(), folder=VIEW_DEPTH, name=_levelled_name)
+
+    def made(panorama: match.Panorama) -> np.ndarray | None:
+        found = maps.maps(panorama)
+        if maps.broken is not None:  # the model failed: every one after would too
+            raise SystemExit(f"profondeur impossible : {maps.broken}")
+        return found
+
+    left = [p for p in used if not maps.kept_on_disk(p)]
+    typer.echo(f"{len(left)} à mettre en profondeur")
+    _made_ahead(left, made)
 
 
 LIDAR_MNS = DATA / "raw" / "lidar_mns"  # IGN's LiDAR HD surface model, patches around panoramas
@@ -3254,7 +3294,9 @@ def compare_parallax(answers: Path = PLACINGS) -> None:
     made = _Scenes(
         spheres, fixed, lambda: views, threading.Lock(), segments, WALLS, seen=_seeing(True, masks)
     )
-    depth_made = depthmaps.Depthmaps(threading.Lock())  # live (MoGe-2), as on the page
+    depth_made = depthmaps.Depthmaps(  # made live (MoGe-2) if not kept, as on the page
+        threading.Lock(), folder=VIEW_DEPTH, name=_levelled_name
+    )
     fill = depthmaps.fills(
         lambda p: depth_made.maps(made.by_id[p]), lambda p: masks.parts(made.by_id[p])
     )
@@ -3451,7 +3493,9 @@ def place_photos(
         """A neighbour set right against a panorama (see _Scenes.pair_of); live only."""
         return walls_made.pair_of(panorama, neighbour) if live else None
 
-    depth_made = depthmaps.Depthmaps(matching)  # live: the model loaded at the first need
+    depth_made = depthmaps.Depthmaps(  # kept, else live: the model loaded at the first need
+        matching, folder=VIEW_DEPTH, name=_levelled_name
+    )
 
     def maps_of(panorama: str) -> np.ndarray | None:
         """A panorama's views' depth by the model (MoGe-2), made the first time it is asked."""

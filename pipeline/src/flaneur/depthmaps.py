@@ -1,6 +1,8 @@
 """How far each pixel of a panorama's views stands, as a model trained on single pictures sees it
-(MoGe-2), for the points clicked where today's walls say nothing; made live, the first time a
-panorama needs it (0.15 s a view), kept in memory, never on disk.
+(MoGe-2), for the points clicked where today's walls say nothing; made the first time a panorama
+needs it (0.15 s a view), kept in memory and, when given a folder, on disk (half precision,
+compressed: about 2.3 MB a panorama), so that `match`, which cannot hold the model beside its
+matcher, reads them made beforehand (`flaneur profondeurs`).
 
 Its own metres are no use here: each view is scaled to the walls it sees. Measured on the walls'
 test (a held-out neighbour's view brought through the depth, 81 cases, on building pixels): the
@@ -19,14 +21,17 @@ import sys
 import threading
 from collections import OrderedDict
 from collections.abc import Callable
+from pathlib import Path
 
 import cv2
 import numpy as np
 
 from flaneur import behind, facades, match, segment
+from flaneur.sources import write_atomic
 
 MODEL = "Ruicheng/moge-2-vitl-normal"
 LEVEL = 0  # MoGe-2's resolution level: its lowest, as good here as its finest
+STAMP = f"{MODEL}@{LEVEL}"  # what the maps kept on disk were made with
 NEAR_M = 30.0  # a wall this near scales a view (farther, its own depth is less sure)
 FAR_M = 150.0  # scaled, farther than this: the sky (models put it hundreds of metres off)
 SCALED_ON = 40  # cells across each view where the walls are cast, for its scale
@@ -183,30 +188,38 @@ def _along(side: int) -> np.ndarray:
 
 
 class Depthmaps:
-    """The distance along each pixel of a panorama's views (views × side × side), made live by
-    the model (`estimate`: a view, BGR, to its depth along the axis; MoGe-2 by default, loaded the
-    first time, `lock` held while it runs) and kept in memory for the last few panoramas. A model
-    that fails (not fetched, memory short) is said once and not asked again: the walls alone."""
+    """The distance along each pixel of a panorama's views (views × side × side), made by the
+    model (`estimate`: a view, BGR, to its depth along the axis; MoGe-2 by default, loaded the
+    first time, `lock` held while it runs), kept in memory for the last few panoramas and, with a
+    `folder`, on disk, named as the panorama is levelled (`name`: its views change with it), for
+    the model. Without `make`, only those kept are read: the model takes gigabytes. A model that
+    fails (not fetched, memory short) is said once and not asked again: the walls alone."""
 
     def __init__(
         self,
         lock: threading.Lock,
         estimate: Callable[[np.ndarray], np.ndarray] | None = None,
         side: int = match.VIEW_SIDE,
+        folder: Path | None = None,
+        name: Callable[[match.Panorama], str] = lambda p: p.id,
+        make: bool = True,
     ):
-        self.lock, self.side = lock, side
+        self.lock, self.side, self.folder, self.name, self.make = lock, side, folder, name, make
         self.estimate = estimate or self._moge
         self.loaded = None
         self.broken: Exception | None = None
-        self.kept: OrderedDict[str, np.ndarray] = OrderedDict()  # panorama id: maps
+        self.kept: OrderedDict[str, np.ndarray] = OrderedDict()  # levelled name: maps
 
     def maps(self, panorama: match.Panorama) -> np.ndarray | None:
         """The panorama's maps (metres along each ray, as the model says), made the first time;
         None if its picture cannot be read, or the model failed."""
         if self.broken is not None:
             return None
-        found = self._kept(panorama.id)
-        if found is not None:
+        key = self.name(panorama)
+        found = self._kept(key)
+        if found is None and (found := self._read(panorama)) is not None:
+            self._keep(key, found)
+        if found is not None or not self.make:
             return found
         picture = cv2.imread(str(panorama.path))
         if picture is None:
@@ -217,23 +230,47 @@ class Depthmaps:
         ]
         along = _along(self.side)
         with self.lock:  # the model only: one thing at a time on the graphics chip
-            found = self._kept(panorama.id)  # made meanwhile, by the request that held the lock
-            if found is None and self.broken is None:
-                try:
-                    found = np.array([self.estimate(v) * along for v in views], np.float32)
-                except Exception as error:  # the walls alone, said once
-                    self.broken = error
-                    print(f"profondeur du modèle impossible : {error}", file=sys.stderr)
-                    return None
-                self.kept[panorama.id] = found
-                while len(self.kept) > KEPT:
-                    self.kept.popitem(last=False)
+            found = self._kept(key)  # made meanwhile, by the request that held the lock
+            if found is not None or self.broken is not None:
+                return found
+            try:
+                found = np.array([self.estimate(v) * along for v in views], np.float32)
+            except Exception as error:  # the walls alone, said once
+                self.broken = error
+                print(f"profondeur du modèle impossible : {error}", file=sys.stderr)
+                return None
+            self._keep(key, found)
+        if (path := self._path(panorama)) is not None:  # written outside the model's lock
+            write_atomic(
+                path,
+                lambda out: np.savez_compressed(out, depth=found.astype(np.float16), model=STAMP),
+            )
         return found
 
-    def _kept(self, panorama: str) -> np.ndarray | None:
-        found = self.kept.get(panorama)
+    def kept_on_disk(self, panorama: match.Panorama) -> bool:
+        """Whether the panorama's maps are kept on disk, made by the model as set now."""
+        path = self._path(panorama)
+        return path is not None and segment.made_by(path, STAMP)
+
+    def _read(self, panorama: match.Panorama) -> np.ndarray | None:
+        path = self._path(panorama)
+        if path is None or not path.exists():
+            return None
+        with np.load(path) as kept:
+            return kept["depth"].astype(np.float32) if str(kept["model"]) == STAMP else None
+
+    def _path(self, panorama: match.Panorama) -> Path | None:
+        return None if self.folder is None else self.folder / f"{self.name(panorama)}.npz"
+
+    def _keep(self, key: str, maps: np.ndarray) -> None:
+        self.kept[key] = maps
+        while len(self.kept) > KEPT:
+            self.kept.popitem(last=False)
+
+    def _kept(self, key: str) -> np.ndarray | None:
+        found = self.kept.get(key)
         if found is not None:
-            self.kept.move_to_end(panorama)
+            self.kept.move_to_end(key)
         return found
 
     def _moge(self, view: np.ndarray) -> np.ndarray:

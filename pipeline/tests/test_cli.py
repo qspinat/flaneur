@@ -1503,3 +1503,81 @@ def test_a_panorama_not_segmented_leaves_the_walls_as_they_were():
     column = _column_ahead(lambda rays: np.full(len(rays), segment.BUILT))  # building everywhere
 
     assert column[1, 1] > 1000 and column[0, 1] > 1000
+
+
+def test_profondeurs_makes_classes_then_depth_for_the_panoramas_left(monkeypatch):
+    used = [match.Panorama(n, 0.0, 0.0, 0.0, 0.0, None) for n in ("a", "b", "c")]
+    done = []
+
+    class Classes:
+        def __init__(self, *_, **__):
+            pass
+
+        def kept(self, p):
+            return p.id == "a"
+
+        def made(self, p):
+            done.append(("classes", p.id))
+            return p
+
+    class Depth:
+        def __init__(self, *_, **__):
+            pass
+
+        def kept_on_disk(self, p):
+            return p.id == "b"
+
+        def maps(self, p):
+            done.append(("depth", p.id))
+            return np.zeros(1)
+
+    monkeypatch.setattr(cli, "_page_closed", lambda page: None)
+    monkeypatch.setattr(cli.export, "photos", lambda *_: [])
+    monkeypatch.setattr(cli, "_spheres", lambda: used)
+    monkeypatch.setattr(cli, "_used_by_matching", lambda walk, near: near)
+    monkeypatch.setattr(cli.segment, "Segmenter", Classes)
+    monkeypatch.setattr(cli.depthmaps, "Depthmaps", Depth)
+
+    result = CliRunner().invoke(app, ["profondeurs"])
+
+    assert result.exit_code == 0, result.output
+    assert done == [("classes", "b"), ("classes", "c"), ("depth", "a"), ("depth", "c")]
+
+
+def test_profondeurs_stops_when_the_model_fails(monkeypatch):
+    used = [match.Panorama(n, 0.0, 0.0, 0.0, 0.0, None) for n in ("a", "b")]
+    asked = []
+
+    class Classes:
+        def __init__(self, *_, **__):
+            pass
+
+        def kept(self, p):
+            return True
+
+        def made(self, p):
+            return p
+
+    class Broken:
+        broken = None
+
+        def __init__(self, *_, **__):
+            pass
+
+        def kept_on_disk(self, p):
+            return False
+
+        def maps(self, p):
+            asked.append(p.id)
+            self.broken = RuntimeError("no memory left")
+
+    monkeypatch.setattr(cli, "_page_closed", lambda page: None)
+    monkeypatch.setattr(cli.export, "photos", lambda *_: [])
+    monkeypatch.setattr(cli, "_spheres", lambda: used)
+    monkeypatch.setattr(cli, "_used_by_matching", lambda walk, near: near)
+    monkeypatch.setattr(cli.segment, "Segmenter", Classes)
+    monkeypatch.setattr(cli.depthmaps, "Depthmaps", Broken)
+
+    result = CliRunner().invoke(app, ["profondeurs"])
+
+    assert result.exit_code != 0 and asked == ["a"]

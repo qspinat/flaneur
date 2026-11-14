@@ -167,12 +167,13 @@ class _NotRead(Exception):
     """A panorama whose picture could not be read: nothing kept, asked again next time."""
 
 
-def _by_model(path: Path) -> bool:
-    """Whether classes are kept at `path`, made by the model (another's are made again)."""
+def made_by(path: Path, model: str) -> bool:
+    """Whether an npz kept at `path` was made by `model` (its `model` entry): another's is made
+    again."""
     if not path.exists():
         return False
     with np.load(path) as kept:
-        return str(kept["model"]) == MODEL
+        return str(kept["model"]) == model
 
 
 def rgb(view: np.ndarray) -> np.ndarray:
@@ -233,13 +234,13 @@ class Segmenter:
 
     def kept(self, panorama: match.Panorama) -> bool:
         """Whether the panorama's classes are kept, made by the model."""
-        return _by_model(self._path(panorama))
+        return made_by(self._path(panorama), MODEL)
 
     def made(self, panorama: match.Panorama) -> Path | None:
         """Where the panorama's classes are kept, made if they were not (or by another model);
         None if its picture cannot be read."""
         path = self._path(panorama)
-        if not _by_model(path):
+        if not made_by(path, MODEL):
             if not self.make:
                 raise NotSegmented(panorama.id)
             picture = cv2.imread(str(panorama.path))
@@ -247,7 +248,7 @@ class Segmenter:
                 return None
             views = [match.perspective(picture, panorama.axes, h) for h in match.VIEW_HEADINGS]
             with self.lock:
-                if not _by_model(path):  # made meanwhile, by the request that held the lock
+                if not made_by(path, MODEL):  # made meanwhile, by the request that held the lock
                     self._write(path, views)
         return path
 
