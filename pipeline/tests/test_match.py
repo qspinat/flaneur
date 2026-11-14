@@ -624,3 +624,39 @@ def test_points_placed_already_keep_the_pictures_that_saw_them():
     assert found.points.world == pytest.approx(
         world[np.isin(np.arange(len(world)), found.camera.inliers)]
     )
+
+
+def test_only_the_views_chosen_are_compared_with_the_photo():
+    seen = []
+    features = match.Features(np.zeros((4, 2), np.float32), np.zeros((4, 128), np.float32), (8, 8))
+
+    class Matcher:
+        def features(self, picture):
+            return features
+
+        def pairs(self, mine, theirs):
+            seen.append(theirs.size)  # each view marked by its size (below)
+            return []
+
+    class Views:
+        matcher = Matcher()
+
+        def of(self, panorama):
+            return [
+                match.Features(features.keypoints, features.descriptors, (panorama.id, h))
+                for h in match.VIEW_HEADINGS
+            ]
+
+    near = [match.Panorama(n, 0.0, 0.0, 0.0, 0.0, None) for n in ("a", "b")]
+
+    match.observe(
+        np.zeros((32, 32, 3), np.uint8),
+        near,
+        None,
+        Views(),
+        match.Where(on_street),
+        match.Trace(),
+        headings={"a": [90.0, 180.0]},
+    )
+
+    assert sorted(seen) == [("a", 90.0), ("a", 180.0)]  # b: none of its views chosen

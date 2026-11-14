@@ -618,6 +618,16 @@ def test_a_photo_and_today_s_view_are_framed_alike(tmp_path, monkeypatch):
     assert framed.old.shape == framed.today.shape == (40, 30, 3) and framed.away_m == 1.0
 
 
+class _AllViews:
+    """A choice of views (see choice) taking every view of every panorama it is given."""
+
+    def __init__(self, *_):
+        pass
+
+    def views(self, place, pool):
+        return {p.id: list(match.VIEW_HEADINGS) for p in pool}
+
+
 def _match_world(tmp_path, monkeypatch, previous: dict, places) -> None:
     """`match` over two photos pm:1 and pm:2 with everything faked: `previous` as matches.json
     held, `places(matcher)` the camera each matcher finds (None: nothing)."""
@@ -631,6 +641,8 @@ def _match_world(tmp_path, monkeypatch, previous: dict, places) -> None:
         "MATCH_TRACE": tmp_path / "trace.json",
         "ANCHORS": tmp_path / "anchors.jsonl",  # the user's verdicts: none unless a test says
         "_matching": lambda: (heights, [], lambda year: SimpleNamespace(blocks=None)),
+        "_chooser": _AllViews,
+        "_colmap_fixed": set,
         "_matches": lambda: previous,
         "_situated": lambda: {},
         "_exported": lambda photo_id: exported,
@@ -890,13 +902,12 @@ def _scene(near_by, here=(0.0, 0.0), code="code"):
     return cli._scene_of(cli._compared_with(near_by, here), here, code)
 
 
-def test_a_photos_fingerprint_holds_when_panoramas_it_does_not_compare_are_added():
-    from flaneur import cli
-
-    near_by = [_panorama(n, 2.0 * n) for n in range(cli.MATCH_PANORAMAS)]  # all within reach
+def test_a_photos_fingerprint_holds_when_panoramas_out_of_its_reach_are_added():
+    near_by = [_panorama(n, 2.0 * n) for n in range(16)]  # all within reach
 
     assert _scene(near_by) == _scene(near_by + [_panorama(99, 500.0)])  # far away
-    assert _scene(near_by) == _scene(near_by + [_panorama(98, 50.0)])  # in reach, not among 16
+    assert _scene(near_by) == _scene(near_by + [_panorama(98, 75.0)])  # just out of reach
+    assert _scene(near_by) != _scene(near_by + [_panorama(97, 65.0)])  # the choice may take it
 
 
 def test_a_photos_fingerprint_changes_with_what_its_match_is_found_from():
@@ -1129,6 +1140,7 @@ def test_an_area_without_decoys_is_left_unchecked_and_the_others_checked(tmp_pat
             lambda year: SimpleNamespace(blocks=None, free=None),
         ),
         "_views": lambda matcher="disk": None,
+        "_chooser": _AllViews,
         "_fixed_by_colmap": lambda pictures, fixes: {p.id for p in near_by},
         "_cut_view": lambda panorama, heading: np.zeros((2, 2, 3), np.uint8),
         "_check_view": lambda panorama, heading: None,

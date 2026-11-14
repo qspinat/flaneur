@@ -33,6 +33,7 @@ from flaneur import (
     buildings,
     carrying,
     chain,
+    choice,
     confirming,
     db,
     dedup,
@@ -747,7 +748,6 @@ PROPOSAL = "proposed"  # a proposed camera's "matcher": PROPOSAL-<the camera's f
 PROPOSED_ABOVE_M = 1.6  # a proposed camera's height above the street when no placement gives one
 ANCHORS = DATA / "overrides" / "anchors.jsonl"  # the user's yes or no to photos placed
 MATCH_RADIUS_M = 60  # a placement from a caption can be 25 m off
-MATCH_PANORAMAS = 16  # ranked by a quick first pass, the best views matched in full
 EARLIEST_YEAR = 1850  # an undated photo: only the buildings standing by then rule a camera out
 # The gate before matching real photos: views of panoramas, taken for old photos, found
 # within this of their true camera (median).
@@ -768,7 +768,12 @@ def _code() -> str:
     """The code a camera is found by (the check's own landmarks among it): a match or a check
     found by other code is stale."""
     digest = hashlib.sha1()
-    for path in (Path(match.__file__), Path(buildings.__file__), Path(landmarks.__file__)):
+    for path in (
+        Path(match.__file__),
+        Path(buildings.__file__),
+        Path(landmarks.__file__),
+        Path(choice.__file__),
+    ):
         digest.update(path.read_bytes())
     return digest.hexdigest()[:16]
 
@@ -790,7 +795,7 @@ def _setup() -> str:
 
 def _scene_of(near: Sequence[match.Panorama], here: tuple[float, float], code: str) -> str:
     """What one photo's match is found from besides the photo itself: the panoramas it is
-    compared with (`near`, see _compared_with: where each stands, faces and leans), its place
+    chosen among (`near`, see _compared_with: where each stands, faces and leans), its place
     (`here`: where its camera may stand) and the `code`. A panorama added out of its reach, or
     moved there, leaves it be: photos and areas are added step by step."""
     seen = [
@@ -817,7 +822,7 @@ def _scenes(walk: Iterable[export.WalkPhoto], near_by: list[match.Panorama]) -> 
 @functools.cache  # for one run, as _image
 def _scenes_now() -> dict[str, str]:
     """Each walk photo's scene as it is now, for what reads placements without matching: the
-    panoramas where matching has them (their height aside: it does not choose them)."""
+    panoramas where matching has them (their height aside: the pool is chosen by place)."""
     with closing(db.connect(DB_PATH)) as conn:
         walk = export.photos(conn, DATA / "pilot", REVIEWS)
         pictures = _levelled(panoramas.load(conn))
@@ -1123,10 +1128,10 @@ def _area_of(here: tuple[float, float]) -> str:
 
 def _check_setup(matcher: str, area: str, near_by: list[match.Panorama]) -> str:
     """What a matcher's known-answer check in an `area` depends on: the panoramas within reach
-    of it (MATCH_RADIUS_M: its views' and those they are compared with, see _check_area; where
+    of it (see choice: its views' and those they are compared with, see _check_area; where
     each stands, faces and leans: see _scene_of), the code, and for LoMa-G its own
     code and LoMa's revision. Panoramas added or moved elsewhere leave it be."""
-    reach = pilot.AREAS[area].buffer(MATCH_RADIUS_M)
+    reach = pilot.AREAS[area].buffer(choice.POOL_M)
     inside = sorted((p for p in near_by if reach.contains(Point(p.x, p.y))), key=lambda p: p.id)
     centre = pilot.AREAS[area].centroid
     setup = f"{area}:{_scene_of(inside, (centre.x, centre.y), _code())}"
@@ -1205,9 +1210,9 @@ def _to_match(walk: list[export.WalkPhoto]) -> list[export.WalkPhoto]:
 def _compared_with(
     near_by: list[match.Panorama], here: tuple[float, float]
 ) -> list[match.Panorama]:
-    """The panoramas `match` compares a photo with: MATCH_PANORAMAS of those within
-    MATCH_RADIUS_M of its place (`here`: the caption's, or the review's, never a previous
-    match's: see _place_of), nearest first (ties: in `near_by`'s order)."""
+    """The panoramas `match` chooses a photo's views among (see choice): those within POOL_M of
+    its place (`here`: the caption's, or the review's, never a previous match's: see
+    _place_of), nearest first (ties: in `near_by`'s order)."""
     return _reach(near_by)(here)
 
 
@@ -1220,8 +1225,8 @@ def _reach(
 
     def compared_with(here: tuple[float, float]) -> list[match.Panorama]:
         distance = np.hypot(xs - here[0], ys - here[1])
-        within = np.flatnonzero(distance <= MATCH_RADIUS_M)
-        nearest = within[np.argsort(distance[within], kind="stable")][:MATCH_PANORAMAS]
+        within = np.flatnonzero(distance <= choice.POOL_M)
+        nearest = within[np.argsort(distance[within], kind="stable")]
         return [near_by[i] for i in nearest]
 
     return compared_with
@@ -1553,12 +1558,25 @@ class _Run(NamedTuple):
     then: Callable[[int], Then]
     heights: scene.CameraHeights
     blocks: Blocks
+    chooser: choice.Chooser
     found: dict
     tried: dict[str, list[str]]
     traces: dict
     run: dict
     placed: set[str]
     judged: "_Judged"
+
+
+def _colmap_fixed() -> set[str]:
+    """The panoramas COLMAP placed itself, as recorded now (see _fixed_by_colmap)."""
+    with closing(db.connect(DB_PATH)) as conn:
+        return _fixed_by_colmap(panoramas.load(conn), register.load(FIXES))
+
+
+def _chooser(fixed: set[str], heights: scene.CameraHeights, today: "Then") -> choice.Chooser:
+    """The views a photo is compared with (see choice), among today's walls and streets
+    (`fixed`: the panoramas COLMAP placed)."""
+    return choice.Chooser(frozenset(fixed), today.blocks, heights.streets, today.free)
 
 
 def _match_with(matcher: str, photos: list[export.WalkPhoto], at: _Run) -> None:
@@ -1570,15 +1588,16 @@ def _match_with(matcher: str, photos: list[export.WalkPhoto], at: _Run) -> None:
     store = chain.Store(MATCHERS[matcher].photos, views.matcher)
     for me in photos:
         here = _place_of(me)
-        near = _compared_with(at.near_by, here)
+        near = _compared_with(at.near_by, here)  # nearest first: landmarks zoom from them
         inputs = _inputs(_scene_of(near, here, _code()), me.id)
+        headings = at.chooser.views(here, near)
         image = cv2.imread(str(_exported(me.id)))
         now = at.then(_then_year(me))
         where = _where(me, at.heights, now)
         trace = match.Trace()
         mine = store.features(me.id, _image(me.id), lambda image=image: match.shrunk(image))
         observed = match.observe(
-            image, near, at.blocks, views, where, trace, mine, at.heights.origin_z
+            image, near, at.blocks, views, where, trace, mine, at.heights.origin_z, headings
         )
         store.save_observed(me.id, inputs, observed)
         camera, walls, points = match.place(observed, where, trace)
@@ -1678,6 +1697,7 @@ def match_photos(
         then=then,
         heights=heights,
         blocks=blocks,
+        chooser=_chooser(_colmap_fixed(), heights, then(date.today().year)),
         found=found,
         tried=tried,
         traces=register.load(MATCH_TRACE),
@@ -2194,8 +2214,11 @@ def match_check(
     # only panoramas COLMAP placed: another's place is borrowed from its run, or its phone's
     with closing(db.connect(DB_PATH)) as conn:
         fixed = _fixed_by_colmap(panoramas.load(conn), register.load(FIXES))
+    chooser = _chooser(fixed, heights, today)
     for name in [area] if area else list(pilot.AREAS):
-        _check_area(name, tries, seed, matcher, near_by, fixed, heights, today, shown, views)
+        _check_area(
+            name, tries, seed, matcher, near_by, fixed, heights, today, shown, views, chooser
+        )
 
 
 def _wanting(
@@ -2228,6 +2251,7 @@ def _check_area(
     today: "Then",
     shown: Callable[[match.View], tuple[match.Sight, ...]],
     views,
+    chooser: choice.Chooser,
 ) -> None:
     """One area's known-answer check (see match_check): its views cut from the panoramas COLMAP
     placed in it, its decoys from its own streets far from them, its result kept for it alone."""
@@ -2257,8 +2281,9 @@ def _check_area(
         keep = rng.uniform(*CHECK_KEPT)
         span = (0.0, keep) if rng.random() < 0.5 else (1 - keep, 1.0)  # one side or the other
         band = fakes.aged(fakes.mixed(true, elsewhere, span), rng)
-        # as match compares a photo (see _compared_with): within reach of the area only
-        others = _nearest(near_by, me.x, me.y, MATCH_RADIUS_M, but=me.id)[:MATCH_PANORAMAS]
+        # as match compares a photo (see _match_with): the views chosen around its place
+        others = _nearest(near_by, me.x, me.y, choice.POOL_M, but=me.id)
+        headings = chooser.views((me.x, me.y), others)
         # the landmarks each fake shows, marked as by hand (as near): the band's are the true
         # view's inside it (the rest stands for houses rebuilt since, not for another place)
         seen = _marked_by_hand(_check_view(me, heading), shown, marking)
@@ -2270,7 +2295,7 @@ def _check_area(
             where = match.Where(heights.streets, today.free, (me.x, me.y), marked)
             trace = match.Trace()
             camera, _, _ = match.locate(
-                fake, others, today.blocks, views, where, trace, heights.origin_z
+                fake, others, today.blocks, views, where, trace, heights.origin_z, headings
             )
             traces[kind].append(_traced(trace, None if kind == "leurre" else (me, heading)))
             if camera is None:
@@ -3134,7 +3159,8 @@ LIDAR_MNS = DATA / "raw" / "lidar_mns"  # IGN's LiDAR HD surface model, patches 
 def _used_by_matching(
     walk: list[export.WalkPhoto], near_by: list[match.Panorama]
 ) -> list[match.Panorama]:
-    """The panoramas `match` compares the walk's photos with (see _to_match, _compared_with),
+    """The panoramas `match` chooses the walk's photos' views among (see _to_match,
+    _compared_with: all those the choice may take),
     those of more photos first."""
     used = Counter(p for me in _to_match(walk) for p in _compared_with(near_by, _place_of(me)))
     return sorted(used, key=lambda p: (-used[p], p.id))

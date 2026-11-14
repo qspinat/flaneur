@@ -11,7 +11,7 @@ where the buildings are gone, little matches and the photo keeps its placement."
 import functools
 import heapq
 import sys
-from collections.abc import Callable
+from collections.abc import Callable, Collection, Mapping
 from dataclasses import dataclass, field, fields, replace
 from operator import itemgetter
 from pathlib import Path
@@ -1060,11 +1060,15 @@ def locate(
     where: Where,
     trace: Trace | None = None,
     origin_z: float = 0.0,
+    headings: Mapping[str, Collection[float]] | None = None,
 ) -> Found:
     """The camera of an old `photo` (BGR), from the panoramas `near` it, standing `where` it
-    could (`trace` keeps how far it got; `origin_z`: see observe)."""
+    could (`trace` keeps how far it got; `origin_z`, `headings`: see observe)."""
     trace = Trace() if trace is None else trace
-    return place(observe(photo, near, blocks, views, where, trace, origin_z=origin_z), where, trace)
+    observed = observe(
+        photo, near, blocks, views, where, trace, origin_z=origin_z, headings=headings
+    )
+    return place(observed, where, trace)
 
 
 def observe(
@@ -1076,18 +1080,22 @@ def observe(
     trace: Trace,
     mine: Features | None = None,
     origin_z: float = 0.0,
+    headings: Mapping[str, Collection[float]] | None = None,
 ) -> Observed:
     """An old `photo` (BGR) matched against the views of the panoramas `near` it ranked best,
     and against views zoomed on the landmarks marked in it (`where.sights`); `mine`: its
     features, if already extracted; `origin_z`: how high the cameras' frame starts (metres
-    NGF, as landmarks' tops are)."""
+    NGF, as landmarks' tops are); `headings`: each panorama's views to compare (see choice;
+    none: all of them)."""
     small = shrunk(photo)
     mine = views.matcher.features(small) if mine is None else mine
     quick = mine.top(QUICK_KEYPOINTS)
     candidates = (
         (len(views.matcher.pairs(quick, theirs.top(QUICK_KEYPOINTS))), n, heading, theirs)
         for n, panorama in enumerate(near)
+        if headings is None or panorama.id in headings  # the others' views never read
         for heading, theirs in zip(VIEW_HEADINGS, views.of(panorama), strict=False)
+        if headings is None or heading in headings[panorama.id]
     )
     best = heapq.nlargest(
         BEST_VIEWS, (c for c in candidates if c[0] >= QUICK_MIN), key=itemgetter(0)
