@@ -1581,3 +1581,23 @@ def test_profondeurs_stops_when_the_model_fails(monkeypatch):
     result = CliRunner().invoke(app, ["profondeurs"])
 
     assert result.exit_code != 0 and asked == ["a"]
+
+
+def test_without_maps_made_ahead_the_model_says_nothing(tmp_path, monkeypatch):
+    monkeypatch.setattr(cli, "VIEW_DEPTH", tmp_path / "none")
+    monkeypatch.setattr(cli, "VIEW_STRUCTURE", tmp_path / "none")
+    here = match.Panorama("here", 0.0, 0.0, 2.5, 0.0, tmp_path / "here.jpg")
+
+    depth = cli._model_depth(None)(here, np.array([[0.0, 1.0, 0.0], [1.0, 0.0, 0.0]]))
+
+    assert depth.shape == (2,) and np.isnan(depth).all()
+
+
+def test_a_photos_fingerprint_changes_once_its_panoramas_maps_are_made(tmp_path, monkeypatch):
+    monkeypatch.setattr(cli, "VIEW_DEPTH", tmp_path)
+    near_by = [_panorama(n, 10.0 * n) for n in range(1, 4)]
+    before = _scene(near_by)
+
+    (tmp_path / f"{cli._levelled_name(near_by[0])}.npz").write_bytes(b"made")
+
+    assert _scene(near_by) != before  # the model may now leave some of its casts out

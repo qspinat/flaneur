@@ -771,7 +771,12 @@ def _code() -> str:
     """The code a camera is found by (the check's own landmarks among it): a match or a check
     found by other code is stale."""
     digest = hashlib.sha1()
-    for path in (Path(match.__file__), Path(buildings.__file__), Path(landmarks.__file__)):
+    for path in (
+        Path(match.__file__),
+        Path(buildings.__file__),
+        Path(landmarks.__file__),
+        Path(depthmaps.__file__),
+    ):
         digest.update(path.read_bytes())
     return digest.hexdigest()[:16]
 
@@ -793,7 +798,8 @@ def _setup() -> str:
 
 def _scene_of(near: Sequence[match.Panorama], here: tuple[float, float], code: str) -> str:
     """What one photo's match is found from besides the photo itself: the panoramas it is
-    compared with (`near`, see _compared_with: where each stands, faces and leans), its place
+    compared with (`near`, see _compared_with: where each stands, faces and leans, whether the
+    model's maps of it are made), its place
     (`here`: where its camera may stand) and the `code`. A panorama added out of its reach, or
     moved there, leaves it be: photos and areas are added step by step."""
     seen = [
@@ -804,6 +810,7 @@ def _scene_of(near: Sequence[match.Panorama], here: tuple[float, float], code: s
             round(p.azimuth, 2),
             round(p.roll or 0.0, 3),
             round(p.pitch or 0.0, 3),
+            (VIEW_DEPTH / f"{_levelled_name(p)}.npz").exists(),  # the model checks its casts
         )
         for p in near
     ]
@@ -1556,12 +1563,36 @@ class _Run(NamedTuple):
     then: Callable[[int], Then]
     heights: scene.CameraHeights
     blocks: Blocks
+    model: Callable[[match.Panorama, np.ndarray], np.ndarray]
     found: dict
     tried: dict[str, list[str]]
     traces: dict
     run: dict
     placed: set[str]
     judged: "_Judged"
+
+
+def _model_depth(blocks) -> Callable[[match.Panorama, np.ndarray], np.ndarray]:
+    """How far rays from a panorama go by the model (see match._cast): its maps made ahead
+    (`flaneur profondeurs`; never made here: the matcher holds the memory) scaled to BD TOPO's
+    walls (`blocks`), on what stands; NaN where it says nothing or its maps are not made."""
+    made = depthmaps.Depthmaps(threading.Lock(), folder=VIEW_DEPTH, name=_levelled_name, make=False)
+    masks = segment.Segmenter(VIEW_STRUCTURE, threading.Lock(), _levelled_name, make=False)
+    scale: dict[str, np.ndarray | None] = {}  # each panorama's views' scales, found once
+
+    def depth(panorama: match.Panorama, rays: np.ndarray) -> np.ndarray:
+        maps, parts = made.maps(panorama), masks.parts(panorama)
+        if maps is None or parts is None:
+            return np.full(len(rays), np.nan)
+        if panorama.id not in scale:
+            origin = np.array([panorama.x, panorama.y, panorama.z])
+            around = blocks.near(panorama.x, panorama.y, match.NEAR_M)
+            scale[panorama.id] = depthmaps.scale_on_blocks(maps, parts, around, origin)
+        if scale[panorama.id] is None:
+            return np.full(len(rays), np.nan)
+        return depthmaps.at_rays(maps, parts, scale[panorama.id], rays)
+
+    return depth
 
 
 def _match_with(matcher: str, photos: list[export.WalkPhoto], at: _Run) -> None:
@@ -1581,7 +1612,7 @@ def _match_with(matcher: str, photos: list[export.WalkPhoto], at: _Run) -> None:
         trace = match.Trace()
         mine = store.features(me.id, _image(me.id), lambda image=image: match.shrunk(image))
         observed = match.observe(
-            image, near, at.blocks, views, where, trace, mine, at.heights.origin_z
+            image, near, at.blocks, views, where, trace, mine, at.heights.origin_z, at.model
         )
         store.save_observed(me.id, inputs, observed)
         camera, walls, points = match.place(observed, where, trace)
@@ -1681,6 +1712,7 @@ def match_photos(
         then=then,
         heights=heights,
         blocks=blocks,
+        model=_model_depth(blocks),
         found=found,
         tried=tried,
         traces=register.load(MATCH_TRACE),
@@ -2234,6 +2266,7 @@ def _check_area(
 ) -> None:
     """One area's known-answer check (see match_check): its views cut from the panoramas COLMAP
     placed in it, its decoys from its own streets far from them, its result kept for it alone."""
+    model = _model_depth(today.blocks)  # as match casts its points
     rng = np.random.default_rng(seed)
     marking = np.random.default_rng([seed, 1])  # its own: the fakes stay the same
     square = pilot.AREAS[name]
@@ -2273,7 +2306,7 @@ def _check_area(
             where = match.Where(heights.streets, today.free, (me.x, me.y), marked)
             trace = match.Trace()
             camera, _, _ = match.locate(
-                fake, others, today.blocks, views, where, trace, heights.origin_z
+                fake, others, today.blocks, views, where, trace, heights.origin_z, model
             )
             traces[kind].append(_traced(trace, None if kind == "leurre" else (me, heading)))
             if camera is None:

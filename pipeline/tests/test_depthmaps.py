@@ -270,3 +270,22 @@ def test_maps_kept_on_disk_are_still_read_after_the_model_failed(tmp_path):
     assert maker.maps(other) is None  # made live: the model fails
 
     assert maker.maps(_panorama(tmp_path)) is not None
+
+
+def test_maps_are_scaled_to_the_walls_blocks_draw_on_what_stands_only():
+    from flaneur.blocks import Blocks
+
+    around = Blocks.of([([(-50, 8), (50, 8), (50, 10), (-50, 10)], 0.0, 40.0)])  # 8 m north
+    origin = np.array([0.0, 0.0, 1.6])
+    hit, edge = around.hit(origin, depthmaps.grid_rays(SIDE).reshape(-1, 3))
+    true = np.where(edge >= 0, np.linalg.norm(hit - origin, axis=1), 100.0)
+    maps = (2 * true).reshape(VIEWS, SIDE, SIDE).astype(np.float32)  # the model: twice too far
+    parts = np.full((VIEWS, SIDE, SIDE), segment.Part.BUILT, np.int8)
+    parts[0, :2] = segment.Part.MOVING  # a bus along the top of the north view
+    north = np.array([[0.0, 1.0, 0.0]])
+
+    scale = depthmaps.scale_on_blocks(maps, parts, around, origin)
+    up_north = depthmaps.grid_rays(SIDE)[0, 0, SIDE // 2][None]  # the top of the north view
+
+    assert depthmaps.at_rays(maps, parts, scale, north)[0] == pytest.approx(8.0, rel=0.1)
+    assert np.isnan(depthmaps.at_rays(maps, parts, scale, up_north)[0])  # on what passes

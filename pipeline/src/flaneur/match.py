@@ -579,6 +579,7 @@ class Trace:
     views: int = 0
     matched: int = 0
     matches: int = 0
+    modelled: int = 0  # matched rays the model gave a depth to (see _cast): none, no check
     points: int = 0
     candidates: list[Candidate] = field(default_factory=list)
     verdict: str = ""
@@ -926,6 +927,10 @@ def placed(
 
 
 NEAR_M = 150  # buildings a panorama's matched points are cast onto
+# a point cast on a wall the model (see depthmaps) puts this many times nearer or farther is left
+# out: the wall is not what was matched (measured on 3,231 rays whose distance two panoramas
+# tell: 60 % of the casts off by half or more left out, 2 % of the right ones)
+MODEL_OFF = 2.0
 ZOOM_FROM = 4  # a marked landmark is zoomed on from this many panoramas, the nearest
 ZOOM_SIDE = 640
 ZOOM_FOV = (10.0, 60.0)  # a zoomed view sees the landmark whole, within these widths
@@ -1060,11 +1065,13 @@ def locate(
     where: Where,
     trace: Trace | None = None,
     origin_z: float = 0.0,
+    model: Callable[[Panorama, np.ndarray], np.ndarray] | None = None,
 ) -> Found:
     """The camera of an old `photo` (BGR), from the panoramas `near` it, standing `where` it
-    could (`trace` keeps how far it got; `origin_z`: see observe)."""
+    could (`trace` keeps how far it got; `origin_z`, `model`: see observe)."""
     trace = Trace() if trace is None else trace
-    return place(observe(photo, near, blocks, views, where, trace, origin_z=origin_z), where, trace)
+    observed = observe(photo, near, blocks, views, where, trace, origin_z=origin_z, model=model)
+    return place(observed, where, trace)
 
 
 def observe(
@@ -1076,11 +1083,13 @@ def observe(
     trace: Trace,
     mine: Features | None = None,
     origin_z: float = 0.0,
+    model: Callable[[Panorama, np.ndarray], np.ndarray] | None = None,
 ) -> Observed:
     """An old `photo` (BGR) matched against the views of the panoramas `near` it ranked best,
     and against views zoomed on the landmarks marked in it (`where.sights`); `mine`: its
     features, if already extracted; `origin_z`: how high the cameras' frame starts (metres
-    NGF, as landmarks' tops are)."""
+    NGF, as landmarks' tops are); `model`: how far rays from a panorama go by a model (see
+    _cast), if any."""
     small = shrunk(photo)
     mine = views.matcher.features(small) if mine is None else mine
     quick = mine.top(QUICK_KEYPOINTS)
@@ -1101,7 +1110,9 @@ def observe(
         trace.matched += 1
         trace.matches += len(in_photo)
         ahead = view_directions(theirs.keypoints[in_view], heading)
-        found.append(_cast(near[n], in_photo, ahead, blocks))
+        depth = None if model is None else model(near[n], ahead)
+        trace.modelled += 0 if depth is None else int(np.isfinite(depth).sum())
+        found.append(_cast(near[n], in_photo, ahead, blocks, model=depth))
     pixels = [mine.keypoints]
     pictures = functools.lru_cache(maxsize=ZOOM_FROM)(lambda path: cv2.imread(str(path)))
     for sight in (s for s in where.sights if s.tops):  # with no tops: not zoomed on
@@ -1119,14 +1130,23 @@ def _cast(
     ahead: np.ndarray,
     blocks,
     landmark: tuple[float, float] | None = None,
+    model: np.ndarray | None = None,
 ) -> Rays:
     """Rays of details `keys` seen from `panorama` along `ahead`, cast onto today's walls near
     it; for a view zoomed on a `landmark`, a ray meeting no wall up to it (its own walls
-    included) meets it."""
+    included) meets it. `model`: how far each ray goes by the model (NaN: unknown); a cast
+    it puts MODEL_OFF times nearer or farther is left out (not for a zoomed view: a ray
+    missing its wall meets the landmark anyway)."""
     around = blocks.near(panorama.x, panorama.y, NEAR_M)
     origin = np.array([panorama.x, panorama.y, panorama.z])
     cast, edge = around.hit(origin, ahead)
     on_wall = edge >= 0
+    if model is not None:
+        metres = np.linalg.norm(cast - origin, axis=1)
+        with np.errstate(invalid="ignore", divide="ignore"):
+            ratio = model / metres
+            on_wall &= ~((ratio > MODEL_OFF) | (ratio < 1 / MODEL_OFF))
+        cast = np.where(on_wall[:, None], cast, np.nan)
     if landmark is not None:
         away = float(np.hypot(landmark[0] - panorama.x, landmark[1] - panorama.y))
         on_wall &= np.hypot(*(cast[:, :2] - origin[:2]).T) <= away + OWN_M  # not beyond it
