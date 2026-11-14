@@ -1559,12 +1559,54 @@ class _Run(NamedTuple):
     then: Callable[[int], Then]
     heights: scene.CameraHeights
     blocks: Blocks
+    fixed: set[str]  # the panoramas COLMAP placed (see _around_camera)
     found: dict
     tried: dict[str, list[str]]
     traces: dict
     run: dict
     placed: set[str]
     judged: "_Judged"
+
+
+def _colmap_fixed() -> set[str]:
+    """The panoramas COLMAP placed itself, as recorded now (see _fixed_by_colmap)."""
+    with closing(db.connect(DB_PATH)) as conn:
+        return _fixed_by_colmap(panoramas.load(conn), register.load(FIXES))
+
+
+def _around_camera(near_by: list[match.Panorama], camera, fixed: Set[str]) -> list[match.Panorama]:
+    """The panoramas a camera found is matched again with (see match.needs_focus): those within
+    FOCUS_NEAR_M of it, COLMAP's (`fixed`) first, nearest first, FOCUS_PANORAMAS of them."""
+    near = _nearest(near_by, camera.x, camera.y, match.FOCUS_NEAR_M)
+    return sorted(near, key=lambda p: p.id not in fixed)[: match.FOCUS_PANORAMAS]
+
+
+def _sources_of(
+    points: match.Points | None, by_id: dict[str, match.Panorama]
+) -> list[match.Panorama]:
+    """The panoramas a camera's points were seen from (old photos placed left out)."""
+    seen = set().union(*points.seen) if points is not None and len(points.seen) else set()
+    return [by_id[i] for i in sorted(seen) if i in by_id]
+
+
+def _focused(
+    found: tuple,
+    place: tuple[float, float],
+    near_by: list[match.Panorama],
+    by_id: dict[str, match.Panorama],
+    fixed: Set[str],
+    again: Callable[[list[match.Panorama]], tuple],
+) -> tuple[tuple, str | None]:
+    """A placement (`found`: its camera, walls, points and what it was observed from) once
+    focused: matched `again` with the panoramas around its camera when it stands far from its
+    `place` or its sources (see match.needs_focus), the second kept when it agrees with the
+    first; and what the second pass said (none when there was none)."""
+    camera, _, points, _ = found
+    if camera is None or not match.needs_focus(camera, place, _sources_of(points, by_id)):
+        return found, None
+    observed, (second, walls, points) = again(_around_camera(near_by, camera, fixed))
+    kept, said = match.focused(camera, second)
+    return (found if kept is camera else (second, walls, points, observed)), said
 
 
 def _match_with(matcher: str, photos: list[export.WalkPhoto], at: _Run) -> None:
@@ -1574,6 +1616,7 @@ def _match_with(matcher: str, photos: list[export.WalkPhoto], at: _Run) -> None:
     match_photos)."""
     views = _views(matcher=matcher)
     store = chain.Store(MATCHERS[matcher].photos, views.matcher)
+    by_id = {p.id: p for p in at.near_by}
     for me in photos:
         here = _place_of(me)
         near = _compared_with(at.near_by, here)
@@ -1586,12 +1629,23 @@ def _match_with(matcher: str, photos: list[export.WalkPhoto], at: _Run) -> None:
         observed = match.observe(
             image, near, at.blocks, views, where, trace, mine, at.heights.origin_z
         )
-        store.save_observed(me.id, inputs, observed)
         camera, walls, points = match.place(observed, where, trace)
+
+        def again(around: list[match.Panorama], image=image, where=where, mine=mine):
+            seen = match.observe(
+                image, around, at.blocks, views, where, match.Trace(), mine, at.heights.origin_z
+            )
+            return seen, match.place(seen, where, match.Trace())
+
+        (camera, walls, points, observed), focus = _focused(
+            (camera, walls, points, observed), here, at.near_by, by_id, at.fixed, again
+        )
+        store.save_observed(me.id, inputs, observed)
         at.traces[me.id] = at.run[me.id] = {  # the caption's place; what it was matched from
             **_traced(trace),
             "place": list(here),
             "inputs": inputs,
+            "focus": focus,
         }
         at.tried[me.id] = [m for m in MATCHERS if m in at.tried[me.id] or m == matcher]
         if camera is None:  # kept, with what it was tried from: not tried again for nothing
@@ -1684,6 +1738,7 @@ def match_photos(
         then=then,
         heights=heights,
         blocks=blocks,
+        fixed=_colmap_fixed(),
         found=found,
         tried=tried,
         traces=register.load(MATCH_TRACE),
@@ -2237,6 +2292,7 @@ def _check_area(
 ) -> None:
     """One area's known-answer check (see match_check): its views cut from the panoramas COLMAP
     placed in it, its decoys from its own streets far from them, its result kept for it alone."""
+    by_id = {p.id: p for p in near_by}  # a camera's sources (see _focused)
     rng = np.random.default_rng(seed)
     marking = np.random.default_rng([seed, 1])  # its own: the fakes stay the same
     square = pilot.AREAS[name]
@@ -2275,9 +2331,24 @@ def _check_area(
         for kind, fake, marked in zip(found, pictures, sights, strict=True):
             where = match.Where(heights.streets, today.free, (me.x, me.y), marked)
             trace = match.Trace()
-            camera, _, _ = match.locate(
-                fake, others, today.blocks, views, where, trace, heights.origin_z
+            seen = match.observe(
+                fake, others, today.blocks, views, where, trace, origin_z=heights.origin_z
             )
+
+            def again(around, fake=fake, where=where):
+                again_seen = match.observe(
+                    fake,
+                    around,
+                    today.blocks,
+                    views,
+                    where,
+                    match.Trace(),
+                    origin_z=heights.origin_z,
+                )
+                return again_seen, match.place(again_seen, where, match.Trace())
+
+            first = (*match.place(seen, where, trace), seen)
+            (camera, *_), _ = _focused(first, (me.x, me.y), near_by, by_id, fixed, again)
             traces[kind].append(_traced(trace, None if kind == "leurre" else (me, heading)))
             if camera is None:
                 found[kind].append(None)

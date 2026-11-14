@@ -10,8 +10,9 @@ where the buildings are gone, little matches and the photo keeps its placement."
 
 import functools
 import heapq
+import math
 import sys
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field, fields, replace
 from operator import itemgetter
 from pathlib import Path
@@ -727,6 +728,38 @@ def solve(
         return None
     trace.verdict = "située"
     return best
+
+
+# a camera found this far from its caption's place, or this far from every panorama its points
+# were seen from, is matched again with the panoramas around it (109472: 48.8 m from its place,
+# found from a panorama 37.7 m behind it, 8 m too far forward; the panoramas next to it never
+# compared); the second camera is kept when it agrees with the first, as it stands nearer
+FOCUS_PLACE_M = 20.0
+FOCUS_SOURCES_M = 15.0
+FOCUS_NEAR_M = 15.0  # the panoramas around the camera matched again
+FOCUS_PANORAMAS = 8  # at most, COLMAP's first
+FOCUS_AGREE_M, FOCUS_AGREE_DEG = 10.0, 10.0
+
+
+def needs_focus(camera, place: tuple[float, float], sources: Sequence["Panorama"]) -> bool:
+    """Whether a camera found is to be matched again around it: far from its caption's `place`,
+    or far from every panorama its points were seen from (`sources`)."""
+    if math.hypot(camera.x - place[0], camera.y - place[1]) > FOCUS_PLACE_M:
+        return True
+    return bool(sources) and all(
+        math.hypot(p.x - camera.x, p.y - camera.y) > FOCUS_SOURCES_M for p in sources
+    )
+
+
+def focused(first, again):
+    """The camera kept once matched again around the first (`again`: none when nothing was found),
+    and what the second pass said: the second when it agrees with the first, else the first."""
+    if again is None:
+        return first, "sans caméra"
+    near = math.hypot(again.x - first.x, again.y - first.y) <= FOCUS_AGREE_M
+    if near and abs(angle(again.heading, first.heading)) <= FOCUS_AGREE_DEG:
+        return again, "d'accord"
+    return first, "en désaccord"
 
 
 def _rivals(other: Camera, best: Camera) -> bool:

@@ -1,6 +1,8 @@
 """Finding an old photo's camera from points on today's buildings, on built scenes (the
 matcher itself needs its models: it is checked on real photos, see `flaneur match`)."""
 
+from types import SimpleNamespace
+
 import numpy as np
 import pytest
 
@@ -629,3 +631,30 @@ def test_points_placed_already_keep_the_pictures_that_saw_them():
     assert found.points.world == pytest.approx(
         world[np.isin(np.arange(len(world)), found.camera.inliers)]
     )
+
+
+def _camera_at(x, y, heading=0.0):
+    return SimpleNamespace(x=x, y=y, heading=heading)
+
+
+def _panorama_at(name, x, y):
+    return match.Panorama(name, x, y, 2.5, 0.0, None)
+
+
+def test_a_camera_found_far_from_its_place_or_its_sources_is_focused():
+    near = [_panorama_at("a", 3.0, 0.0)]
+    far = [_panorama_at("b", 40.0, 0.0), _panorama_at("c", 0.0, 30.0)]
+
+    assert not match.needs_focus(_camera_at(0, 0), (5.0, 0.0), near)
+    assert match.needs_focus(_camera_at(0, 0), (48.8, 0.0), near)  # its caption: 48.8 m off
+    assert match.needs_focus(_camera_at(0, 0), (5.0, 0.0), far)  # every source 30 m off or more
+    assert not match.needs_focus(_camera_at(0, 0), (5.0, 0.0), [*far, *near])  # one close
+
+
+def test_the_camera_matched_again_is_kept_when_it_agrees_with_the_first():
+    first = _camera_at(0, 0, 10.0)
+
+    assert match.focused(first, _camera_at(6, 4, 14.0)) == (_camera_at(6, 4, 14.0), "d'accord")
+    assert match.focused(first, _camera_at(30, 0, 10.0)) == (first, "en désaccord")  # 30 m
+    assert match.focused(first, _camera_at(1, 0, 40.0)) == (first, "en désaccord")  # 30°
+    assert match.focused(first, None) == (first, "sans caméra")
