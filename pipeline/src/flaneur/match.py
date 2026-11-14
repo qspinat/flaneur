@@ -1259,13 +1259,18 @@ def focus(
         observed.pixels, observed.size, Rays.of([rays, more.rays]), observed.views + more.views
     )
     # a detail's rays must all meet (see placed): one ray of theirs matched wrongly would take
-    # away the point the first pass had, so it is kept, as known
-    world, keys, _, seen = placed(
+    # away the point the first pass had, so it is kept, as known, and with it its wall
+    world, keys, wall_of, seen = placed(
         rays.keys, rays.sources, rays.origins, rays.directions, rays.casts
     )
     second = place(both, where, again, known=Known(keys, world, seen))
     if second.camera is None:
         return Focused(observed, found, {"panoramas": len(near), "moved_m": None})
+    on = wall_of >= 0
+    wall_at = {tuple(p): rays.walls[w] for p, w in zip(world[on], wall_of[on], strict=True)}
+    kept = [wall_at[tuple(p)] for p in second.points.world if tuple(p) in wall_at]
+    if kept:
+        second = second._replace(walls=np.unique(np.vstack([second.walls, kept]), axis=0))
     trace.views += again.views
     trace.matched += again.matched
     trace.matches += again.matches
