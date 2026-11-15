@@ -2901,8 +2901,7 @@ def _photo_walls(
         if found is None:
             return []
         walls = sorted(
-            [*(rounded(c) for c in (*w.a, *w.b)), rounded(w.top, panorama.z)]
-            for w in found.walls
+            [*(rounded(c) for c in (*w.a, *w.b)), rounded(w.top, panorama.z)] for w in found.walls
         )
         return [rounded(found.ground, panorama.z), walls]
 
