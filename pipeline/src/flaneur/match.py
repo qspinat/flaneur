@@ -1266,8 +1266,9 @@ def focus(
     second = place(both, where, again, known=Known(keys, world, seen))
     if second.camera is None:
         return Focused(observed, found, {"panoramas": len(near), "moved_m": None})
-    on = wall_of >= 0
-    wall_at = {tuple(p): rays.walls[w] for p, w in zip(world[on], wall_of[on], strict=True)}
+    walls = rays.walls[np.maximum(wall_of, 0)]
+    on = (wall_of >= 0) & ~np.isnan(walls).any(axis=1)  # a landmark's cast meets no wall
+    wall_at = {tuple(p): w for p, w in zip(world[on], walls[on], strict=True)}
     kept = [wall_at[tuple(p)] for p in second.points.world if tuple(p) in wall_at]
     if kept:
         second = second._replace(walls=np.unique(np.vstack([second.walls, kept]), axis=0))

@@ -762,6 +762,29 @@ def test_rays_of_the_panoramas_around_never_take_away_a_point_of_the_first_pass(
     assert focused.found.walls.tolist() == first.walls.tolist() == [FACADE.tolist()]
 
 
+def test_a_point_kept_from_a_landmark_s_view_brings_no_wall(monkeypatch):
+    keys = np.arange(60)
+    world, pixels, observed, where, first = placed_first(keys)
+    rays = observed.rays
+    on_landmark = rays.keys >= 30  # cast onto the landmark, no wall met (see _cast)
+    walls = np.where(on_landmark[:, None], np.nan, rays.walls)
+    observed = replace(observed, rays=replace(rays, walls=walls))
+    wrong = world + [3.0, 0.0, 0.0]
+
+    def observe(photo, near, blocks, views, where, trace, mine, origin_z):
+        rays = panorama_rays(wrong, keys, (3, -4, 2.5), "c")
+        rays = replace(rays, casts=wrong, walls=np.tile(FACADE, (len(keys), 1)))
+        return match.Observed(pixels, (600, 800), rays)
+
+    monkeypatch.setattr(match, "observe", observe)
+
+    focused = focused_of(
+        observed, first, where, (60.0, 0.0), [match.Panorama("c", 3, -4, 2.5, 0, None)]
+    )
+
+    assert focused.found.walls.tolist() == [FACADE.tolist()]  # no row of NaN
+
+
 def test_with_no_panorama_around_left_to_compare_nothing_is_matched_again(monkeypatch):
     _, _, observed, where, first = placed_first(np.arange(60))
     monkeypatch.setattr(match, "observe", None)  # never called
