@@ -749,8 +749,9 @@ PROPOSED_ABOVE_M = 1.6  # a proposed camera's height above the street when no pl
 ANCHORS = DATA / "overrides" / "anchors.jsonl"  # the user's yes or no to photos placed
 MATCH_RADIUS_M = 60  # a placement from a caption can be 25 m off
 MATCH_PANORAMAS = 16  # ranked by a quick first pass, the best views matched in full
-# the focusing pass looks this far from a caption's place: its camera's reach, then its own
-FOCUS_REACH_M = match.MOST_MOVED_M + match.FOCUS_NEAR_M
+# every panorama a photo's match may be found from stands this near its caption's place: those
+# it is compared with, and those its focusing pass may take (its camera's reach, then its own)
+SCENE_REACH_M = max(MATCH_RADIUS_M, match.MOST_MOVED_M + match.FOCUS_NEAR_M)
 EARLIEST_YEAR = 1850  # an undated photo: only the buildings standing by then rule a camera out
 # The gate before matching real photos: views of panoramas, taken for old photos, found
 # within this of their true camera (median).
@@ -791,15 +792,9 @@ def _setup() -> str:
     return hashlib.sha1(f"{where!r}{_code()}".encode()).hexdigest()[:16]
 
 
-def _scene_of(
-    near: Sequence[match.Panorama],
-    here: tuple[float, float],
-    code: str,
-    reached: Sequence[match.Panorama] = (),
-) -> str:
-    """What one photo's match is found from besides the photo itself: the panoramas it is
-    compared with (`near`, see _compared_with: where each stands, faces and leans), those its
-    focusing pass may be matched with (`reached`, see FOCUS_REACH_M), its place (`here`: where
+def _scene_of(near: Sequence[match.Panorama], here: tuple[float, float], code: str) -> str:
+    """What one photo's match is found from besides the photo itself: the panoramas within
+    SCENE_REACH_M of it (`near`: where each stands, faces and leans), its place (`here`: where
     its camera may stand) and the `code`. A panorama added out of their reach, or moved there,
     leaves it be: photos and areas are added step by step."""
     seen = [
@@ -811,7 +806,7 @@ def _scene_of(
             round(p.roll or 0.0, 3),
             round(p.pitch or 0.0, 3),
         )
-        for p in [*near, *reached]
+        for p in near
     ]
     place = (round(here[0], 1), round(here[1], 1))
     return hashlib.sha1(f"{seen!r}{place!r}{code}".encode()).hexdigest()[:16]
@@ -819,12 +814,8 @@ def _scene_of(
 
 def _scenes(walk: Iterable[export.WalkPhoto], near_by: list[match.Panorama]) -> dict[str, str]:
     """Each photo's scene (see _scene_of), among the panoramas `near_by` as matching has them."""
-    code, compared_with = _code(), _reach(near_by)
-    reached = _reach(near_by, FOCUS_REACH_M, None)
-    return {
-        me.id: _scene_of(compared_with(here := _place_of(me)), here, code, reached(here))
-        for me in walk
-    }
+    code, reached = _code(), _reach(near_by, SCENE_REACH_M, None)
+    return {me.id: _scene_of(reached(here := _place_of(me)), here, code) for me in walk}
 
 
 @functools.cache  # for one run, as _image
@@ -1136,11 +1127,11 @@ def _area_of(here: tuple[float, float]) -> str:
 
 def _check_setup(matcher: str, area: str, near_by: list[match.Panorama]) -> str:
     """What a matcher's known-answer check in an `area` depends on: the panoramas within reach
-    of it (its views', those they are compared with and those their focusing pass may be, see
-    _check_area and FOCUS_REACH_M; where each stands, faces and leans: see _scene_of), the
+    of it (SCENE_REACH_M: its views', those they are compared with and those their focusing
+    pass may take, see _check_area; where each stands, faces and leans: see _scene_of), the
     code, and for LoMa-G its own code and LoMa's revision. Panoramas added or moved elsewhere
     leave it be."""
-    reach = pilot.AREAS[area].buffer(max(MATCH_RADIUS_M, FOCUS_REACH_M))
+    reach = pilot.AREAS[area].buffer(SCENE_REACH_M)
     inside = sorted((p for p in near_by if reach.contains(Point(p.x, p.y))), key=lambda p: p.id)
     centre = pilot.AREAS[area].centroid
     setup = f"{area}:{_scene_of(inside, (centre.x, centre.y), _code())}"

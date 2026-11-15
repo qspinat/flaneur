@@ -891,11 +891,10 @@ def _panorama(n, x, y=0.0, roll=0.0):
 def _scene(near_by, here=(0.0, 0.0), code="code"):
     from flaneur import cli
 
-    reached = cli._reach(near_by, cli.FOCUS_REACH_M, None)(here)
-    return cli._scene_of(cli._compared_with(near_by, here), here, code, reached)
+    return cli._scene_of(cli._reach(near_by, cli.SCENE_REACH_M, None)(here), here, code)
 
 
-def test_a_photos_fingerprint_holds_when_panoramas_it_does_not_compare_are_added():
+def test_a_photos_fingerprint_holds_when_panoramas_out_of_its_reach_are_added():
     from flaneur import cli
 
     near_by = [_panorama(n, 2.0 * n) for n in range(cli.MATCH_PANORAMAS)]  # all within reach
