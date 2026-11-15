@@ -1090,6 +1090,12 @@ class Found(NamedTuple):
     points: Points  # those that agree with it
 
 
+# A depth given for rays from a panorama, before BD TOPO's walls (see _cast): for directions
+# (n × 3), the points they meet (n × 3) and those walls' rows as Blocks has them (n × 6: x0, y0,
+# x1, y1, base, top); NaN where it gives none
+Depth = Callable[["Panorama", np.ndarray], tuple[np.ndarray, np.ndarray]]
+
+
 def locate(
     photo: np.ndarray,
     near: list[Panorama],
@@ -1098,11 +1104,13 @@ def locate(
     where: Where,
     trace: Trace | None = None,
     origin_z: float = 0.0,
+    depth: Depth | None = None,
 ) -> Found:
     """The camera of an old `photo` (BGR), from the panoramas `near` it, standing `where` it
-    could (`trace` keeps how far it got; `origin_z`: see observe)."""
+    could (`trace` keeps how far it got; `origin_z`, `depth`: see observe)."""
     trace = Trace() if trace is None else trace
-    return place(observe(photo, near, blocks, views, where, trace, origin_z=origin_z), where, trace)
+    seen = observe(photo, near, blocks, views, where, trace, origin_z=origin_z, depth=depth)
+    return place(seen, where, trace)
 
 
 def observe(
@@ -1114,11 +1122,13 @@ def observe(
     trace: Trace,
     mine: Features | None = None,
     origin_z: float = 0.0,
+    depth: Depth | None = None,
 ) -> Observed:
     """An old `photo` (BGR) matched against the views of the panoramas `near` it ranked best,
     and against views zoomed on the landmarks marked in it (`where.sights`); `mine`: its
     features, if already extracted; `origin_z`: how high the cameras' frame starts (metres
-    NGF, as landmarks' tops are)."""
+    NGF, as landmarks' tops are); `depth`: where the views' rays meet before BD TOPO's walls
+    (see _cast), never the zoomed views'."""
     small = shrunk(photo)
     mine = views.matcher.features(small) if mine is None else mine
     quick = mine.top(QUICK_KEYPOINTS)
@@ -1139,7 +1149,7 @@ def observe(
         trace.matched += 1
         trace.matches += len(in_photo)
         ahead = view_directions(theirs.keypoints[in_view], heading)
-        found.append(_cast(near[n], in_photo, ahead, blocks))
+        found.append(_cast(near[n], in_photo, ahead, blocks, depth=depth))
     pixels = [mine.keypoints]
     pictures = functools.lru_cache(maxsize=ZOOM_FROM)(lambda path: cv2.imread(str(path)))
     for sight in (s for s in where.sights if s.tops):  # with no tops: not zoomed on
@@ -1157,10 +1167,13 @@ def _cast(
     ahead: np.ndarray,
     blocks,
     landmark: tuple[float, float] | None = None,
+    depth: Depth | None = None,
 ) -> Rays:
     """Rays of details `keys` seen from `panorama` along `ahead`, cast onto today's walls near
-    it; for a view zoomed on a `landmark`, a ray meeting no wall up to it (its own walls
-    included) meets it."""
+    it: where `depth` gives them a point first, else onto BD TOPO's; for a view zoomed on a
+    `landmark`, BD TOPO's only, and a ray meeting no wall up to it (its own walls included)
+    meets it (walls fitted are raised to the sky they meet: a tower behind would be taken
+    for them)."""
     around = blocks.near(panorama.x, panorama.y, NEAR_M)
     origin = np.array([panorama.x, panorama.y, panorama.z])
     cast, edge = around.hit(origin, ahead)
@@ -1169,13 +1182,19 @@ def _cast(
         away = float(np.hypot(landmark[0] - panorama.x, landmark[1] - panorama.y))
         on_wall &= np.hypot(*(cast[:, :2] - origin[:2]).T) <= away + OWN_M  # not beyond it
         cast = np.where(on_wall[:, None], cast, onto(origin, ahead, landmark))
+    walls = np.where(on_wall[:, None], around.edges[np.maximum(edge, 0)], np.nan)
+    if depth is not None and landmark is None:
+        points, rows = depth(panorama, ahead)
+        given = ~np.isnan(points).any(axis=1)
+        cast = np.where(given[:, None], points, cast)
+        walls = np.where(given[:, None], rows, walls)
     return Rays(
         keys,
         np.full(len(keys), panorama.id, dtype=object),
         np.tile(origin, (len(keys), 1)),
         ahead,
         cast,
-        np.where(on_wall[:, None], around.edges[np.maximum(edge, 0)], np.nan),
+        walls,
     )
 
 
@@ -1236,6 +1255,7 @@ def focus(
     trace: Trace,
     mine: Features,
     origin_z: float = 0.0,
+    depth: Depth | None = None,
 ) -> Focused:
     """A photo's placement (`found`, from `observed`) once focused: a camera standing far from
     its caption's place (`here`) or from its sources (see needs_focus) is placed again from the
@@ -1254,7 +1274,9 @@ def focus(
     if not near:
         return Focused(observed, found, {"panoramas": 0, "moved_m": None})
     again = Trace()
-    more = observe(photo, near, blocks, views, replace(where, sights=()), again, mine, origin_z)
+    more = observe(
+        photo, near, blocks, views, replace(where, sights=()), again, mine, origin_z, depth
+    )
     both = Observed(
         observed.pixels, observed.size, Rays.of([rays, more.rays]), observed.views + more.views
     )

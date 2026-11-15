@@ -710,7 +710,7 @@ def test_a_camera_far_from_its_place_is_placed_again_from_the_panoramas_around_i
     ]
     asked = []
 
-    def observe(photo, near, blocks, views, where, trace, mine, origin_z):
+    def observe(photo, near, blocks, views, where, trace, mine, origin_z, depth=None):
         asked.append([p.id for p in near])
         trace.views = len(near)
         rest = np.arange(30, len(world))
@@ -744,7 +744,7 @@ def test_rays_of_the_panoramas_around_never_take_away_a_point_of_the_first_pass(
     world, pixels, observed, where, first = placed_first(keys)
     wrong = world + [3.0, 0.0, 0.0]  # matched wrongly: 3 m off, every one
 
-    def observe(photo, near, blocks, views, where, trace, mine, origin_z):
+    def observe(photo, near, blocks, views, where, trace, mine, origin_z, depth=None):
         rays = panorama_rays(wrong, keys, (3, -4, 2.5), "c")  # cast where it wrongly points
         rays = replace(rays, casts=wrong, walls=np.tile(FACADE, (len(keys), 1)))
         return match.Observed(pixels, (600, 800), rays)
@@ -771,7 +771,7 @@ def test_a_point_kept_from_a_landmark_s_view_brings_no_wall(monkeypatch):
     observed = replace(observed, rays=replace(rays, walls=walls))
     wrong = world + [3.0, 0.0, 0.0]
 
-    def observe(photo, near, blocks, views, where, trace, mine, origin_z):
+    def observe(photo, near, blocks, views, where, trace, mine, origin_z, depth=None):
         rays = panorama_rays(wrong, keys, (3, -4, 2.5), "c")
         rays = replace(rays, casts=wrong, walls=np.tile(FACADE, (len(keys), 1)))
         return match.Observed(pixels, (600, 800), rays)
@@ -792,3 +792,65 @@ def test_with_no_panorama_around_left_to_compare_nothing_is_matched_again(monkey
     focused = focused_of(observed, first, where, (60.0, 0.0), [])
 
     assert focused.found is first and focused.focus == {"panoramas": 0, "moved_m": None}
+
+
+def a_wall_20_m_north():
+    from flaneur.blocks import Blocks
+
+    return Blocks.of([([(-50, 20), (50, 20), (50, 30), (-50, 30)], 0.0, 12.0)])
+
+
+def three_rays_north() -> np.ndarray:
+    ahead = np.array([[0.0, 1.0, 0.0], [0.1, 1.0, 0.05], [-0.1, 1.0, 0.1]])
+    return ahead / np.linalg.norm(ahead, axis=1, keepdims=True)
+
+
+GIVEN_ROW = [-5.0, 10.0, 5.0, 10.0, 0.0, 9.0]  # a wall fitted 10 m north
+
+
+def given_for_the_first(panorama, directions):
+    """A depth for the first ray only: a point on a wall fitted 10 m north."""
+    points = np.full((len(directions), 3), np.nan)
+    rows = np.full((len(directions), 6), np.nan)
+    points[0], rows[0] = [0.0, 10.0, 2.5], GIVEN_ROW
+    return points, rows
+
+
+def test_a_ray_takes_the_depth_given_before_bd_topo():
+    here = match.Panorama("here", 0.0, 0.0, 2.5, 0.0, path=None)
+
+    rays = match._cast(
+        here, np.arange(3), three_rays_north(), a_wall_20_m_north(), depth=given_for_the_first
+    )
+
+    assert rays.casts[0] == pytest.approx([0.0, 10.0, 2.5])
+    assert rays.walls[0].tolist() == GIVEN_ROW
+    assert rays.casts[1][1] == pytest.approx(20.0)  # no depth given: BD TOPO's wall
+
+
+def test_a_ray_with_no_depth_given_falls_back_on_bd_topo():
+    here = match.Panorama("here", 0.0, 0.0, 2.5, 0.0, path=None)
+
+    def nothing(panorama, directions):
+        return np.full((len(directions), 3), np.nan), np.full((len(directions), 6), np.nan)
+
+    given = match._cast(here, np.arange(3), three_rays_north(), a_wall_20_m_north(), depth=nothing)
+    plain = match._cast(here, np.arange(3), three_rays_north(), a_wall_20_m_north())
+
+    assert np.array_equal(given.casts, plain.casts, equal_nan=True)
+    assert np.array_equal(given.walls, plain.walls, equal_nan=True)
+
+
+def test_a_landmark_s_rays_never_take_the_depth_given():
+    here = match.Panorama("here", 0.0, 0.0, 2.5, 0.0, path=None)
+
+    rays = match._cast(
+        here,
+        np.arange(3),
+        three_rays_north(),
+        a_wall_20_m_north(),
+        (0.0, 60.0),
+        depth=given_for_the_first,
+    )
+
+    assert rays.casts[0][1] == pytest.approx(20.0)  # BD TOPO's wall, nearer than the landmark
