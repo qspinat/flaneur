@@ -1680,6 +1680,7 @@ class _Run(NamedTuple):
     fixed: set[str]  # the panoramas COLMAP placed (see match.around)
     depth: match.Depth  # where rays meet today's walls fitted, before BD TOPO's (see _wall_depth)
     fitted_from: dict[str, str]  # each photo's walls in reach, as they are (see _photo_walls)
+    to_try: dict[str, list[str]]  # the matchers each photo is tried with this run, in order
     scenes: dict[str, str]  # what each photo's match is found from (see _scenes)
     found: dict
     tried: dict[str, list[str]]
@@ -1767,7 +1768,8 @@ def _match_with(matcher: str, photos: list[export.WalkPhoto], at: _Run) -> None:
                 f"{camera.panoramas} panoramas, déplacé de {moved:.1f} m, "
                 f"contours {outline:.2f})"
             )
-        at.found[me.id] = {**at.found[me.id], "fitted_from": at.fitted_from[me.id]}
+        if camera is not None or matcher == at.to_try[me.id][-1]:  # done with these walls
+            at.found[me.id] = {**at.found[me.id], "fitted_from": at.fitted_from[me.id]}
         write_json(MATCHES, at.found)
 
 
@@ -1845,6 +1847,7 @@ def match_photos(
         fixed=fixed,
         depth=_wall_depth(walls),
         fitted_from=fitted_from,
+        to_try=to_try,
         scenes=scenes,
         found=found,
         tried=tried,
@@ -2901,7 +2904,11 @@ def _photo_walls(
         if found is None:
             return []
         walls = sorted(
-            [*(rounded(c) for c in (*w.a, *w.b)), rounded(w.top, panorama.z)] for w in found.walls
+            (
+                [*(rounded(c) for c in (*w.a, *w.b)), rounded(w.top, panorama.z)]
+                for w in found.walls
+            ),
+            key=str,  # a top may be none
         )
         return [rounded(found.ground, panorama.z), walls]
 

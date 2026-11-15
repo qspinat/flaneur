@@ -1833,3 +1833,34 @@ def test_a_photo_s_walls_change_with_the_walls_it_may_meet_not_with_their_code(
     facades.record(tmp_path / "w.jsonl", "home", [wall], [])
 
     assert before == same == risen != walls()  # a wall drawn near
+
+
+def test_a_photo_s_walls_are_told_apart_when_two_share_their_ends_one_without_a_top():
+    home = match.Panorama("home", 0.0, 0.0, 0.0, 0.0, path=None)
+    walls = (
+        facades.Wall((-1.0, 3.0), (1.0, 3.0), None, "drawn"),
+        facades.Wall((-1.0, 3.0), (1.0, 3.0), 9.0, "fitted"),
+    )
+
+    class Scenes:
+        def scene(self, panorama, chosen, made_only=False):
+            return facades.Scene("home", (0.0, 0.0, 0.0), -2.5, walls, (), 0)
+
+    assert cli._photo_walls(Scenes(), [home])((0.0, 0.0))
+
+
+def test_a_redo_for_new_walls_cut_short_is_taken_up_again(tmp_path, monkeypatch):
+    before = _kept(matcher="disk", tried=["lomag", "disk"], fitted_from="old walls")
+
+    def stopped(matcher):
+        if matcher == "disk":
+            raise KeyboardInterrupt  # the run stopped before DISK's turn
+        return None
+
+    _match_world(tmp_path, monkeypatch, {"pm:1": dict(before)}, stopped)
+
+    with pytest.raises(KeyboardInterrupt):
+        cli.match_photos(photo=None, again=False, force=True)
+
+    written = tmp_path / "matches.json"
+    assert not written.exists() or json.loads(written.read_text())["pm:1"] == before
