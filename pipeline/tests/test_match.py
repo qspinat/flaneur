@@ -7,6 +7,7 @@ import numpy as np
 import pytest
 
 from flaneur import match
+from flaneur.blocks import Blocks
 
 
 def level_camera(heading: float, fov: float, horizon: float, size: tuple[int, int]):
@@ -794,9 +795,7 @@ def test_with_no_panorama_around_left_to_compare_nothing_is_matched_again(monkey
     assert focused.found is first and focused.focus == {"panoramas": 0, "moved_m": None}
 
 
-def a_wall_20_m_north():
-    from flaneur.blocks import Blocks
-
+def a_wall_20_m_north() -> Blocks:
     return Blocks.of([([(-50, 20), (50, 20), (50, 30), (-50, 30)], 0.0, 12.0)])
 
 
@@ -809,7 +808,9 @@ GIVEN_ROW = [-5.0, 10.0, 5.0, 10.0, 0.0, 9.0]  # a wall fitted 10 m north
 HERE = match.Panorama("here", 0.0, 0.0, 2.5, 0.0, path=None)
 
 
-def given_for_the_first(panorama, directions):
+def given_for_the_first(
+    panorama: match.Panorama, directions: np.ndarray
+) -> tuple[np.ndarray, np.ndarray]:
     """A depth for the first ray only: a point on a wall fitted 10 m north."""
     points = np.full((len(directions), 3), np.nan)
     rows = np.full((len(directions), 6), np.nan)
@@ -828,7 +829,7 @@ def test_a_ray_takes_the_depth_given_before_bd_topo():
 
 
 def test_a_ray_with_no_depth_given_falls_back_on_bd_topo():
-    def nothing(panorama, directions):
+    def nothing(panorama: match.Panorama, directions: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         return np.full((len(directions), 3), np.nan), np.full((len(directions), 6), np.nan)
 
     given = match._cast(HERE, np.arange(3), three_rays_north(), a_wall_20_m_north(), depth=nothing)

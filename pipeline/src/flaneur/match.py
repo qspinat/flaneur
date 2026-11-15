@@ -1187,7 +1187,7 @@ def _cast(
     if landmark is not None:
         away = float(np.hypot(landmark[0] - panorama.x, landmark[1] - panorama.y))
         on_wall &= np.hypot(*(hit[:, :2] - origin[:2]).T) <= away + OWN_M  # not beyond it
-        hit = np.where(on_wall[:, None], hit, onto(origin, ahead, landmark))
+        hit = np.where(on_wall[:, None], hit, onto(origin, ahead[left], landmark))
     cast[left] = hit
     walls[left] = np.where(on_wall[:, None], around.edges[np.maximum(edge, 0)], np.nan)
     return Rays(
