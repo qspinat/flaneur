@@ -507,17 +507,18 @@ def cast(scene: Scene, directions: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     return metres, met
 
 
-def depth_of(scene: Scene, directions: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+def depth_of(scene: Scene | None, directions: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     """Where rays from the scene's camera along world unit `directions` meet its walls, and
     those walls as Blocks' rows (x0, y0, x1, y1, the street, top); NaN where they meet the
-    street or nothing (see cast)."""
+    street or nothing (see cast), or there is no scene."""
+    points = np.full((len(directions), 3), np.nan)
+    rows = np.full((len(directions), 6), np.nan)
+    if scene is None or not scene.walls:
+        return points, rows
     metres, met = cast(scene, directions)
     on = met >= 0
-    points = np.full((len(met), 3), np.nan)
-    rows = np.full((len(met), 6), np.nan)
     points[on] = np.asarray(scene.origin, float) + metres[on, None] * np.asarray(directions)[on]
-    edges = np.array([(*w.a, *w.b, scene.ground, w.top) for w in scene.walls], float)
-    rows[on] = edges.reshape(-1, 6)[met[on]]
+    rows[on] = _prisms(scene.walls, scene.ground, [w.top for w in scene.walls]).edges[met[on]]
     return points, rows
 
 

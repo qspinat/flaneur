@@ -246,7 +246,7 @@ def _units(v: np.ndarray) -> np.ndarray:
     return v / np.linalg.norm(v, axis=1, keepdims=True)
 
 
-def _scenes(monkeypatch, tmp_path, garbled: frozenset = frozenset(), seen=None, z=0.0, **kept):
+def _scenes(monkeypatch, tmp_path, garbled: frozenset = frozenset(), seen=None, z=0.0, **options):
     """Scenes around a panorama with a neighbour beside it (and one too far), their matches
     the street's two facades seen from each (those with a neighbour `garbled`, at random); and
     the pairs matched."""
@@ -274,7 +274,7 @@ def _scenes(monkeypatch, tmp_path, garbled: frozenset = frozenset(), seen=None, 
         tmp_path / "w.jsonl",
         tmp_path / "pairs",
         seen=seen,
-        **kept,
+        **options,
     )
     return asked, scenes, home
 
@@ -1623,26 +1623,39 @@ def test_fitted_walls_are_read_back_without_pairing_while_their_stamp_holds(monk
     assert again.scene("home", None, made_only=True) == first
 
 
-def test_a_pair_a_mask_a_position_the_facades_or_the_version_changed_refits_them(
-    monkeypatch, tmp_path
-):
-    masks = _Masks("home", "beside")
-    _, scenes, home = _scenes(monkeypatch, tmp_path, kept=tmp_path / "fitted", masks=masks)
-    scenes.scene("home", None)
-    stamp = scenes.stamp(home)
+def _unmask_beside(scenes, again):  # masks are read once a run: the next run's
+    return again(_Masks("home"))
 
-    masks.ids.discard("beside")
-    unmasked = scenes.stamp(home)
-    masks.ids.add("beside")
-    _, moved, moved_home = _scenes(monkeypatch, tmp_path, kept=tmp_path / "fitted", masks=masks)
-    moved.spheres = [replace(p, x=2.5) if p.id == "beside" else p for p in moved.spheres]
-    moved.by_id = {p.id: p for p in moved.spheres}
+
+def _move_beside(scenes, again):
+    scenes.spheres = [replace(p, x=2.5) if p.id == "beside" else p for p in scenes.spheres]
+    return scenes
+
+
+def _other_facades(scenes, again):
     scenes.segments = lambda x, y: [((-4.0, 0.0), (-4.0, 40.0))]
-    other_facades = scenes.stamp(home)
-    scenes.segments = lambda x, y: []
-    monkeypatch.setattr(cli, "WALLS_VERSION", cli.WALLS_VERSION + 1)
+    return scenes
 
-    assert len({stamp, unmasked, moved.stamp(moved_home), other_facades, scenes.stamp(home)}) == 5
+
+def _another_version(scenes, again):
+    cli.WALLS_VERSION += 1
+    return scenes
+
+
+@pytest.mark.parametrize("change", [_unmask_beside, _move_beside, _other_facades, _another_version])
+def test_a_mask_a_position_the_facades_or_the_version_changed_refits_them(
+    change, monkeypatch, tmp_path
+):
+    monkeypatch.setattr(cli, "WALLS_VERSION", cli.WALLS_VERSION)
+
+    def again(masks):
+        return _scenes(monkeypatch, tmp_path, masks=masks)[1]
+
+    _, scenes, home = _scenes(monkeypatch, tmp_path, masks=_Masks("home", "beside"))
+    scenes.scene("home", None)  # the pairs made
+    before = scenes.stamp(home)
+
+    assert change(scenes, again).stamp(home) != before
 
 
 def test_no_pair_on_disk_counts_in_the_stamp_until_it_is_made(monkeypatch, tmp_path):
