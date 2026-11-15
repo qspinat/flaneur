@@ -891,7 +891,8 @@ def _panorama(n, x, y=0.0, roll=0.0):
 def _scene(near_by, here=(0.0, 0.0), code="code"):
     from flaneur import cli
 
-    return cli._scene_of(cli._compared_with(near_by, here), here, code)
+    reached = cli._reach(near_by, cli.FOCUS_REACH_M, None)(here)
+    return cli._scene_of(cli._compared_with(near_by, here), here, code, reached)
 
 
 def test_a_photos_fingerprint_holds_when_panoramas_it_does_not_compare_are_added():
@@ -900,7 +901,7 @@ def test_a_photos_fingerprint_holds_when_panoramas_it_does_not_compare_are_added
     near_by = [_panorama(n, 2.0 * n) for n in range(cli.MATCH_PANORAMAS)]  # all within reach
 
     assert _scene(near_by) == _scene(near_by + [_panorama(99, 500.0)])  # far away
-    assert _scene(near_by) == _scene(near_by + [_panorama(98, 50.0)])  # in reach, not among 16
+    assert _scene(near_by) == _scene(near_by + [_panorama(98, 70.0)])  # beyond its focusing pass
 
 
 def test_a_photos_fingerprint_changes_with_what_its_match_is_found_from():
@@ -1571,3 +1572,22 @@ def test_a_photo_is_placed_where_its_focusing_pass_puts_it_and_the_pass_traced(
     assert left_out == [{"compared"}]  # the panoramas compared already: not matched again
     trace = json.loads((tmp_path / "trace.json").read_text())["pm:1"]
     assert trace["focus"] == {"panoramas": 1, "moved_m": 3.0}
+
+
+def test_a_panorama_the_focusing_pass_may_reach_is_part_of_a_photo_s_scene():
+    near_by = [_panorama(n, 1.0 * n) for n in range(cli.MATCH_PANORAMAS)]  # those compared
+
+    # not compared (beyond MATCH_RADIUS_M), but 12 m from a camera found 50 m off
+    assert _scene([*near_by, _panorama(90, 0.0, 62.0)]) != _scene(near_by)
+
+
+def test_an_areas_check_follows_the_panoramas_its_focusing_pass_may_reach():
+    from flaneur import pilot
+
+    area = pilot.AREAS["saint-severin"]
+    home = area.centroid
+    near_by = [_panorama(n, home.x + 10.0 * n, home.y) for n in range(3)]
+    before = cli._check_setup("disk", "saint-severin", near_by)
+    out = area.buffer(62.5).exterior.coords[0]  # a view's camera 50 m off: 12.5 m from it
+
+    assert cli._check_setup("disk", "saint-severin", [*near_by, _panorama(7, *out)]) != before

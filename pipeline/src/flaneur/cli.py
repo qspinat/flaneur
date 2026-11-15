@@ -749,6 +749,8 @@ PROPOSED_ABOVE_M = 1.6  # a proposed camera's height above the street when no pl
 ANCHORS = DATA / "overrides" / "anchors.jsonl"  # the user's yes or no to photos placed
 MATCH_RADIUS_M = 60  # a placement from a caption can be 25 m off
 MATCH_PANORAMAS = 16  # ranked by a quick first pass, the best views matched in full
+# the focusing pass looks this far from a caption's place: its camera's reach, then its own
+FOCUS_REACH_M = match.MOST_MOVED_M + match.FOCUS_NEAR_M
 EARLIEST_YEAR = 1850  # an undated photo: only the buildings standing by then rule a camera out
 # The gate before matching real photos: views of panoramas, taken for old photos, found
 # within this of their true camera (median).
@@ -789,11 +791,17 @@ def _setup() -> str:
     return hashlib.sha1(f"{where!r}{_code()}".encode()).hexdigest()[:16]
 
 
-def _scene_of(near: Sequence[match.Panorama], here: tuple[float, float], code: str) -> str:
+def _scene_of(
+    near: Sequence[match.Panorama],
+    here: tuple[float, float],
+    code: str,
+    reached: Sequence[match.Panorama] = (),
+) -> str:
     """What one photo's match is found from besides the photo itself: the panoramas it is
-    compared with (`near`, see _compared_with: where each stands, faces and leans), its place
-    (`here`: where its camera may stand) and the `code`. A panorama added out of its reach, or
-    moved there, leaves it be: photos and areas are added step by step."""
+    compared with (`near`, see _compared_with: where each stands, faces and leans), those its
+    focusing pass may be matched with (`reached`, see FOCUS_REACH_M), its place (`here`: where
+    its camera may stand) and the `code`. A panorama added out of their reach, or moved there,
+    leaves it be: photos and areas are added step by step."""
     seen = [
         (
             p.id,
@@ -803,7 +811,7 @@ def _scene_of(near: Sequence[match.Panorama], here: tuple[float, float], code: s
             round(p.roll or 0.0, 3),
             round(p.pitch or 0.0, 3),
         )
-        for p in near
+        for p in [*near, *reached]
     ]
     place = (round(here[0], 1), round(here[1], 1))
     return hashlib.sha1(f"{seen!r}{place!r}{code}".encode()).hexdigest()[:16]
@@ -812,7 +820,11 @@ def _scene_of(near: Sequence[match.Panorama], here: tuple[float, float], code: s
 def _scenes(walk: Iterable[export.WalkPhoto], near_by: list[match.Panorama]) -> dict[str, str]:
     """Each photo's scene (see _scene_of), among the panoramas `near_by` as matching has them."""
     code, compared_with = _code(), _reach(near_by)
-    return {me.id: _scene_of(compared_with(here := _place_of(me)), here, code) for me in walk}
+    reached = _reach(near_by, FOCUS_REACH_M, None)
+    return {
+        me.id: _scene_of(compared_with(here := _place_of(me)), here, code, reached(here))
+        for me in walk
+    }
 
 
 @functools.cache  # for one run, as _image
@@ -1124,10 +1136,11 @@ def _area_of(here: tuple[float, float]) -> str:
 
 def _check_setup(matcher: str, area: str, near_by: list[match.Panorama]) -> str:
     """What a matcher's known-answer check in an `area` depends on: the panoramas within reach
-    of it (MATCH_RADIUS_M: its views' and those they are compared with, see _check_area; where
-    each stands, faces and leans: see _scene_of), the code, and for LoMa-G its own
-    code and LoMa's revision. Panoramas added or moved elsewhere leave it be."""
-    reach = pilot.AREAS[area].buffer(MATCH_RADIUS_M)
+    of it (its views', those they are compared with and those their focusing pass may be, see
+    _check_area and FOCUS_REACH_M; where each stands, faces and leans: see _scene_of), the
+    code, and for LoMa-G its own code and LoMa's revision. Panoramas added or moved elsewhere
+    leave it be."""
+    reach = pilot.AREAS[area].buffer(max(MATCH_RADIUS_M, FOCUS_REACH_M))
     inside = sorted((p for p in near_by if reach.contains(Point(p.x, p.y))), key=lambda p: p.id)
     centre = pilot.AREAS[area].centroid
     setup = f"{area}:{_scene_of(inside, (centre.x, centre.y), _code())}"
@@ -1214,15 +1227,18 @@ def _compared_with(
 
 def _reach(
     near_by: list[match.Panorama],
+    radius: float = MATCH_RADIUS_M,
+    most: int | None = MATCH_PANORAMAS,
 ) -> Callable[[tuple[float, float]], list[match.Panorama]]:
-    """_compared_with for many photos among the same panoramas: where they stand read once."""
+    """_compared_with for many photos among the same panoramas: where they stand read once
+    (or, for another `radius`, the `most` nearest within it: all, for None)."""
     xs = np.array([p.x for p in near_by])
     ys = np.array([p.y for p in near_by])
 
     def compared_with(here: tuple[float, float]) -> list[match.Panorama]:
         distance = np.hypot(xs - here[0], ys - here[1])
-        within = np.flatnonzero(distance <= MATCH_RADIUS_M)
-        nearest = within[np.argsort(distance[within], kind="stable")][:MATCH_PANORAMAS]
+        within = np.flatnonzero(distance <= radius)
+        nearest = within[np.argsort(distance[within], kind="stable")][:most]
         return [near_by[i] for i in nearest]
 
     return compared_with
@@ -1560,6 +1576,7 @@ class _Run(NamedTuple):
     heights: scene.CameraHeights
     blocks: Blocks
     fixed: set[str]  # the panoramas COLMAP placed (see match.around)
+    scenes: dict[str, str]  # what each photo's match is found from (see _scenes)
     found: dict
     tried: dict[str, list[str]]
     traces: dict
@@ -1584,7 +1601,7 @@ def _match_with(matcher: str, photos: list[export.WalkPhoto], at: _Run) -> None:
     for me in photos:
         here = _place_of(me)
         near = _compared_with(at.near_by, here)
-        inputs = _inputs(_scene_of(near, here, _code()), me.id)
+        inputs = _inputs(at.scenes[me.id], me.id)
         image = cv2.imread(str(_exported(me.id)))
         now = at.then(_then_year(me))
         where = _where(me, at.heights, now)
@@ -1708,6 +1725,7 @@ def match_photos(
         heights=heights,
         blocks=blocks,
         fixed=_colmap_fixed(),
+        scenes=scenes,
         found=found,
         tried=tried,
         traces=register.load(MATCH_TRACE),
