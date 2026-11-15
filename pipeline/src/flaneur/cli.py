@@ -562,8 +562,10 @@ class _Scenes:
         if home is None:
             return None
         chosen = None if chosen is None else tuple(sorted(set(chosen)))  # (): none, by hand
-        asked = self._asked(home, chosen, made_only, but)
-        if self.kept is not None and made_only and chosen is None and not but:
+        asked = self._asked(home, chosen, made_only)
+        left_out = but & {p.id for p in asked}  # only these change the fit
+        asked = [p for p in asked if p.id not in left_out]
+        if self.kept is not None and made_only and chosen is None and not left_out:
             fitted = self._kept(
                 self.fitted,
                 (panorama, tuple(p.id for p in asked)),  # pairs on disk: always read
@@ -590,7 +592,6 @@ class _Scenes:
         home: match.Panorama,
         chosen: tuple[str, ...] | None = None,
         made_only: bool = True,
-        but: frozenset[str] = frozenset(),
     ) -> list[match.Panorama]:
         """The neighbours a panorama's walls are fitted from (see scene)."""
         asked = (
@@ -598,7 +599,7 @@ class _Scenes:
             if chosen is None
             else [self.by_id[i] for i in chosen if i in self.by_id and i != home.id]
         )
-        asked = [p for p in asked if p.id not in but and self._masked(p)]
+        asked = [p for p in asked if self._masked(p)]
         if not self._masked(home):
             return []
         return [p for p in asked if self._made(home, p)] if made_only else asked
@@ -1678,6 +1679,7 @@ class _Run(NamedTuple):
     blocks: Blocks
     fixed: set[str]  # the panoramas COLMAP placed (see match.around)
     depth: match.Depth  # where rays meet today's walls fitted, before BD TOPO's (see _wall_depth)
+    fitted_from: dict[str, str]  # each photo's walls in reach, as they are (see _photo_walls)
     scenes: dict[str, str]  # what each photo's match is found from (see _scenes)
     found: dict
     tried: dict[str, list[str]]
@@ -1741,6 +1743,7 @@ def _match_with(matcher: str, photos: list[export.WalkPhoto], at: _Run) -> None:
             before = at.found.get(me.id)
             if not _stands(me.id, before, inputs, at.judged):
                 at.found[me.id] = {"inputs": inputs, "tried": at.tried[me.id]}
+            at.found[me.id] = {**at.found[me.id], "fitted_from": at.fitted_from[me.id]}
             typer.echo(f"{me.id} : rien de sûr ({MATCHERS[matcher].label})")
         else:
             moved = float(np.hypot(camera.x - here[0], camera.y - here[1]))
@@ -1753,7 +1756,12 @@ def _match_with(matcher: str, photos: list[export.WalkPhoto], at: _Run) -> None:
                 inputs=_placed_inputs(inputs, matcher),
                 outline=outline,
             )
-            at.found[me.id] = {**asdict(situated), "matcher": matcher, "tried": at.tried[me.id]}
+            at.found[me.id] = {
+                **asdict(situated),
+                "matcher": matcher,
+                "tried": at.tried[me.id],
+                "fitted_from": at.fitted_from[me.id],
+            }
             at.placed.add(me.id)
             store.save_points(me.id, inputs, points)
             typer.echo(
@@ -1809,27 +1817,32 @@ def match_photos(
     blocks = then(date.today().year).blocks
     found, judged, proposed = _matches(), _Judged(), register.load(PROPOSED_CAMERAS)
     chosen = [me for me in _to_match(walk) if not photo or me.id in photo]
+    fixed = _colmap_fixed()
+    walls = _wall_scenes(near_by, fixed)
+    walls_of, fitted_from = _photo_walls(walls, near_by), {}
     tried, to_try = {}, {}  # the matchers each photo was tried with, and is to be
     for me in chosen:
         kept, inputs = found.get(me.id), _inputs(scenes[me.id], me.id)
         if any(p and judged.holds(me.id, p) for p in (kept, proposed.get(me.id))):
             tried[me.id], to_try[me.id] = _tried(kept, inputs), []  # said yes to: never redone
-        elif again or photo:
-            tried[me.id], to_try[me.id] = [], list(MATCHERS)
+            continue
+        fitted_from[me.id] = walls_of(_place_of(me))
+        if again or photo or (kept and kept.get("fitted_from") != fitted_from[me.id]):
+            tried[me.id], to_try[me.id] = [], list(MATCHERS)  # new walls: redone, still shown
         else:
             turned_down = bool(kept) and "x" in kept and judged.turned_down(me.id, kept)
             tried[me.id] = _tried(kept, inputs)
             to_try[me.id] = _left_to_try(kept, inputs, turned_down)
         area = checked[_area_of(_place_of(me))]  # the matchers checked where it stands
         to_try[me.id] = [m for m in to_try[me.id] if m in area]
-    fixed = _colmap_fixed()
     at = _Run(
         near_by=near_by,
         then=then,
         heights=heights,
         blocks=blocks,
         fixed=fixed,
-        depth=_wall_depth(_wall_scenes(near_by, fixed)),
+        depth=_wall_depth(walls),
+        fitted_from=fitted_from,
         scenes=scenes,
         found=found,
         tried=tried,
@@ -2346,8 +2359,9 @@ def match_check(
     views = _views(matcher=matcher)
     # only panoramas COLMAP placed: another's place is borrowed from its run, or its phone's
     fixed = _colmap_fixed()
+    walls = _wall_scenes(near_by, fixed)
     for name in [area] if area else list(pilot.AREAS):
-        _check_area(name, tries, seed, matcher, near_by, fixed, heights, today, shown, views)
+        _check_area(name, tries, seed, matcher, near_by, fixed, heights, today, shown, views, walls)
 
 
 def _wanting(
@@ -2380,9 +2394,11 @@ def _check_area(
     today: "Then",
     shown: Callable[[match.View], tuple[match.Sight, ...]],
     views,
+    walls: _Scenes,
 ) -> None:
     """One area's known-answer check (see match_check): its views cut from the panoramas COLMAP
-    placed in it, its decoys from its own streets far from them, its result kept for it alone."""
+    placed in it, its decoys from its own streets far from them, its result kept for it alone;
+    their points on today's `walls` fitted, never with the panorama a view is cut from."""
     rng = np.random.default_rng(seed)
     marking = np.random.default_rng([seed, 1])  # its own: the fakes stay the same
     square = pilot.AREAS[name]
@@ -2412,6 +2428,7 @@ def _check_area(
         # as match compares a photo (see _compared_with): within reach of the area only
         others = _nearest(near_by, me.x, me.y, MATCH_RADIUS_M, but=me.id)[:MATCH_PANORAMAS]
         compared = {me.id} | {p.id for p in others}  # not matched again (see match.focus)
+        depth = _wall_depth(walls, but=frozenset({me.id}))  # never its own walls
         # the landmarks each fake shows, marked as by hand (as near): the band's are the true
         # view's inside it (the rest stands for houses rebuilt since, not for another place)
         seen = _marked_by_hand(_check_view(me, heading), shown, marking)
@@ -2424,7 +2441,7 @@ def _check_area(
             trace = match.Trace()
             mine = views.matcher.features(match.shrunk(fake))
             observed = match.observe(
-                fake, others, today.blocks, views, where, trace, mine, heights.origin_z
+                fake, others, today.blocks, views, where, trace, mine, heights.origin_z, depth
             )
             first = match.place(observed, where, trace)
             _, (camera, _, _), _ = match.focus(
@@ -2441,6 +2458,7 @@ def _check_area(
                 trace,
                 mine,
                 heights.origin_z,
+                depth,
             )
             traces[kind].append(_traced(trace, None if kind == "leurre" else (me, heading)))
             if camera is None:
@@ -2861,6 +2879,22 @@ def _wall_depth(scenes: _Scenes, but: frozenset[str] = frozenset()) -> match.Dep
         return facades.depth_of(scene_of(panorama.id), directions)
 
     return depth_of
+
+
+def _photo_walls(
+    scenes: _Scenes, near_by: list[match.Panorama]
+) -> Callable[[tuple[float, float]], str]:
+    """What the walls a photo's match may meet are made from (see _Scenes.stamp), and the
+    walls drawn near them, for the panoramas within SCENE_REACH_M of its place: new walls
+    there redo it (see match_photos); each panorama's read once."""
+    reached = _reach(near_by, SCENE_REACH_M, None)
+
+    @functools.cache
+    def of(panorama: match.Panorama) -> list:
+        drawn, removed = facades.saved_near(WALLS, panorama.x, panorama.y, now=scenes.now)
+        return [scenes.stamp(panorama), [[*w.a, *w.b, w.top] for w in drawn], removed]
+
+    return lambda here: _digest([of(p) for p in reached(here)])
 
 
 class _ViewWalls:

@@ -637,6 +637,7 @@ def _match_world(tmp_path, monkeypatch, previous: dict, places) -> None:
         "_colmap_fixed": set,
         "_wall_scenes": lambda near_by, fixed: "scenes",
         "_wall_depth": lambda scenes, but=frozenset(): f"walls of {scenes}",
+        "_photo_walls": lambda scenes, near_by: lambda here: "walls",
         "_matches": lambda: previous,
         "_situated": lambda: {},
         "_exported": lambda photo_id: exported,
@@ -695,7 +696,8 @@ def test_a_redo_that_finds_nothing_keeps_the_placement_made_from_these_inputs(
 
     cli.match_photos(photo=["pm:1"], again=False, force=True)
 
-    assert json.loads((tmp_path / "matches.json").read_text())["pm:1"] == before
+    kept = json.loads((tmp_path / "matches.json").read_text())["pm:1"]
+    assert kept == {**before, "fitted_from": "walls"}  # tried with these walls
 
 
 @pytest.mark.parametrize(
@@ -716,7 +718,7 @@ def test_a_run_that_finds_nothing_replaces_a_stale_or_refused_placement(
     cli.match_photos(photo=None, again=False, force=True)
 
     kept = json.loads((tmp_path / "matches.json").read_text())["pm:1"]
-    assert kept == {"inputs": "i", "tried": ["lomag", "disk"]}
+    assert kept == {"inputs": "i", "tried": ["lomag", "disk"], "fitted_from": "walls"}
 
 
 def _candidate(agree, why, x=10.0):
@@ -1142,6 +1144,8 @@ def test_an_area_without_decoys_is_left_unchecked_and_the_others_checked(tmp_pat
         "_cut_view": lambda panorama, heading: np.zeros((2, 2, 3), np.uint8),
         "_check_view": lambda panorama, heading: None,
         "_marked_by_hand": lambda view, shown, rng: (),
+        "_wall_scenes": lambda near_by, fixed: None,
+        "_wall_depth": lambda walls, but=frozenset(): None,
     }.items():
         monkeypatch.setattr(cli, name, value)
     monkeypatch.setattr(cli.db, "connect", lambda path: SimpleNamespace(close=lambda: None))
@@ -1752,3 +1756,60 @@ def test_a_panorama_paired_but_not_segmented_has_no_walls_of_its_own(monkeypatch
     _, scenes, _ = _scenes(monkeypatch, tmp_path, masks=_Masks("beside"))  # not "home"
 
     assert unmasked.has_pairs(home) and not scenes.has_pairs(home)
+
+
+def test_new_walls_redo_a_photo_in_match_but_never_hide_its_placement(tmp_path, monkeypatch):
+    before = _kept(matcher="disk", tried=["lomag", "disk"], fitted_from="old walls")
+    _match_world(tmp_path, monkeypatch, {"pm:1": dict(before)}, lambda matcher: CAMERA)
+
+    assert cli._stands("pm:1", before, "i", cli._Judged())  # shown meanwhile: same inputs
+    cli.match_photos(photo=None, again=False, force=True)
+
+    assert json.loads((tmp_path / "matches.json").read_text())["pm:1"]["fitted_from"] == "walls"
+
+
+def test_the_same_walls_leave_a_placement_be(tmp_path, monkeypatch):
+    before = _kept(matcher="disk", tried=["lomag", "disk"], fitted_from="walls")
+    _match_world(tmp_path, monkeypatch, {"pm:1": dict(before)}, lambda matcher: NUDGED)
+
+    cli.match_photos(photo=None, again=False, force=True)
+
+    assert json.loads((tmp_path / "matches.json").read_text())["pm:1"] == before
+
+
+def test_a_placement_kept_when_new_walls_find_nothing_is_not_redone_again(tmp_path, monkeypatch):
+    before = _kept(matcher="disk", tried=["lomag", "disk"], fitted_from="old walls")
+    _match_world(tmp_path, monkeypatch, {"pm:1": dict(before)}, lambda matcher: None)
+
+    cli.match_photos(photo=None, again=False, force=True)
+
+    kept = json.loads((tmp_path / "matches.json").read_text())["pm:1"]
+    assert kept == {**before, "fitted_from": "walls"}  # kept, tried with these walls
+
+
+def test_a_photo_said_yes_is_not_redone_for_new_walls(tmp_path, monkeypatch):
+    before = _kept(inputs="old:h", matcher="disk", tried=["disk"], fitted_from="old walls")
+    _match_world(tmp_path, monkeypatch, {"pm:1": dict(before)}, lambda matcher: NUDGED)
+    yes = {**_said("yes", "old:h", x=1.0, y=2.0), "photo_id": "pm:1"}
+    (tmp_path / "anchors.jsonl").write_text(json.dumps(yes) + "\n")
+
+    cli.match_photos(photo=None, again=False, force=True)
+
+    written = tmp_path / "matches.json"
+    assert not written.exists() or json.loads(written.read_text())["pm:1"] == before
+
+
+def test_the_check_never_sees_walls_fitted_with_or_drawn_from_the_panorama_its_view_is_cut_from(
+    monkeypatch, tmp_path
+):
+    _, scenes, home = _scenes(monkeypatch, tmp_path, masks=_Masks("home", "beside"))
+    scenes.scene("home", None)  # the pairs made
+    drawn = facades.Wall((-1.0, 3.0), (1.0, 3.0), None, "drawn")
+    facades.record(scenes.walls_path, "beside", [drawn], [])  # drawn while at "beside"
+    ahead = _units(np.array([[0.0, 1.0, 0.0], [-4.0, 10.0, 0.0]]))
+
+    seen = cli._wall_depth(scenes)(home, ahead)[0]
+    cut = cli._wall_depth(scenes, but=frozenset({"beside"}))(home, ahead)[0]
+
+    assert not np.isnan(seen).any()  # the wall drawn, the facade fitted with "beside"
+    assert np.isnan(cut).all()
