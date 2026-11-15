@@ -1813,3 +1813,23 @@ def test_the_check_never_sees_walls_fitted_with_or_drawn_from_the_panorama_its_v
 
     assert not np.isnan(seen).any()  # the wall drawn, the facade fitted with "beside"
     assert np.isnan(cut).all()
+
+
+def test_a_photo_s_walls_change_with_the_walls_it_may_meet_not_with_their_code(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setattr(cli, "WALLS_VERSION", cli.WALLS_VERSION)
+
+    def walls(z=0.0):
+        _, scenes, _ = _scenes(monkeypatch, tmp_path, z=z, kept=tmp_path / "fitted")
+        scenes.scene("home", None)  # the pairs made
+        return cli._photo_walls(scenes, scenes.spheres)((0.0, 0.0))
+
+    before = walls()
+    cli.WALLS_VERSION += 1  # the code changed: the walls fitted again, the same
+    same = walls()
+    risen = walls(z=5.0)  # the frame of heights moved: the same walls
+    wall = facades.Wall((-1.0, 3.0), (1.0, 3.0), None, "drawn")
+    facades.record(tmp_path / "w.jsonl", "home", [wall], [])
+
+    assert before == same == risen != walls()  # a wall drawn near

@@ -1743,7 +1743,6 @@ def _match_with(matcher: str, photos: list[export.WalkPhoto], at: _Run) -> None:
             before = at.found.get(me.id)
             if not _stands(me.id, before, inputs, at.judged):
                 at.found[me.id] = {"inputs": inputs, "tried": at.tried[me.id]}
-            at.found[me.id] = {**at.found[me.id], "fitted_from": at.fitted_from[me.id]}
             typer.echo(f"{me.id} : rien de sûr ({MATCHERS[matcher].label})")
         else:
             moved = float(np.hypot(camera.x - here[0], camera.y - here[1]))
@@ -1760,7 +1759,6 @@ def _match_with(matcher: str, photos: list[export.WalkPhoto], at: _Run) -> None:
                 **asdict(situated),
                 "matcher": matcher,
                 "tried": at.tried[me.id],
-                "fitted_from": at.fitted_from[me.id],
             }
             at.placed.add(me.id)
             store.save_points(me.id, inputs, points)
@@ -1769,6 +1767,7 @@ def _match_with(matcher: str, photos: list[export.WalkPhoto], at: _Run) -> None:
                 f"{camera.panoramas} panoramas, déplacé de {moved:.1f} m, "
                 f"contours {outline:.2f})"
             )
+        at.found[me.id] = {**at.found[me.id], "fitted_from": at.fitted_from[me.id]}
         write_json(MATCHES, at.found)
 
 
@@ -1826,6 +1825,10 @@ def match_photos(
         if any(p and judged.holds(me.id, p) for p in (kept, proposed.get(me.id))):
             tried[me.id], to_try[me.id] = _tried(kept, inputs), []  # said yes to: never redone
             continue
+        area = checked[_area_of(_place_of(me))]  # the matchers checked where it stands
+        if not area:
+            tried[me.id], to_try[me.id] = _tried(kept, inputs), []
+            continue
         fitted_from[me.id] = walls_of(_place_of(me))
         if again or photo or (kept and kept.get("fitted_from") != fitted_from[me.id]):
             tried[me.id], to_try[me.id] = [], list(MATCHERS)  # new walls: redone, still shown
@@ -1833,7 +1836,6 @@ def match_photos(
             turned_down = bool(kept) and "x" in kept and judged.turned_down(me.id, kept)
             tried[me.id] = _tried(kept, inputs)
             to_try[me.id] = _left_to_try(kept, inputs, turned_down)
-        area = checked[_area_of(_place_of(me))]  # the matchers checked where it stands
         to_try[me.id] = [m for m in to_try[me.id] if m in area]
     at = _Run(
         near_by=near_by,
@@ -2884,15 +2886,25 @@ def _wall_depth(scenes: _Scenes, but: frozenset[str] = frozenset()) -> match.Dep
 def _photo_walls(
     scenes: _Scenes, near_by: list[match.Panorama]
 ) -> Callable[[tuple[float, float]], str]:
-    """What the walls a photo's match may meet are made from (see _Scenes.stamp), and the
-    walls drawn near them, for the panoramas within SCENE_REACH_M of its place: new walls
-    there redo it (see match_photos); each panorama's read once."""
+    """The walls a photo's match may meet, fitted and drawn, for the panoramas within
+    SCENE_REACH_M of its place (heights from each panorama's, to 10 cm): other walls there
+    redo it (see match_photos), not a change of code or of pairs that leaves them as they are;
+    each panorama's made once a run."""
     reached = _reach(near_by, SCENE_REACH_M, None)
+
+    def rounded(v: float | None, z: float = 0.0) -> float | None:
+        return None if v is None else round(v - z, 1)
 
     @functools.cache
     def of(panorama: match.Panorama) -> list:
-        drawn, removed = facades.saved_near(WALLS, panorama.x, panorama.y, now=scenes.now)
-        return [scenes.stamp(panorama), [[*w.a, *w.b, w.top] for w in drawn], removed]
+        found = scenes.scene(panorama.id, None, made_only=True)
+        if found is None:
+            return []
+        walls = sorted(
+            [*(rounded(c) for c in (*w.a, *w.b)), rounded(w.top, panorama.z)]
+            for w in found.walls
+        )
+        return [rounded(found.ground, panorama.z), walls]
 
     return lambda here: _digest([of(p) for p in reached(here)])
 
