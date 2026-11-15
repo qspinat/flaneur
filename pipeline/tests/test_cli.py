@@ -965,6 +965,13 @@ def test_a_verdict_follows_its_camera_found_again_from_other_panoramas(tmp_path)
     assert judged.on("a", {"inputs": "newscene:img"}) is None  # not placed: its inputs only
 
 
+def test_a_verdict_does_not_follow_its_inputs_to_another_camera(tmp_path):
+    judged = _judged(tmp_path, _said("no", "s1:img"))  # new walls since: the same inputs
+
+    assert judged.on("a", _at("s1:img", 0.6, 0.6))["verdict"] == "no"  # found again
+    assert judged.on("a", _at("s1:img", x=4.0)) is None  # another camera: shown again
+
+
 def test_a_verdict_kept_without_its_cameras_width_holds_for_its_inputs_only(tmp_path):
     old = _said("yes", "s1:img")
     old["camera"] = {"x": 0.0, "y": 0.0, "heading": 90.0}  # as kept before 11/11, evening

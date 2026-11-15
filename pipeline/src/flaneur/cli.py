@@ -1920,12 +1920,17 @@ CARRY_DEG = 2.0
 CARRY_HORIZON = 0.02  # and its horizon this near (a share of the photo's height): framed alike
 
 
+def _whole(camera: dict, other: dict) -> bool:
+    """Whether two cameras are kept with their height, width and horizon: comparable."""
+    return {"x", "above_street", "fov", "horizon"} <= camera.keys() & other.keys()
+
+
 def _same_camera(camera: dict, other: dict) -> bool:
     """Whether two cameras (x, y, above_street, heading, fov, horizon) are one found again:
     within CARRY_M across and up, CARRY_DEG both turned and widened, CARRY_HORIZON tilted. A
     camera judged without its height, width and horizon (before they were kept) is none: the
     verdict holds for its inputs only."""
-    if not {"above_street", "fov", "horizon"} <= camera.keys() & other.keys():
+    if not _whole(camera, other):
         return False
     return bool(
         np.hypot(camera["x"] - other["x"], camera["y"] - other["y"]) <= CARRY_M
@@ -1970,12 +1975,14 @@ class _Judged:
         heading when placed): given to it, or to a camera of the same photo found within CARRY_M
         and CARRY_DEG of it (placed again from other panoramas, or by the other matcher), unless
         the user since took back a camera that near the one it was given to (a yes followed by
-        a no beside it holds for that very camera only)."""
+        a no beside it holds for that very camera only). A yes holds for its inputs (never
+        redone); a no or near for its inputs and camera, kept whole."""
         said_since: list[dict] = []
         for said in reversed(self.by_photo.get(photo_id, [])):
-            if said["inputs"] == placed["inputs"]:
-                return said
             camera = said.get("camera")  # verdicts older than their camera's record: none
+            other = camera and _whole(camera, placed) and not _same_camera(camera, placed)
+            if said["inputs"] == placed["inputs"] and (said["verdict"] == "yes" or not other):
+                return said  # a no or near: not on another camera new walls found from them
             if (
                 camera
                 and "x" in placed
