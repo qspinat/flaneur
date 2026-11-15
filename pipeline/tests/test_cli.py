@@ -631,6 +631,7 @@ def _match_world(tmp_path, monkeypatch, previous: dict, places) -> None:
         "MATCH_TRACE": tmp_path / "trace.json",
         "ANCHORS": tmp_path / "anchors.jsonl",  # the user's verdicts: none unless a test says
         "_matching": lambda: (heights, [], lambda year: SimpleNamespace(blocks=None)),
+        "_colmap_fixed": set,
         "_matches": lambda: previous,
         "_situated": lambda: {},
         "_exported": lambda photo_id: exported,
@@ -656,6 +657,9 @@ def _match_world(tmp_path, monkeypatch, previous: dict, places) -> None:
     )
     monkeypatch.setattr(
         cli.match, "place", lambda observed, where, trace: (places(observed), [], None)
+    )
+    monkeypatch.setattr(
+        cli.match, "focus", lambda photo, observed, found, *rest: (observed, found, None)
     )
 
 
@@ -887,16 +891,16 @@ def _panorama(n, x, y=0.0, roll=0.0):
 def _scene(near_by, here=(0.0, 0.0), code="code"):
     from flaneur import cli
 
-    return cli._scene_of(cli._compared_with(near_by, here), here, code)
+    return cli._scene_of(cli._reach(near_by, cli.SCENE_REACH_M, None)(here), here, code)
 
 
-def test_a_photos_fingerprint_holds_when_panoramas_it_does_not_compare_are_added():
+def test_a_photos_fingerprint_holds_when_panoramas_out_of_its_reach_are_added():
     from flaneur import cli
 
     near_by = [_panorama(n, 2.0 * n) for n in range(cli.MATCH_PANORAMAS)]  # all within reach
 
     assert _scene(near_by) == _scene(near_by + [_panorama(99, 500.0)])  # far away
-    assert _scene(near_by) == _scene(near_by + [_panorama(98, 50.0)])  # in reach, not among 16
+    assert _scene(near_by) == _scene(near_by + [_panorama(98, 70.0)])  # beyond its focusing pass
 
 
 def test_a_photos_fingerprint_changes_with_what_its_match_is_found_from():
@@ -1128,8 +1132,8 @@ def test_an_area_without_decoys_is_left_unchecked_and_the_others_checked(tmp_pat
             near_by,
             lambda year: SimpleNamespace(blocks=None, free=None),
         ),
-        "_views": lambda matcher="disk": None,
-        "_fixed_by_colmap": lambda pictures, fixes: {p.id for p in near_by},
+        "_views": lambda matcher="disk": SimpleNamespace(matcher=SimpleNamespace(features=len)),
+        "_colmap_fixed": lambda: {p.id for p in near_by},
         "_cut_view": lambda panorama, heading: np.zeros((2, 2, 3), np.uint8),
         "_check_view": lambda panorama, heading: None,
         "_marked_by_hand": lambda view, shown, rng: (),
@@ -1141,7 +1145,11 @@ def test_an_area_without_decoys_is_left_unchecked_and_the_others_checked(tmp_pat
     monkeypatch.setattr(cli.fakes, "mixed", lambda a, b, span: a)
     monkeypatch.setattr(cli.fakes, "aged", lambda image, rng: image)
     monkeypatch.setattr(cli.match, "Where", lambda *args: None)
-    monkeypatch.setattr(cli.match, "locate", lambda *args: (None, None, None))
+    monkeypatch.setattr(cli.match, "observe", lambda *args: None)
+    monkeypatch.setattr(cli.match, "place", lambda *args: (None, None, None))
+    monkeypatch.setattr(
+        cli.match, "focus", lambda photo, observed, found, *rest: (observed, found, None)
+    )
 
     cli.match_check(tries=20, seed=0, matcher="disk", area=None)
 
@@ -1536,3 +1544,49 @@ def test_the_other_view_says_how_far_it_stands(tmp_path):
 
     assert cli._other_view([source, next_to], next_to, camera) == {"away_m": 37.7}
     assert cli._other_view([next_to], next_to, camera) is None  # the one shown
+
+
+def test_a_photo_is_placed_where_its_focusing_pass_puts_it_and_the_pass_traced(
+    tmp_path, monkeypatch
+):
+    _match_world(tmp_path, monkeypatch, {}, lambda matcher: None)
+    compared = match.Panorama("compared", 3.0, 2.0, 2.5, 0.0, None)
+    heights = SimpleNamespace(street=lambda x, y: 0.0, origin_z=0.0)
+    monkeypatch.setattr(
+        cli, "_matching", lambda: (heights, [compared], lambda year: SimpleNamespace(blocks=None))
+    )
+    nearer = match.Camera(4.0, 2.0, 1.5, 92.0, 0.5, 60.0, agree=40, panoramas=1)
+    left_out = []
+
+    def focus(photo, observed, found, here, panoramas, fixed, but, *rest):
+        left_out.append(but)
+        return observed, (nearer, [], None), {"panoramas": 1, "moved_m": 3.0}
+
+    monkeypatch.setattr(cli.match, "focus", focus)
+
+    cli.match_photos(photo=["pm:1"], again=False, force=True)
+
+    kept = json.loads((tmp_path / "matches.json").read_text())["pm:1"]
+    assert (kept["x"], kept["heading"]) == (4.0, 92.0)
+    assert left_out == [{"compared"}]  # the panoramas compared already: not matched again
+    trace = json.loads((tmp_path / "trace.json").read_text())["pm:1"]
+    assert trace["focus"] == {"panoramas": 1, "moved_m": 3.0}
+
+
+def test_a_panorama_the_focusing_pass_may_reach_is_part_of_a_photo_s_scene():
+    near_by = [_panorama(n, 1.0 * n) for n in range(cli.MATCH_PANORAMAS)]  # those compared
+
+    # not compared (beyond MATCH_RADIUS_M), but 12 m from a camera found 50 m off
+    assert _scene([*near_by, _panorama(90, 0.0, 62.0)]) != _scene(near_by)
+
+
+def test_an_areas_check_follows_the_panoramas_its_focusing_pass_may_reach():
+    from flaneur import pilot
+
+    area = pilot.AREAS["saint-severin"]
+    home = area.centroid
+    near_by = [_panorama(n, home.x + 10.0 * n, home.y) for n in range(3)]
+    before = cli._check_setup("disk", "saint-severin", near_by)
+    out = area.buffer(62.5).exterior.coords[0]  # a view's camera 50 m off: 12.5 m from it
+
+    assert cli._check_setup("disk", "saint-severin", [*near_by, _panorama(7, *out)]) != before
