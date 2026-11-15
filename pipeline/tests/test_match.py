@@ -806,6 +806,7 @@ def three_rays_north() -> np.ndarray:
 
 
 GIVEN_ROW = [-5.0, 10.0, 5.0, 10.0, 0.0, 9.0]  # a wall fitted 10 m north
+HERE = match.Panorama("here", 0.0, 0.0, 2.5, 0.0, path=None)
 
 
 def given_for_the_first(panorama, directions):
@@ -817,10 +818,8 @@ def given_for_the_first(panorama, directions):
 
 
 def test_a_ray_takes_the_depth_given_before_bd_topo():
-    here = match.Panorama("here", 0.0, 0.0, 2.5, 0.0, path=None)
-
     rays = match._cast(
-        here, np.arange(3), three_rays_north(), a_wall_20_m_north(), depth=given_for_the_first
+        HERE, np.arange(3), three_rays_north(), a_wall_20_m_north(), depth=given_for_the_first
     )
 
     assert rays.casts[0] == pytest.approx([0.0, 10.0, 2.5])
@@ -829,23 +828,19 @@ def test_a_ray_takes_the_depth_given_before_bd_topo():
 
 
 def test_a_ray_with_no_depth_given_falls_back_on_bd_topo():
-    here = match.Panorama("here", 0.0, 0.0, 2.5, 0.0, path=None)
-
     def nothing(panorama, directions):
         return np.full((len(directions), 3), np.nan), np.full((len(directions), 6), np.nan)
 
-    given = match._cast(here, np.arange(3), three_rays_north(), a_wall_20_m_north(), depth=nothing)
-    plain = match._cast(here, np.arange(3), three_rays_north(), a_wall_20_m_north())
+    given = match._cast(HERE, np.arange(3), three_rays_north(), a_wall_20_m_north(), depth=nothing)
+    plain = match._cast(HERE, np.arange(3), three_rays_north(), a_wall_20_m_north())
 
     assert np.array_equal(given.casts, plain.casts, equal_nan=True)
     assert np.array_equal(given.walls, plain.walls, equal_nan=True)
 
 
 def test_a_landmark_s_rays_never_take_the_depth_given():
-    here = match.Panorama("here", 0.0, 0.0, 2.5, 0.0, path=None)
-
     rays = match._cast(
-        here,
+        HERE,
         np.arange(3),
         three_rays_north(),
         a_wall_20_m_north(),

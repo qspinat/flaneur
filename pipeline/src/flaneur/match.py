@@ -1176,18 +1176,20 @@ def _cast(
     for them)."""
     around = blocks.near(panorama.x, panorama.y, NEAR_M)
     origin = np.array([panorama.x, panorama.y, panorama.z])
-    cast, edge = around.hit(origin, ahead)
+    cast, walls = np.full((len(ahead), 3), np.nan), np.full((len(ahead), 6), np.nan)
+    left = np.ones(len(ahead), bool)  # the rays BD TOPO's walls are to meet
+    if depth is not None and landmark is None:
+        points, rows = depth(panorama, ahead)
+        left = np.isnan(points).any(axis=1)
+        cast[~left], walls[~left] = points[~left], rows[~left]
+    hit, edge = around.hit(origin, ahead[left])
     on_wall = edge >= 0
     if landmark is not None:
         away = float(np.hypot(landmark[0] - panorama.x, landmark[1] - panorama.y))
-        on_wall &= np.hypot(*(cast[:, :2] - origin[:2]).T) <= away + OWN_M  # not beyond it
-        cast = np.where(on_wall[:, None], cast, onto(origin, ahead, landmark))
-    walls = np.where(on_wall[:, None], around.edges[np.maximum(edge, 0)], np.nan)
-    if depth is not None and landmark is None:
-        points, rows = depth(panorama, ahead)
-        given = ~np.isnan(points).any(axis=1)
-        cast = np.where(given[:, None], points, cast)
-        walls = np.where(given[:, None], rows, walls)
+        on_wall &= np.hypot(*(hit[:, :2] - origin[:2]).T) <= away + OWN_M  # not beyond it
+        hit = np.where(on_wall[:, None], hit, onto(origin, ahead, landmark))
+    cast[left] = hit
+    walls[left] = np.where(on_wall[:, None], around.edges[np.maximum(edge, 0)], np.nan)
     return Rays(
         keys,
         np.full(len(keys), panorama.id, dtype=object),
