@@ -1,5 +1,6 @@
 import json
 import threading
+from dataclasses import replace
 from types import SimpleNamespace
 
 import cv2
@@ -245,21 +246,22 @@ def _units(v: np.ndarray) -> np.ndarray:
     return v / np.linalg.norm(v, axis=1, keepdims=True)
 
 
-def _scenes(monkeypatch, tmp_path, garbled: frozenset = frozenset(), seen=None):
+def _scenes(monkeypatch, tmp_path, garbled: frozenset = frozenset(), seen=None, z=0.0, **kept):
     """Scenes around a panorama with a neighbour beside it (and one too far), their matches
     the street's two facades seen from each (those with a neighbour `garbled`, at random); and
     the pairs matched."""
-    home = match.Panorama("home", 0.0, 0.0, 0.0, 0.0, tmp_path / "h.jpg")
-    beside = match.Panorama("beside", 2.0, 1.0, 0.0, 0.0, tmp_path / "b.jpg")  # in the street
-    far = match.Panorama("far", 40.0, 0.0, 0.0, 0.0, tmp_path / "f.jpg")
+    home = match.Panorama("home", 0.0, 0.0, z, 0.0, tmp_path / "h.jpg")
+    beside = match.Panorama("beside", 2.0, 1.0, z, 0.0, tmp_path / "b.jpg")  # in the street
+    far = match.Panorama("far", 40.0, 0.0, z, 0.0, tmp_path / "f.jpg")
     asked = []
 
     def matched(a, b, views):
         asked.append((a.id, b.id))
-        seen_b = _units(STREET - [b.x, b.y, b.z])
+        street = STREET + [0.0, 0.0, z]  # the panoramas' frame
+        seen_b = _units(street - [b.x, b.y, b.z])
         if b.id in garbled:
             seen_b = _units(np.random.default_rng(0).normal(size=STREET.shape))
-        return _units(STREET - [a.x, a.y, a.z]), seen_b
+        return _units(street - [a.x, a.y, a.z]), seen_b
 
     monkeypatch.setattr(depth, "matched", matched)
     spheres = [home, beside, far]
@@ -272,6 +274,7 @@ def _scenes(monkeypatch, tmp_path, garbled: frozenset = frozenset(), seen=None):
         tmp_path / "w.jsonl",
         tmp_path / "pairs",
         seen=seen,
+        **kept,
     )
     return asked, scenes, home
 
@@ -632,6 +635,8 @@ def _match_world(tmp_path, monkeypatch, previous: dict, places) -> None:
         "ANCHORS": tmp_path / "anchors.jsonl",  # the user's verdicts: none unless a test says
         "_matching": lambda: (heights, [], lambda year: SimpleNamespace(blocks=None)),
         "_colmap_fixed": set,
+        "_wall_scenes": lambda near_by, fixed: "scenes",
+        "_wall_depth": lambda scenes, but=frozenset(): f"walls of {scenes}",
         "_matches": lambda: previous,
         "_situated": lambda: {},
         "_exported": lambda photo_id: exported,
@@ -1590,3 +1595,130 @@ def test_an_areas_check_follows_the_panoramas_its_focusing_pass_may_reach():
     out = area.buffer(62.5).exterior.coords[0]  # a view's camera 50 m off: 12.5 m from it
 
     assert cli._check_setup("disk", "saint-severin", [*near_by, _panorama(7, *out)]) != before
+
+
+class _Masks:
+    """Segmentation masks kept for some panoramas (see segment.Segmenter.kept)."""
+
+    def __init__(self, *kept: str):
+        self.ids = set(kept)
+
+    def kept(self, panorama: match.Panorama) -> bool:
+        return panorama.id in self.ids
+
+
+def _never(*args):
+    raise AssertionError("refitted: the pairs were set right again")
+
+
+def test_fitted_walls_are_read_back_without_pairing_while_their_stamp_holds(monkeypatch, tmp_path):
+    masks = _Masks("home", "beside")
+    _, scenes, _ = _scenes(monkeypatch, tmp_path, kept=tmp_path / "fitted", masks=masks)
+    scenes.scene("home", None)  # the pairs made
+    first = scenes.scene("home", None, made_only=True)
+
+    _, again, _ = _scenes(monkeypatch, tmp_path, kept=tmp_path / "fitted", masks=masks)
+    monkeypatch.setattr(again, "pair", _never)
+
+    assert again.scene("home", None, made_only=True) == first
+
+
+def test_a_pair_a_mask_a_position_the_facades_or_the_version_changed_refits_them(
+    monkeypatch, tmp_path
+):
+    masks = _Masks("home", "beside")
+    _, scenes, home = _scenes(monkeypatch, tmp_path, kept=tmp_path / "fitted", masks=masks)
+    scenes.scene("home", None)
+    stamp = scenes.stamp(home)
+
+    masks.ids.discard("beside")
+    unmasked = scenes.stamp(home)
+    masks.ids.add("beside")
+    _, moved, moved_home = _scenes(monkeypatch, tmp_path, kept=tmp_path / "fitted", masks=masks)
+    moved.spheres = [replace(p, x=2.5) if p.id == "beside" else p for p in moved.spheres]
+    moved.by_id = {p.id: p for p in moved.spheres}
+    scenes.segments = lambda x, y: [((-4.0, 0.0), (-4.0, 40.0))]
+    other_facades = scenes.stamp(home)
+    scenes.segments = lambda x, y: []
+    monkeypatch.setattr(cli, "WALLS_VERSION", cli.WALLS_VERSION + 1)
+
+    assert len({stamp, unmasked, moved.stamp(moved_home), other_facades, scenes.stamp(home)}) == 5
+
+
+def test_no_pair_on_disk_counts_in_the_stamp_until_it_is_made(monkeypatch, tmp_path):
+    _, scenes, home = _scenes(monkeypatch, tmp_path, made=frozenset())
+    before = scenes.stamp(home)
+    scenes.scene("home", None)  # pairs made: on disk now, not in the snapshot
+
+    assert scenes.stamp(home) == before
+    assert scenes.scene("home", None, made_only=True).neighbours == ()
+
+
+def test_a_cache_written_before_the_area_grew_gives_the_same_heights(monkeypatch, tmp_path):
+    masks = _Masks("home", "beside")
+    _, scenes, _ = _scenes(monkeypatch, tmp_path, kept=tmp_path / "fitted", masks=masks)
+    scenes.scene("home", None)  # the pairs made
+    low = scenes.scene("home", None, made_only=True)
+
+    _, risen, _ = _scenes(monkeypatch, tmp_path, z=5.0, kept=tmp_path / "fitted", masks=masks)
+    monkeypatch.setattr(risen, "pair", _never)  # every panorama 5 m higher: the frame moved
+    high = risen.scene("home", None, made_only=True)
+
+    assert high.ground == pytest.approx(low.ground + 5.0)
+    assert [w.top for w in high.walls] == pytest.approx([w.top + 5.0 for w in low.walls])
+
+
+def test_a_ray_meeting_a_fitted_wall_gets_its_point_and_its_wall_row(monkeypatch, tmp_path):
+    _, scenes, home = _scenes(monkeypatch, tmp_path, masks=_Masks("home", "beside"))
+    scenes.scene("home", None)  # the pairs made
+    ahead = _units(np.array([[-4.0, 10.0, 0.0]]))
+
+    points, rows = cli._wall_depth(scenes)(home, ahead)
+
+    assert points[0][0] == pytest.approx(-4.0, abs=0.3)  # on the left facade
+    assert rows[0][0] == pytest.approx(-4.0, abs=0.3) and rows[0][2] == pytest.approx(-4.0, abs=0.3)
+
+
+def test_a_panorama_without_pairs_or_masks_keeps_bd_topo_and_wakes_no_matcher(
+    monkeypatch, tmp_path
+):
+    ahead = _units(np.array([[-4.0, 10.0, 0.0]]))
+    _, unpaired, home = _scenes(monkeypatch, tmp_path, made=frozenset(), masks=_Masks("home"))
+    unpaired.views = _never
+    _, unmasked, _ = _scenes(monkeypatch, tmp_path, masks=_Masks("home"))  # not "beside"
+    unmasked.scene("home", None)  # the pairs made
+
+    assert np.isnan(cli._wall_depth(unpaired)(home, ahead)[0]).all()
+    assert np.isnan(cli._wall_depth(unmasked)(home, ahead)[0]).all()
+
+
+def test_match_s_walls_are_those_of_the_placing_page_and_the_confirmation_page(monkeypatch):
+    facades_shown = object()
+    monkeypatch.setattr(cli, "_street_segments", lambda: facades_shown)
+    near_by = [_panorama(n, 3.0 * n) for n in range(3)]
+
+    scenes = cli._wall_scenes(near_by, set())
+    shown = cli._ViewWalls(near_by, set(), None)
+
+    assert scenes.segments is facades_shown and shown.scenes.segments is facades_shown
+    assert scenes.kept == shown.scenes.kept == cli.WALLS_FITTED
+
+
+def test_match_places_from_the_walls_fitted(tmp_path, monkeypatch):
+    _match_world(tmp_path, monkeypatch, {}, lambda matcher: None)
+    given = []
+
+    def observe(image, near, blocks, views, where, trace, mine, origin_z, depth):
+        given.append(depth)
+        return views.matcher
+
+    def focus(photo, observed, found, *rest):
+        given.append(rest[-1])
+        return observed, found, None
+
+    monkeypatch.setattr(cli.match, "observe", observe)
+    monkeypatch.setattr(cli.match, "focus", focus)
+
+    cli.match_photos(photo=["pm:1"], again=False, force=True)
+
+    assert given and set(given) == {"walls of scenes"}

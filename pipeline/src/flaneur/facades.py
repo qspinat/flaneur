@@ -507,6 +507,20 @@ def cast(scene: Scene, directions: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     return metres, met
 
 
+def depth_of(scene: Scene, directions: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Where rays from the scene's camera along world unit `directions` meet its walls, and
+    those walls as Blocks' rows (x0, y0, x1, y1, the street, top); NaN where they meet the
+    street or nothing (see cast)."""
+    metres, met = cast(scene, directions)
+    on = met >= 0
+    points = np.full((len(met), 3), np.nan)
+    rows = np.full((len(met), 6), np.nan)
+    points[on] = np.asarray(scene.origin, float) + metres[on, None] * np.asarray(directions)[on]
+    edges = np.array([(*w.a, *w.b, scene.ground, w.top) for w in scene.walls], float)
+    rows[on] = edges.reshape(-1, 6)[met[on]]
+    return points, rows
+
+
 def _prisms(walls, ground: float, tops: list[float]) -> Blocks:
     """The walls as Blocks' prisms, from the street to their `tops`."""
     edges = [(*w.a, *w.b, ground, top) for w, top in zip(walls, tops, strict=True)]
@@ -643,15 +657,22 @@ def saved_at(
 
 
 def saved_near(
-    path: Path, x: float, y: float, radius: float = NEAR_M, now: dict | None = None
+    path: Path,
+    x: float,
+    y: float,
+    radius: float = NEAR_M,
+    now: dict | None = None,
+    but: frozenset[str] = frozenset(),
 ) -> tuple[list[Wall], list[Segment]]:
     """The walls drawn and removed (the latest row of each panorama) reaching within `radius`
     of (x, y). A wall drawn at one panorama loses the stretches removed at others after it was
     drawn (a wall drawn after a removal near it stays). (A panorama's row holds the walls drawn
-    there, not those drawn at others.)"""
+    there, not those drawn at others.) The rows of the panoramas `but` are left out."""
     drawn: list[Wall] = []
     removals: list[tuple[Segment, int, str]] = []
     for panorama, row in _latest(path).items():
+        if panorama in but:
+            continue
         walls, removed, ages = _read(row, now)
         drawn += [w for w in walls if _distance((x, y), (w.a, w.b)) <= radius]
         removals += [

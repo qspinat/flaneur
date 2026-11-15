@@ -93,6 +93,9 @@ PAIR_MATCHES = (  # each pair's raw matches, made once (matcher), as views are c
 )
 MERGED_M = 0.3  # BD TOPO's buildings this close are one block (their facades: see _street_facades)
 KEPT_SCENES = 16  # panoramas' walls the placing page keeps
+WALLS_FITTED = DATA / "raw" / "walls_fitted"  # each panorama's walls fitted, kept (see _Scenes)
+WALLS_VERSION = 1  # raised by hand when what the walls are fitted by changes beyond the files
+# hashed in _walls_code
 KEPT_PAIRS = KEPT_SCENES * depth.MOST_CANDIDATES  # their pairs set right (about 250 kB each)
 FIXES = DATA / "pilot" / "panorama_fixes.json"  # panoramas placed with each other (reconstruct)
 PLACINGS = DATA / "overrides" / "placings.jsonl"  # the user's answers on the placing page
@@ -443,12 +446,19 @@ class _Scenes:
         walls_path: Path,
         matches: Path = PAIR_MATCHES,
         seen: Callable[[match.Panorama, np.ndarray], np.ndarray] | None = None,
+        *,
+        kept: Path | None = None,
+        made: frozenset[str] | None = None,
+        masks: segment.Segmenter | None = None,
     ):
         self.by_id = {p.id: p for p in spheres}
         self.now = placings.where(spheres)  # drawn walls follow their panorama
         self.spheres, self.fixed, self.views, self.lock = spheres, fixed, views, lock
         self.segments, self.walls_path, self.matches = segments, walls_path, matches
         self.seen = seen
+        self.kept = kept  # the walls fitted from the pairs on disk alone, kept there (see stamp)
+        self.made = made  # the pairs' files on disk, listed once (none: looked at each time)
+        self.masks = masks  # whose segmentation is made (see segmented and stamp)
         self.paired: OrderedDict[tuple[str, str], _Paired | None] = OrderedDict()
         self.fitted: OrderedDict[tuple, facades.Scene | None] = OrderedDict()
         self.guard = threading.Lock()  # the kept ones, read and changed one thread at a time
@@ -533,11 +543,17 @@ class _Scenes:
         return any(self._made(home, p) for p in depth.candidates(home, self.spheres, self.fixed))
 
     def scene(
-        self, panorama: str, chosen: Iterable[str] | None, made_only: bool = False
+        self,
+        panorama: str,
+        chosen: Iterable[str] | None,
+        made_only: bool = False,
+        but: frozenset[str] = frozenset(),
     ) -> facades.Scene | None:
         """The walls around a panorama, from the neighbours `chosen` (else those 2-15 m off:
         see depth.candidates; `made_only`, those matched with it already: the matcher never
-        woken), with those drawn and removed by hand; none for a panorama not known."""
+        woken), with those drawn and removed by hand; none for a panorama not known. `but`:
+        panoramas left out, as neighbours and as where walls were drawn. Fitted from the pairs
+        on disk alone, by geometry, they are kept in `kept` (see stamp)."""
         home = self.by_id.get(panorama)
         if home is None:
             return None
@@ -547,18 +563,24 @@ class _Scenes:
             if chosen is None
             else [self.by_id[i] for i in chosen if i in self.by_id and i != home.id]
         )
+        asked = [p for p in asked if p.id not in but]
         if made_only:
             asked = [p for p in asked if self._made(home, p)]
-        found = {p.id: f for p in asked if (f := self.pair(home, p))}
-        neighbours = tuple(sorted(found))
-        fitted = self._kept(
-            self.fitted,
-            (panorama, chosen, neighbours),
-            KEPT_SCENES,
-            lambda: self._fit(home, chosen, [found[i] for i in neighbours], neighbours),
-            self.fitting,
-        )
-        drawn = facades.saved_near(self.walls_path, home.x, home.y, now=self.now)
+        keep = self.kept is not None and made_only and chosen is None and not but
+        fitted = self._read(home, asked) if keep else None
+        if fitted is None:
+            found = {p.id: f for p in asked if (f := self.pair(home, p))}
+            neighbours = tuple(sorted(found))
+            fitted = self._kept(
+                self.fitted,
+                (panorama, chosen, neighbours, but),
+                KEPT_SCENES,
+                lambda: self._fit(home, chosen, [found[i] for i in neighbours], neighbours),
+                self.fitting,
+            )
+            if keep:
+                self._write(home, asked, fitted)
+        drawn = facades.saved_near(self.walls_path, home.x, home.y, now=self.now, but=but)
         walls = facades.with_drawn(list(fitted.walls), *drawn, fitted.ground)
         return replace(fitted, walls=tuple(walls))
 
@@ -572,7 +594,74 @@ class _Scenes:
         return _details_of(home, [f for p in neighbours if (f := self.pair(home, p))])
 
     def _made(self, home: match.Panorama, other: match.Panorama) -> bool:
-        return self._path(home, other).exists()
+        path = self._path(home, other)
+        return path.name in self.made if self.made is not None else path.exists()
+
+    def segmented(self, home: match.Panorama, neighbours: Iterable[str]) -> bool:
+        """Whether a panorama and its scene's `neighbours` are all segmented (none asked
+        without `masks`): walls fitted without it take trees for facades."""
+        ids = [home.id, *neighbours]
+        return self.masks is None or all(self.masks.kept(self.by_id[i]) for i in ids)
+
+    def stamp(self, home: match.Panorama, asked: list[match.Panorama] | None = None) -> str:
+        """What a panorama's walls fitted from the pairs on disk are made from (`asked`: its
+        neighbours matched with it, by default all on disk): the pairs, where each panorama
+        stands from it (its height too: the frame of heights moves as the area grows), whether
+        each is segmented, BD TOPO's facades the fit starts from, and the code."""
+        if asked is None:
+            candidates = depth.candidates(home, self.spheres, self.fixed)
+            asked = [p for p in candidates if self._made(home, p)]
+        panoramas = [
+            (
+                _levelled_name(p),
+                round(p.x - home.x, 2),
+                round(p.y - home.y, 2),
+                round(p.z - home.z, 2),
+                self.masks.kept(p) if self.masks is not None else None,
+            )
+            for p in [home, *asked]
+        ]
+        facades_near = [
+            [round(c, 2) for end in s for c in end] for s in self.segments(home.x, home.y)
+        ]
+        made = [WALLS_VERSION, _walls_code(), round(home.x, 2), round(home.y, 2)]
+        text = json.dumps([made, panoramas, facades_near])
+        return hashlib.sha1(text.encode()).hexdigest()[:16]
+
+    def _kept_path(self, home: match.Panorama) -> Path:
+        return self.kept / f"{_levelled_name(home)}.json"
+
+    def _read(self, home: match.Panorama, asked: list[match.Panorama]) -> facades.Scene | None:
+        """A panorama's walls fitted as kept, if made from what it is matched with now."""
+        path = self._kept_path(home)
+        if not path.exists() or (row := json.loads(path.read_text()))["stamp"] != self.stamp(
+            home, asked
+        ):
+            return None
+        walls = tuple(
+            facades.Wall((ax, ay), (bx, by), None if top is None else home.z + top, made)
+            for ax, ay, bx, by, top, made in row["walls"]
+        )  # heights from the panorama's: the frame of heights moves as the area grows
+        origin = tuple(placing._at(home))
+        ground = home.z + row["ground"]
+        return facades.Scene(
+            home.id, origin, ground, walls, tuple(row["neighbours"]), row["details"]
+        )
+
+    def _write(self, home: match.Panorama, asked: list[match.Panorama], fitted) -> None:
+        def top(w: facades.Wall) -> float | None:
+            return None if w.top is None else w.top - home.z
+
+        write_json(
+            self._kept_path(home),
+            {
+                "stamp": self.stamp(home, asked),
+                "ground": fitted.ground - home.z,
+                "walls": [[*w.a, *w.b, top(w), w.made] for w in fitted.walls],
+                "neighbours": list(fitted.neighbours),
+                "details": fitted.details,
+            },
+        )
 
     def _path(self, home: match.Panorama, other: match.Panorama) -> Path:
         return self.matches / f"{_levelled_name(home)}__{_levelled_name(other)}.npz"
@@ -1567,6 +1656,7 @@ class _Run(NamedTuple):
     heights: scene.CameraHeights
     blocks: Blocks
     fixed: set[str]  # the panoramas COLMAP placed (see match.around)
+    depth: match.Depth  # where rays meet today's walls fitted, before BD TOPO's (see _wall_depth)
     scenes: dict[str, str]  # what each photo's match is found from (see _scenes)
     found: dict
     tried: dict[str, list[str]]
@@ -1599,7 +1689,7 @@ def _match_with(matcher: str, photos: list[export.WalkPhoto], at: _Run) -> None:
         trace = match.Trace()
         mine = store.features(me.id, _image(me.id), lambda image=image: match.shrunk(image))
         observed = match.observe(
-            image, near, at.blocks, views, where, trace, mine, at.heights.origin_z
+            image, near, at.blocks, views, where, trace, mine, at.heights.origin_z, at.depth
         )
         first = match.place(observed, where, trace)
         observed, (camera, walls, points), focus = match.focus(
@@ -1616,6 +1706,7 @@ def _match_with(matcher: str, photos: list[export.WalkPhoto], at: _Run) -> None:
             trace,
             mine,
             at.heights.origin_z,
+            at.depth,
         )
         store.save_observed(me.id, inputs, observed)
         at.traces[me.id] = at.run[me.id] = {  # the caption's place; what it was matched from
@@ -1710,12 +1801,14 @@ def match_photos(
             to_try[me.id] = _left_to_try(kept, inputs, turned_down)
         area = checked[_area_of(_place_of(me))]  # the matchers checked where it stands
         to_try[me.id] = [m for m in to_try[me.id] if m in area]
+    fixed = _colmap_fixed()
     at = _Run(
         near_by=near_by,
         then=then,
         heights=heights,
         blocks=blocks,
-        fixed=_colmap_fixed(),
+        fixed=fixed,
+        depth=_wall_depth(_wall_scenes(near_by, fixed)),
         scenes=scenes,
         found=found,
         tried=tried,
@@ -2699,16 +2792,76 @@ def _no_matcher() -> match.Views:
     raise RuntimeError("la page de confirmation ne réveille pas l'apparieur")
 
 
+@functools.cache
+def _walls_code() -> str:
+    """The code walls are fitted by (beside cli's _Scenes, see WALLS_VERSION), hashed."""
+    digest = hashlib.sha1()
+    for module in (facades, depth, segment):
+        digest.update(Path(module.__file__).read_bytes())
+    return digest.hexdigest()[:16]
+
+
+@functools.cache  # for one command: the area's buildings read once
+def _street_segments() -> Callable[[float, float], list[facades.Segment]]:
+    """BD TOPO's street facades the walls are fitted from, as the placing page has them (see
+    _placing_world): for match, the check and the confirmation page alike."""
+    with closing(db.connect(DB_PATH)) as conn:
+        area = placements.area(conn, buildings.MARGIN_M)
+    return _street_facades(_buildings(area))
+
+
+def _wall_scenes(near_by: list[match.Panorama], fixed: set[str]) -> _Scenes:
+    """Today's walls around panoramas from the pairs on disk alone (listed once: the matcher
+    never woken), segmented as `flaneur segmenter` left them, kept in WALLS_FITTED: those match
+    places its points on, and the confirmation page draws the parallax from."""
+    masks = segment.Segmenter(VIEW_STRUCTURE, threading.Lock(), _levelled_name, make=False)
+    made = frozenset(p.name for p in PAIR_MATCHES.glob("*.npz"))
+    return _Scenes(
+        near_by,
+        fixed,
+        _no_matcher,
+        threading.Lock(),
+        _street_segments(),
+        WALLS,
+        seen=_seeing(False, masks),
+        kept=WALLS_FITTED,
+        made=made,
+        masks=masks,
+    )
+
+
+def _wall_depth(scenes: _Scenes, but: frozenset[str] = frozenset()) -> match.Depth:
+    """Where rays from a panorama meet its walls fitted (see match.Depth), each panorama's
+    scene made once: those of a panorama segmented with its neighbours, else the walls drawn
+    near it only; none where it has none. `but`: panoramas left out (see _Scenes.scene)."""
+    kept: dict[str, facades.Scene | None] = {}
+
+    def scene_of(panorama: match.Panorama) -> facades.Scene | None:
+        if panorama.id not in kept:
+            found = scenes.scene(panorama.id, None, made_only=True, but=but)
+            if found is not None and not scenes.segmented(panorama, found.neighbours):
+                found = scenes.scene(panorama.id, (), made_only=True, but=but)  # drawn only
+            kept[panorama.id] = found if found is not None and found.walls else None
+        return kept[panorama.id]
+
+    def depth_of(panorama: match.Panorama, directions: np.ndarray) -> tuple:
+        scene = scene_of(panorama)
+        if scene is None:
+            n = len(directions)
+            return np.full((n, 3), np.nan), np.full((n, 6), np.nan)
+        return facades.depth_of(scene, directions)
+
+    return depth_of
+
+
 class _ViewWalls:
     """The walls the confirmation page draws the parallax from: each panorama's own, fitted
-    from the neighbours it is matched with already (see _Scenes: the matcher never woken), and
+    from the neighbours it is matched with already (see _wall_scenes: those match saw), and
     BD TOPO's (`blocks`) where they say nothing."""
 
-    def __init__(self, near_by: list[match.Panorama], fixed: set[str], segments, blocks: Blocks):
+    def __init__(self, near_by: list[match.Panorama], fixed: set[str], blocks: Blocks):
         self.blocks = blocks
-        self.scenes = _Scenes(
-            near_by, fixed, _no_matcher, threading.Lock(), segments, WALLS, seen=_seeing(False)
-        )
+        self.scenes = _wall_scenes(near_by, fixed)
         self._fitted: dict[str, bool] = {}
 
     def fitted(self, panorama: match.Panorama) -> bool:
@@ -2761,7 +2914,7 @@ def confirm_placed(port: int = 8768, open_browser: bool = True) -> None:
     titles = {me.id: me.title for me in walk}
     places = {me.id: _place_of(me) for me in walk}
     today = then(date.today().year)
-    walls = _ViewWalls(near_by, fixed, _street_facades(today.standing), today.blocks)
+    walls = _ViewWalls(near_by, fixed, today.blocks)
     by_id = {p.id: p for p in near_by}
     chained = _chained()
     situated, rounds = _with_chained(_situated(), chained, set(titles))
