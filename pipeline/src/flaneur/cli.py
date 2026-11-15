@@ -18,6 +18,7 @@ from datetime import date
 from enum import StrEnum
 from http.server import HTTPServer
 from pathlib import Path
+from types import ModuleType
 from typing import Annotated, NamedTuple
 
 import cv2
@@ -540,8 +541,9 @@ class _Scenes:
         return rays_a.astype(float), rays_b.astype(float)
 
     def has_pairs(self, home: match.Panorama) -> bool:
-        """Whether a panorama is matched with a neighbour already (see scene, `made_only`)."""
-        return any(self._made(home, p) for p in depth.candidates(home, self.spheres, self.fixed))
+        """Whether a panorama is matched with a neighbour already, both segmented when that
+        is asked (see scene, `made_only`)."""
+        return bool(self._asked(home))
 
     def scene(
         self,
@@ -860,18 +862,17 @@ RIGHT_M, RIGHT_DEG = 3.0, 5.0  # a camera found farther off than this is a wrong
 WRONG_SHARE = 0.05  # of all the views, bands and decoys: at most this share wrong
 
 
-@functools.cache
 def _above(z: float, height: float | None) -> float | None:
     """A height from `z` (none: none)."""
     return None if height is None else z + height
 
 
-def _digest(data) -> str:
+def _digest(data: object) -> str:
     """Data that is JSON, hashed (16 hex digits)."""
     return hashlib.sha1(json.dumps(data).encode()).hexdigest()[:16]
 
 
-def _hash_of(*modules) -> str:
+def _hash_of(*modules: ModuleType) -> str:
     """The source of `modules`, hashed (16 hex digits)."""
     digest = hashlib.sha1()
     for module in modules:
@@ -879,6 +880,7 @@ def _hash_of(*modules) -> str:
     return digest.hexdigest()[:16]
 
 
+@functools.cache
 def _code() -> str:
     """The code a camera is found by (the check's own landmarks among it): a match or a check
     found by other code is stale."""

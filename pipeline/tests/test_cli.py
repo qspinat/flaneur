@@ -1735,3 +1735,20 @@ def test_match_places_from_the_walls_fitted(tmp_path, monkeypatch):
     cli.match_photos(photo=["pm:1"], again=False, force=True)
 
     assert given and set(given) == {"walls of scenes"}
+
+
+def test_the_code_is_hashed_once_a_command(monkeypatch):
+    hashed = []
+    real = cli._hash_of
+    monkeypatch.setattr(cli, "_hash_of", lambda *modules: hashed.append(1) or real(*modules))
+    cli._code.cache_clear()
+
+    assert cli._code() == cli._code() and len(hashed) == 1
+
+
+def test_a_panorama_paired_but_not_segmented_has_no_walls_of_its_own(monkeypatch, tmp_path):
+    _, unmasked, home = _scenes(monkeypatch, tmp_path)
+    unmasked.scene("home", None)  # the pairs made
+    _, scenes, _ = _scenes(monkeypatch, tmp_path, masks=_Masks("beside"))  # not "home"
+
+    assert unmasked.has_pairs(home) and not scenes.has_pairs(home)
