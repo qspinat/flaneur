@@ -517,12 +517,12 @@ class _Scenes:
         match.Views). Kept as float32, and used so when just made: the same walls either way.
         A pair is matched once: kept the other way round, it is read so (as good: measured
         16/11, a neighbour held out)."""
+        if stored := self._stored(home, other):
+            path, back = stored
+            with np.load(path) as found:
+                a, b = found["a"].astype(float), found["b"].astype(float)
+            return (b, a) if back else (a, b)
         path = self._path(home, other)
-        for kept, back in ((path, False), (self._path(other, home), True)):
-            if kept.exists():
-                with np.load(kept) as found:
-                    a, b = found["a"].astype(float), found["b"].astype(float)
-                return (b, a) if back else (a, b)
         with self.lock:
             rays_a, rays_b = (
                 r.astype(np.float32) for r in depth.matched(home, other, self.views())
@@ -576,8 +576,15 @@ class _Scenes:
         return _details_of(home, [f for p in neighbours if (f := self.pair(home, p))])
 
     def _made(self, home: match.Panorama, other: match.Panorama) -> bool:
-        """Whether a pair is matched already, either way round (see _rays)."""
-        return self._path(home, other).exists() or self._path(other, home).exists()
+        return self._stored(home, other) is not None
+
+    def _stored(self, home: match.Panorama, other: match.Panorama) -> tuple[Path, bool] | None:
+        """Where a pair is kept, either way round, and whether the other way (its rays then
+        read swapped: see _rays); none if not matched yet."""
+        for path, back in ((self._path(home, other), False), (self._path(other, home), True)):
+            if path.exists():
+                return path, back
+        return None
 
     def _path(self, home: match.Panorama, other: match.Panorama) -> Path:
         return self.matches / f"{_levelled_name(home)}__{_levelled_name(other)}.npz"
