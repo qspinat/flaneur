@@ -150,6 +150,15 @@ def test_homes_with_pairs_are_counted_under_their_own_names(tmp_path):
     assert cli._paired_homes([a, b], tmp_path) == [a]
 
 
+def test_a_pair_kept_under_the_other_s_name_counts_for_both(tmp_path):
+    a = match.Panorama("a", 0.0, 0.0, 0.0, 10.0, tmp_path / "a.jpg")
+    for n in range(2):
+        (tmp_path / f"x{n}_0.0_0.00_0.00__{cli._levelled_name(a)}.npz").touch()
+    (tmp_path / f"{cli._levelled_name(a)}__x2_0.0_0.00_0.00.npz").touch()
+
+    assert cli._paired_homes([a], tmp_path) == [a]
+
+
 def test_parallaxe_with_nothing_to_compare_says_so_before_loading_the_world(tmp_path, monkeypatch):
     def world(**_):
         raise AssertionError("the world loaded for nothing")
@@ -431,6 +440,18 @@ def test_details_from_the_pairs_already_made_never_wake_the_matcher(monkeypatch,
     after = scenes.details(home, candidates, made_only=True)
 
     assert len(before) == 0 and asked == [("home", "beside")] and len(after) > 0
+
+
+def test_a_pair_matched_one_way_serves_the_other_panorama(monkeypatch, tmp_path):
+    asked, scenes, home = _scenes(monkeypatch, tmp_path)
+    own = scenes.scene("home", None)  # home with beside: matched, kept as home__beside
+
+    seen_back = scenes.scene("beside", None)  # beside with home: the same pair, read back
+    beside = scenes.by_id["beside"]
+
+    assert asked == [("home", "beside")]
+    assert scenes._made(beside, home) and len(seen_back.walls) == len(own.walls) == 2
+    assert len(scenes.details(beside, [home], made_only=True)) > 0
 
 
 def _kept(**more) -> dict:
@@ -1871,3 +1892,13 @@ def test_a_redo_for_new_walls_cut_short_is_taken_up_again(tmp_path, monkeypatch)
 
     written = tmp_path / "matches.json"
     assert not written.exists() or json.loads(written.read_text())["pm:1"] == before
+
+
+def test_a_pair_listed_at_the_start_the_other_way_round_is_made(monkeypatch, tmp_path):
+    name = cli._levelled_name
+    home, beside = (match.Panorama(i, 0.0, 0.0, 0.0, 0.0, tmp_path / f"{i}.jpg") for i in "hb")
+    _, scenes, _ = _scenes(
+        monkeypatch, tmp_path, made=frozenset({f"{name(beside)}__{name(home)}.npz"})
+    )
+
+    assert scenes._made(home, beside) and not scenes._made(beside, scenes.by_id["far"])

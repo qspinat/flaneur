@@ -526,11 +526,15 @@ class _Scenes:
     def _rays(self, home: match.Panorama, other: match.Panorama) -> tuple[np.ndarray, np.ndarray]:
         """The pair's matched rays (see depth.matched), from disk once made: they are the same
         while the two panoramas are levelled as they are (in the name, as their views': see
-        match.Views). Kept as float32, and used so when just made: the same walls either way."""
-        path = self._path(home, other)
-        if path.exists():
+        match.Views). Kept as float32, and used so when just made: the same walls either way.
+        A pair is matched once: kept the other way round, it is read so (as good: measured
+        16/11, a neighbour held out)."""
+        if stored := self._stored(home, other):
+            path, back = stored
             with np.load(path) as found:
-                return found["a"].astype(float), found["b"].astype(float)
+                a, b = found["a"].astype(float), found["b"].astype(float)
+            return (b, a) if back else (a, b)
+        path = self._path(home, other)
         with self.lock:
             rays_a, rays_b = (
                 r.astype(np.float32) for r in depth.matched(home, other, self.views())
@@ -614,8 +618,23 @@ class _Scenes:
         return _details_of(home, [f for p in neighbours if (f := self.pair(home, p))])
 
     def _made(self, home: match.Panorama, other: match.Panorama) -> bool:
-        path = self._path(home, other)
-        return path.name in self.made if self.made is not None else path.exists()
+        """Whether a pair is matched already, either way round: as listed at the start (`made`),
+        else on disk."""
+        listed = None if self.made is None else (lambda path: path.name in self.made)
+        return self._stored(home, other, listed or Path.exists) is not None
+
+    def _stored(
+        self,
+        home: match.Panorama,
+        other: match.Panorama,
+        there: Callable[[Path], bool] = Path.exists,
+    ) -> tuple[Path, bool] | None:
+        """Where a pair is kept (`there`: on disk), either way round, and whether the other way
+        (its rays then read swapped: see _rays); none if not matched yet."""
+        for path, back in ((self._path(home, other), False), (self._path(other, home), True)):
+            if there(path):
+                return path, back
+        return None
 
     def _masked(self, panorama: match.Panorama) -> bool:
         """Whether a panorama is segmented (all are, without `masks`), asked once a run."""
@@ -3395,8 +3414,9 @@ def _page_closed(page: int) -> None:
 
 def _paired_homes(spheres: list[match.Panorama], folder: Path) -> list[match.Panorama]:
     """The panoramas with three pairs or more kept in `folder` under their name as they stand
-    (see _levelled_name: a panorama turned since has others), by id."""
-    made = Counter(f.name.split("__")[0] for f in folder.glob("*.npz"))
+    (see _levelled_name: a panorama turned since has others), either way round, by id."""
+    pairs = {frozenset(f.stem.split("__")) for f in folder.glob("*.npz")}
+    made = Counter(name for pair in pairs for name in pair)
     return sorted((p for p in spheres if made[_levelled_name(p)] >= 3), key=lambda p: p.id)
 
 
