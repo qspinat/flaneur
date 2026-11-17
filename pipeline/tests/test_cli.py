@@ -2149,19 +2149,40 @@ def test_walls_masks_only_segments_what_is_missing(monkeypatch):
     assert made == [beside.id]
 
 
-def test_walls_stop_between_two_panoramas_after_the_hour(monkeypatch, tmp_path):
-    _, scenes, home = _scenes(monkeypatch, tmp_path, kept=tmp_path / "fitted")
-    hours = iter([0.0, 10.0, 20.0])
-
-    done = cli._make_walls([home, home, home], scenes, until=5.0, clock=lambda: next(hours))
-
-    assert done == 1
-
-
 def test_walls_made_are_cached_for_match(monkeypatch, tmp_path):
     asked, scenes, home = _scenes(monkeypatch, tmp_path, kept=tmp_path / "fitted")
 
-    cli._make_walls([home], scenes, until=float("inf"))
+    cli._make_walls([home], scenes)
 
     assert asked == [("home", "beside")]  # the pair made
     assert (tmp_path / "fitted" / f"{cli._levelled_name(home)}.json").exists()  # its walls kept
+
+
+def test_walls_made_again_pair_nothing_and_read_what_was_kept(monkeypatch, tmp_path):
+    _, scenes, home = _scenes(monkeypatch, tmp_path, kept=tmp_path / "fitted")
+    cli._make_walls([home], scenes)
+    made = frozenset(p.name for p in (tmp_path / "pairs").glob("*.npz"))
+    _, again, _ = _scenes(monkeypatch, tmp_path, kept=tmp_path / "fitted", made=made)
+    monkeypatch.setattr(again, "pair", _never)  # nothing new: no pair set right, no fit
+    first = scenes.scene("home", None, made_only=True)
+
+    cli._make_walls([home], again)
+
+    assert again.scene("home", None, made_only=True).walls == first.walls  # as match reads them
+
+
+def test_a_panorama_that_cannot_be_segmented_leaves_the_others_segmented(monkeypatch):
+    broken, home, beside = (_panorama(n, 5.0 * n, 0.0) for n in range(3))
+    monkeypatch.setattr(cli.depth, "candidates", lambda home, spheres, fixed: [])
+    made = []
+
+    def make(p):
+        if p is broken:
+            raise MemoryError("out of memory")
+        made.append(p.id)
+
+    masks = SimpleNamespace(kept=lambda p: False, made=make)
+
+    cli._segment_homes([broken, home, beside], [broken, home, beside], set(), masks)
+
+    assert made == [home.id, beside.id]

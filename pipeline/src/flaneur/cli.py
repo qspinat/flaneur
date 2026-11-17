@@ -14,7 +14,7 @@ from collections import Counter, OrderedDict, defaultdict
 from collections.abc import Callable, Iterable, Sequence, Set
 from contextlib import closing
 from dataclasses import asdict, fields, replace
-from datetime import date, datetime, timedelta
+from datetime import date
 from enum import StrEnum
 from http.server import HTTPServer
 from pathlib import Path
@@ -554,6 +554,15 @@ class _Scenes:
             path.parent.mkdir(parents=True, exist_ok=True)
             write_atomic(path, lambda out: np.savez(out, a=rays_a, b=rays_b))
         return rays_a.astype(float), rays_b.astype(float)
+
+    def make(self, home: match.Panorama) -> facades.Scene | None:
+        """A panorama matched with those of its neighbours (see _asked) it is not matched with
+        yet, either way round, and its walls fitted from the pairs on disk, kept (see scene,
+        `made_only`): nothing new, nothing paired or fitted again."""
+        for other in self._asked(home, None, made_only=False):
+            if not self._made(home, other):
+                self.pair(home, other)
+        return self.scene(home.id, None, made_only=True)
 
     def has_pairs(self, home: match.Panorama) -> bool:
         """Whether a panorama is matched with a neighbour already, both segmented when that
@@ -2904,20 +2913,18 @@ def _street_segments() -> Callable[[float, float], list[facades.Segment]]:
 def _wall_scenes(
     near_by: list[match.Panorama],
     fixed: set[str],
-    views: Callable[[], match.Views] = _no_matcher,
+    views: Callable[[], match.Views] | None = None,
 ) -> _Scenes:
     """Today's walls around panoramas from the pairs on disk alone (listed once: the matcher
     never woken), segmented as `flaneur segmenter` left them, kept in WALLS_FITTED: those match
     places its points on, and the confirmation page draws the parallax from. With `views` (see
     _views), pairs are matched as needed (flaneur murs): those on disk looked at each time."""
     masks = segment.Segmenter(VIEW_STRUCTURE, threading.Lock(), _levelled_name, make=False)
-    made = (
-        None if views is not _no_matcher else frozenset(p.name for p in PAIR_MATCHES.glob("*.npz"))
-    )
+    made = None if views else frozenset(p.name for p in PAIR_MATCHES.glob("*.npz"))
     return _Scenes(
         near_by,
         fixed,
-        views,
+        views or _no_matcher,
         threading.Lock(),
         _street_segments(),
         WALLS,
@@ -2956,61 +2963,60 @@ def _wall_homes(
 
 
 def _segment_homes(
-    homes: list[match.Panorama], spheres: list[match.Panorama], fixed: set[str], masks
+    homes: list[match.Panorama],
+    spheres: list[match.Panorama],
+    fixed: set[str],
+    masks: segment.Segmenter,
 ) -> None:
     """Segments, in the order of `homes`, each one and its neighbours walls are fitted from
-    (see depth.candidates) that has no mask yet (`masks`: a segment.Segmenter that makes them)."""
+    (see depth.candidates) that has no mask yet (`masks` makes them)."""
+    seen: set[str] = set()
+    wanted = [
+        p
+        for home in homes
+        for p in [home, *depth.candidates(home, spheres, fixed)]
+        if not (p.id in seen or seen.add(p.id))
+    ]
+    _segment_each([p for p in wanted if not masks.kept(p)], masks)
+
+
+def _segment_each(panoramas: list[match.Panorama], masks: segment.Segmenter) -> None:
+    """Segments each panorama in turn; one that fails (memory, a picture) is said and left,
+    the others go on."""
+    started = time.monotonic()
+    for n, panorama in enumerate(panoramas, 1):
+        try:
+            if masks.made(panorama) is None:
+                typer.echo(f"{panorama.id} : image illisible")
+        except Exception as error:  # this one left: the others go on
+            typer.echo(f"{panorama.id} : laissé ({error})", err=True)
+        if n % 50 == 0 or n == len(panoramas):
+            typer.echo(f"{n}/{len(panoramas)} ({time.monotonic() - started:.0f} s)")
+
+
+def _make_walls(homes: list[match.Panorama], scenes: _Scenes) -> None:
+    """Each home matched with its neighbours and its walls fitted and kept (see _Scenes.make),
+    in order. Stopped at any time, it loses one panorama at most: each pair and walls kept are
+    written whole."""
     for n, home in enumerate(homes, 1):
-        for p in [home, *depth.candidates(home, spheres, fixed)]:
-            if not masks.kept(p):
-                started = time.monotonic()
-                masks.made(p)
-                typer.echo(f"{n} {p.id} segmenté en {time.monotonic() - started:.1f} s")
-
-
-def _make_walls(
-    homes: list[match.Panorama],
-    scenes: _Scenes,
-    until: float,
-    clock: Callable[[], float] = time.time,
-) -> int:
-    """Each home matched with its neighbours (the pairs missing, see _Scenes.pair) and its walls
-    fitted and kept (see _Scenes.scene, `made_only`), in order, until the hour `until` (epoch
-    seconds: checked between two panoramas); how many were made."""
-    for n, home in enumerate(homes):
-        if clock() > until:
-            typer.echo("arrêté : l'heure est passée")
-            return n
         started = time.monotonic()
-        for other in scenes._asked(home, None, made_only=False):
-            scenes.pair(home, other)
-        found = scenes.scene(home.id, None, made_only=True)
+        found = scenes.make(home)
         walls = 0 if found is None else len(found.walls)
-        typer.echo(f"{n + 1} {home.id} : {walls} murs en {time.monotonic() - started:.1f} s")
-    return len(homes)
-
-
-def _until(hour: str | None) -> float:
-    """The next time it is `hour` ("HH:MM"), in epoch seconds; never (none)."""
-    if hour is None:
-        return float("inf")
-    at = datetime.combine(date.today(), datetime.strptime(hour, "%H:%M").time())
-    return (at if at > datetime.now() else at + timedelta(days=1)).timestamp()
+        typer.echo(f"{n} {home.id} : {walls} murs en {time.monotonic() - started:.1f} s")
 
 
 @app.command("murs")
 def make_walls(
     masques: Annotated[bool, typer.Option(help="seulement la segmentation qui manque")] = False,
-    jusqua: Annotated[
-        str | None, typer.Option(help="s'arrête entre deux panoramas passé cette heure (HH:MM)")
-    ] = None,
+    page: Annotated[int, typer.Option(help="le port de la page pour placer")] = 8772,
 ) -> None:
     """Fait les murs ajustés que `match` et la page de confirmation lisent : chaque panorama à
     moins de SCENE_REACH_M d'une photo, apparié à ses voisins (DISK, une fois par paire), ses
     murs ajustés et gardés ; près des placements d'abord, puis dans les quartiers, puis le
     reste, le plus près d'une photo d'abord. `--masques` : seulement la segmentation qui leur
     manque (le modèle et l'apparieur ne tiennent pas ensemble en mémoire : deux passages).
-    Reprend où il s'était arrêté."""
+    Reprend où il s'était arrêté ; refusé pendant que la page pour placer tourne (mémoire)."""
+    _page_closed(page)
     heights, near_by, then = _matching()  # as match has them: the walls kept are its own
     with closing(db.connect(DB_PATH)) as conn:
         walk = export.photos(conn, DATA / "pilot", REVIEWS)
@@ -3023,7 +3029,7 @@ def make_walls(
         masks = segment.Segmenter(VIEW_STRUCTURE, threading.Lock(), _levelled_name)
         _segment_homes(homes, near_by, fixed, masks)
         return
-    _make_walls(homes, _wall_scenes(near_by, fixed, lambda: _views(kept=8)), _until(jusqua))
+    _make_walls(homes, _wall_scenes(near_by, fixed, lambda: _views(kept=8)))
 
 
 def _wall_depth(scenes: _Scenes, but: frozenset[str] = frozenset()) -> match.Depth:
@@ -3682,15 +3688,7 @@ def segment_panoramas(answers: Path = PLACINGS, page: int = 8772) -> None:
         return
     left = [p for p in reached if not segmenter.kept(p)]
     typer.echo(f"{len(reached)} panoramas à moins de {reach:g} m d'une photo, {len(left)} à faire")
-    started = time.monotonic()
-    for n, panorama in enumerate(left, 1):
-        try:
-            if segmenter.made(panorama) is None:
-                typer.echo(f"{panorama.id} : image illisible")
-        except Exception as error:  # this one left (memory, a picture): the others go on
-            typer.echo(f"{panorama.id} : laissé ({error})", err=True)
-        if n % 50 == 0 or n == len(left):
-            typer.echo(f"{n}/{len(left)} ({time.monotonic() - started:.0f} s)")
+    _segment_each(left, segmenter)
 
 
 LIDAR_MNS = DATA / "raw" / "lidar_mns"  # IGN's LiDAR HD surface model, patches around panoramas
