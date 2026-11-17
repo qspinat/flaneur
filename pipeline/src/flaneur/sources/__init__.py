@@ -17,7 +17,8 @@ def write_atomic(path: Path, write: Callable[[BinaryIO], None]) -> None:
     two processes writing it at once each name a whole draft of their own (the last wins)."""
     path.parent.mkdir(parents=True, exist_ok=True)
     for left in path.parent.glob(f"{glob.escape(path.name)}.*-*.tmp"):  # a writer killed
-        if not _alive(int(left.name[len(path.name) + 1 :].split("-")[0])):
+        pid = left.name[len(path.name) + 1 :].split("-")[0]
+        if pid.isdigit() and not _alive(int(pid)):
             left.unlink(missing_ok=True)
     draft = path.with_name(f"{path.name}.{os.getpid()}-{secrets.token_hex(4)}.tmp")  # its own
     try:

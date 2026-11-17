@@ -206,3 +206,13 @@ def test_a_draft_left_by_a_writer_stopped_dead_is_cleared(tmp_path):
     write_atomic(path, lambda out: out.write(b"whole"))
 
     assert sorted(p.name for p in tmp_path.iterdir()) == ["f.json"]
+
+
+def test_a_file_named_like_a_draft_but_not_one_is_left_alone(tmp_path):
+    path = tmp_path / "f.json"
+    other = tmp_path / "f.json.notes-1.tmp"
+    other.write_bytes(b"someone's")
+
+    write_atomic(path, lambda out: out.write(b"whole"))
+
+    assert path.read_bytes() == b"whole" and other.exists()

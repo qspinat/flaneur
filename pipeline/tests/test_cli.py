@@ -2457,3 +2457,41 @@ def test_proposed_marks_are_said_only_of_a_placement_made_with_them(monkeypatch,
     found = cli._placed_photos()
 
     assert (found["with"].proposed_marks, found["before"].proposed_marks) == (True, False)
+
+
+def test_a_placement_kept_after_new_marks_is_registered_from_what_it_was_tried_from(monkeypatch):
+    seen = SimpleNamespace(rays="from the photo as it is now")
+    store = SimpleNamespace(
+        points=lambda k, inputs: "points" if inputs == "s:img" else None,
+        observed=lambda k, inputs: seen if inputs == "s:img:ab12cd34" else None,  # rewritten
+    )
+    monkeypatch.setattr(cli, "_kept_store", lambda m, kept: (store, "s:img"))
+    monkeypatch.setattr(cli, "_sources_first", lambda points, by_id, m, fixed: ["sphere"])
+    monkeypatch.setattr(cli.placed, "registered", lambda p, o, spheres: (p, o.rays))
+    kept = {**_kept(inputs="s:img", matcher="disk"), "tried_from": "s:img:ab12cd34"}
+
+    found = cli._register_one("p", kept, {}, set())
+
+    assert found == ("points", "from the photo as it is now")
+
+
+def test_a_registration_that_fails_leaves_the_others_and_is_tried_again(monkeypatch, tmp_path):
+    monkeypatch.setattr(cli, "REGISTERED", tmp_path / "registered.json")
+    monkeypatch.setattr(cli, "_registering_world", lambda: ({}, set()))
+
+    def register(k, m, by_id, fixed):
+        if k == "bad":
+            raise ValueError("residuals are not finite")
+        return None
+
+    monkeypatch.setattr(cli, "_register_one", register)
+
+    found = cli._registrations({"bad": _kept(), "good": _kept(x=3.0)})
+
+    kept = json.loads((tmp_path / "registered.json").read_text())
+    assert found == {"bad": None, "good": None} and set(kept) == {"good"}
+
+
+def test_no_test_watches_or_reads_the_pipeline_s_answers(tmp_path):
+    assert all(path.is_relative_to(tmp_path) for path in cli.ANSWER_FILES)
+    assert cli._placing_answers.__defaults__[0] is None  # PLACINGS, read when called

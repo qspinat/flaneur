@@ -13,12 +13,19 @@ def _away_from_the_pipeline_s_data(tmp_path, monkeypatch):
     from flaneur import cli
 
     roots = {cli.DATA: tmp_path / "data", cli.WEB_DATA: tmp_path / "site"}
-    for name, value in list(vars(cli).items()):
+
+    def away(value):
+        if isinstance(value, tuple):
+            return tuple(away(v) for v in value)
         if isinstance(value, Path):
             for root, instead in roots.items():
                 if value.is_relative_to(root):
-                    monkeypatch.setattr(cli, name, instead / value.relative_to(root))
-                    break
+                    return instead / value.relative_to(root)
+        return value
+
+    for name, value in list(vars(cli).items()):
+        if isinstance(value, Path | tuple) and (moved := away(value)) != value:
+            monkeypatch.setattr(cli, name, moved)
 
 
 @pytest.fixture

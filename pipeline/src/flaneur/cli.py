@@ -243,12 +243,12 @@ def _poised(spheres: Iterable[match.Panorama]) -> dict[str, tuple[float, ...]]:
 
 
 def _placing_answers(
-    path: Path = PLACINGS, corrected: bool = True
+    path: Path | None = None, corrected: bool = True
 ) -> tuple[dict[str, dict], dict[str, dict], set[str]]:
     """From the placing page's answers: where each photo answered stands (lon, lat, heading),
     the answers placing a photo in its panorama (on the image it had then), and the photos no
     panorama sees."""
-    held = placings.holding(path)
+    held = placings.holding(path or PLACINGS)
     if any(r.get("panorama_at") for r in held.values()):  # each following its panorama
         now = _standing_now(corrected)
         held = {i: placings.followed(r, now) for i, r in held.items()}
@@ -308,6 +308,11 @@ def export_walk(images: bool = True) -> None:
         placed_on = _placed_on(answering)
         with httpx.Client(timeout=120, follow_redirects=True) as client:
             walk = export.write(walk, client, DATA / "raw" / "images", WEB_DATA, placed_on, no_3d)
+            _image.cache_clear()  # images written for the first time: what is placed on them
+            _sights.cache_clear()
+            if (now := _placed_on(answering)) != placed_on:
+                export.mark_3d(walk, WEB_DATA, now, no_3d)
+                write_json(WEB_DATA / "walk.json", {"photos": [p.for_site() for p in walk]})
             seeds = [me for me in every if me.seeded]  # for matching only, kept apart
             kept = export.write_seeds(seeds, client, DATA / "raw" / "images", SEEDED)
         typer.echo(f"{kept} images d'amorces gardées à part ({SEEDED})")
@@ -3245,11 +3250,15 @@ def _registrations(standing: dict[str, dict]) -> dict[str, dict | None]:
     if todo := [k for k in standing if k not in kept]:
         by_id, fixed = _registering_world()
         for k in todo:
-            found = _register_one(k, standing[k], by_id, fixed)
+            try:
+                found = _register_one(k, standing[k], by_id, fixed)
+            except Exception as error:  # this one left, tried again next time: the others go on
+                typer.echo(f"{k} : pas recalée ({error})", err=True)
+                continue
             kept[k] = {"made": made[k], "registration": found and registration.to_json(found)}
     if kept != was:  # made, or left (no longer placed)
         write_json(REGISTERED, kept)
-    return {k: kept[k]["registration"] for k in standing}
+    return {k: (kept.get(k) or {}).get("registration") for k in standing}
 
 
 def _registering_world() -> tuple[dict[str, match.Panorama], set[str]]:
@@ -3261,6 +3270,16 @@ def _registering_world() -> tuple[dict[str, match.Panorama], set[str]]:
     return {p.id: p for p in spheres}, _fixed_by_colmap(pictures, register.load(FIXES))
 
 
+def _observed_of(store: chain.Store, photo_id: str, inputs: str, kept: dict | None):
+    """A placement's observation (see chain.Store.observed): as found from its `inputs`, else,
+    for one kept though a run found nothing better (see _still_shown), as that run left it: the
+    same photo and panoramas, its marks aside, the rays its points were found on."""
+    found = store.observed(photo_id, inputs)
+    if found is None and (tried := (kept or {}).get("tried_from")):
+        found = store.observed(photo_id, tried)
+    return found
+
+
 def _register_one(
     photo_id: str, kept: dict, by_id: dict[str, match.Panorama], fixed: set[str]
 ) -> registration.Registration | None:
@@ -3270,7 +3289,7 @@ def _register_one(
     if (at := _kept_store(m, kept)) is None:  # a camera proposed: no points kept
         return None
     store, inputs = at
-    points, observed = store.points(photo_id, inputs), store.observed(photo_id, inputs)
+    points, observed = store.points(photo_id, inputs), _observed_of(store, photo_id, inputs, kept)
     if points is None or observed is None:
         return None
     return placed.registered(points, observed, _sources_first(points, by_id, m, fixed))
@@ -3303,7 +3322,7 @@ def confirm_placed(port: int = 8768, open_browser: bool = True) -> None:
     walls = _ViewWalls(near_by, fixed, today.blocks)
     by_id = {p.id: p for p in near_by}
     chained = _chained()
-    situated, rounds = _with_chained(_situated(), chained, set(titles))
+    situated, rounds = _with_chained(_situated(marks=False), chained, set(titles))  # as shown
     for k, why in chained.get("doubts", {}).items():
         if k in rounds:
             rounds[k]["doubt"] = why
@@ -3391,7 +3410,7 @@ def confirm_placed(port: int = 8768, open_browser: bool = True) -> None:
         pairs, seen_from, counted = None, _toward(f.camera, f.panorama), {}
         if points is not None:
             at = _kept_store(m, kept.get(photo_id))
-            observed = at[0].observed(photo_id, at[1]) if at else None
+            observed = _observed_of(*at, kept.get(photo_id)) if at else None
             matched = observed and _matched_in(points, observed, f.panorama, seen_from, size)
             pairs = _pairs_shown(points, f.photo.shape, size, seen_from, matched)
             counted = {
