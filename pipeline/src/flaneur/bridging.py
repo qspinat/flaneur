@@ -23,7 +23,7 @@ class Paired:
     view_px: np.ndarray
 
 
-def keys_of(pixels: np.ndarray, observed: match.Observed) -> np.ndarray:
+def _keys_of(pixels: np.ndarray, observed: match.Observed) -> np.ndarray:
     """The row of `observed.pixels` each pixel is (both rounded to KEPT_DECIMALS, as kept on
     disk); -1 for none."""
     kept = np.round(observed.pixels.astype(float), KEPT_DECIMALS).tolist()
@@ -33,6 +33,17 @@ def keys_of(pixels: np.ndarray, observed: match.Observed) -> np.ndarray:
     )
 
 
+def own_rows(points: match.Points, observed: match.Observed, panorama: str) -> np.ndarray:
+    """The row in `observed.rays` of the ray `panorama` itself matched each point with (its
+    first: one ray a detail and a panorama); -1 where it matched none."""
+    rays = observed.rays
+    mine = np.flatnonzero(rays.sources == panorama)
+    row_of = np.full(len(observed.pixels), -1)
+    row_of[rays.keys[mine][::-1]] = mine[::-1]  # the first written last: it holds
+    keys = _keys_of(points.pixels, observed)
+    return np.where(keys >= 0, row_of[np.maximum(keys, 0)], -1)
+
+
 def paired(
     points: match.Points, observed: match.Observed, sphere: match.Panorama, size: tuple[int, int]
 ) -> Paired | None:
@@ -40,22 +51,17 @@ def paired(
     point it is only said to see), in a view of it facing their mean heading, those falling in
     it; the photo's pixels at `size` (height, width). None from fewer than
     registration.MIN_MATCHED: too few to register the photo there."""
-    rays = observed.rays
-    row_of: dict[int, int] = {}
-    for row in np.flatnonzero(rays.sources == sphere.id):
-        row_of.setdefault(int(rays.keys[row]), int(row))
-    rows = np.array([row_of.get(int(k), -1) for k in keys_of(points.pixels, observed)], int)
+    rows = own_rows(points, observed, sphere.id)
     hit = rows >= 0
     if hit.sum() < registration.MIN_MATCHED:
         return None
-    ahead = rays.directions[rows[hit]]
+    ahead = observed.rays.directions[rows[hit]]
     angles = np.arctan2(ahead[:, 0], ahead[:, 1])  # compass: east of north
     heading = float(np.degrees(np.arctan2(np.sin(angles).mean(), np.cos(angles).mean())) % 360)
     view = registration.ViewOf(heading)
     view_px = registration.view_pixels(ahead @ sphere.axes.T, view, sphere.axes, placing.SHOWN)
-    inside = np.isfinite(view_px).all(axis=1) & (view_px >= 0).all(axis=1)
-    inside &= (view_px <= placing.SHOWN).all(axis=1)
+    inside = ((view_px >= 0) & (view_px <= placing.SHOWN)).all(axis=1)  # NaN: behind it
     if inside.sum() < registration.MIN_MATCHED:
         return None
-    photo_px = points.pixels[hit][inside] * max(size) / match.PHOTO_SIDE
+    photo_px = points.pixels[hit][inside] * max(size) / max(observed.size)
     return Paired(sphere.id, view, photo_px, view_px[inside])

@@ -6,6 +6,7 @@ from flaneur import bridging, match, placing, registration
 
 A = match.Panorama("a", 0.0, 0.0, 1.6, 30.0, None, roll=1.0, pitch=-2.0)  # turned, leaning
 B = match.Panorama("b", 6.0, 0.0, 1.6, 0.0, None)
+AT = {"a": A, "b": B}
 
 
 def _units(v: np.ndarray) -> np.ndarray:
@@ -15,8 +16,7 @@ def _units(v: np.ndarray) -> np.ndarray:
 def _seen(world: np.ndarray, pixels: np.ndarray, by: dict[str, list[int]]):
     """The photo's points and what each panorama in `by` matched of them (their rows)."""
     rows = [(name, i) for name, kept in by.items() for i in kept]
-    at = {"a": A, "b": B}
-    origins = np.array([[at[n].x, at[n].y, at[n].z] for n, _ in rows])
+    origins = np.array([[AT[n].x, AT[n].y, AT[n].z] for n, _ in rows])
     keys = np.array([i for _, i in rows])
     rays = match.Rays(
         keys,
@@ -33,13 +33,19 @@ def _seen(world: np.ndarray, pixels: np.ndarray, by: dict[str, list[int]]):
     return match.Points(np.round(pixels, 3), world, seen), observed
 
 
+def _nearest(points: match.Points, px: np.ndarray) -> tuple[int, float]:
+    """The point whose pixel is nearest `px`, and how far."""
+    gap = np.hypot(*(points.pixels - px).T)
+    return int(np.argmin(gap)), float(gap.min())
+
+
 def test_a_pair_lies_on_the_panorama_s_own_ray():
     world, pixels = facade_seen_from_the_origin()
     points, observed = _seen(world, pixels, {"a": list(range(60))})
 
     p = bridging.paired(points, observed, A, (600, 800))
 
-    which = [int(np.argmin(np.hypot(*(points.pixels - px).T))) for px in p.photo_px]
+    which = [_nearest(points, px)[0] for px in p.photo_px]
     own = registration.own_directions(p.view_px, p.view, A.axes, placing.SHOWN)
     assert own @ A.axes == pytest.approx(_units(world[which] - [A.x, A.y, A.z]), abs=1e-6)
 
@@ -50,7 +56,7 @@ def test_only_the_points_the_panorama_matched_itself_are_paired():
 
     p = bridging.paired(points, observed, A, (600, 800))
 
-    which = {int(np.argmin(np.hypot(*(points.pixels - px).T))) for px in p.photo_px}
+    which = {_nearest(points, px)[0] for px in p.photo_px}
     assert which and which <= set(range(40))
 
 
@@ -60,8 +66,8 @@ def test_the_photo_s_pixels_are_at_the_size_asked():
 
     p = bridging.paired(points, observed, A, (1200, 1600))
 
-    shown = p.photo_px / (1600 / match.PHOTO_SIDE)
-    assert all(np.hypot(*(points.pixels - px).T).min() < 1e-9 for px in shown)
+    shown = p.photo_px / (1600 / 800)  # matched at 800 wide
+    assert all(_nearest(points, px)[1] < 1e-9 for px in shown)
 
 
 def test_fewer_than_fifteen_pairs_pair_nothing():

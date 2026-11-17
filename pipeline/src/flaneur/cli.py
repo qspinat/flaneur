@@ -2727,13 +2727,9 @@ def _matched_in(
     size: tuple[int, int],
 ) -> np.ndarray:
     """Where a `panorama` matched each of a camera's points (its own ray, kept by `match` in
-    `observed`; a point's pixel is its detail's, as chain.Store keeps it: see bridging.keys_of), on
+    `observed`; a point's pixel is its detail's, as chain.Store keeps it: see bridging.own_rows), on
     today's view from it (`seen_from`, `size`); NaN where it saw none."""
-    rays = observed.rays
-    row_of: dict[int, int] = {}
-    for row in np.flatnonzero(rays.sources == panorama.id):
-        row_of.setdefault(int(rays.keys[row]), int(row))
-    rows = np.array([row_of.get(int(k), -1) for k in bridging.keys_of(points.pixels, observed)])
+    rays, rows = observed.rays, bridging.own_rows(points, observed, panorama.id)
     found = np.full((len(points.pixels), 2), np.nan)
     hit = rows >= 0
     if hit.any():
