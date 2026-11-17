@@ -1223,9 +1223,8 @@ def test_a_photo_belongs_to_the_area_it_stands_in_else_the_nearest():
 
 def test_a_photo_in_an_area_no_check_passes_is_matched_with_every_matcher(tmp_path, monkeypatch):
     _match_world(tmp_path, monkeypatch, {}, lambda matcher: CAMERA if matcher == "disk" else None)
-    monkeypatch.setattr(cli, "_area_of", lambda here: "cite")  # no check passes there
 
-    cli.match_photos(photo=None, again=False)
+    cli.match_photos(photo=None, again=False)  # no check passed anywhere
 
     kept = json.loads((tmp_path / "matches.json").read_text())["pm:1"]
     assert (kept["matcher"], kept["tried"]) == ("disk", ["lomag", "disk"])
@@ -1247,6 +1246,7 @@ def test_match_check_stale_only_checks_the_areas_whose_setup_changed(tmp_path, m
     heights = SimpleNamespace(streets=None, origin_z=0.0)
     for name, value in {
         "MATCH_CHECK": tmp_path / "check.json",
+        "CHECKED_AREAS": tmp_path / "checked_areas.json",
         "_matching": lambda: (heights, [], lambda year: SimpleNamespace(blocks=None)),
         "_views": lambda matcher="disk": None,
         "_colmap_fixed": set,
@@ -1262,6 +1262,30 @@ def test_match_check_stale_only_checks_the_areas_whose_setup_changed(tmp_path, m
     cli.match_check(tries=20, seed=0, matcher="disk", area=None, stale=True)
 
     assert checked == ["saint-severin"]  # the Cité's check is as things are: kept, failed or not
+    assert json.loads((tmp_path / "checked_areas.json").read_text()) == {
+        "saint-severin": [],
+        "cite": [],
+    }  # what the list says of each area follows the check
+
+
+def test_match_check_stale_loads_no_matcher_when_every_check_is_current(tmp_path, monkeypatch):
+    heights = SimpleNamespace(streets=None, origin_z=0.0)
+
+    def no_matcher(matcher="disk"):
+        raise AssertionError("the matcher was loaded for nothing")
+
+    for name, value in {
+        "MATCH_CHECK": tmp_path / "check.json",
+        "CHECKED_AREAS": tmp_path / "checked_areas.json",
+        "_matching": lambda: (heights, [], lambda year: SimpleNamespace(blocks=None)),
+        "_views": no_matcher,
+        "_check_setup": lambda matcher, area, near_by: "now",
+    }.items():
+        monkeypatch.setattr(cli, name, value)
+    current = {a: {"passed": True, "setup": "now"} for a in ("cite", "saint-severin")}
+    (tmp_path / "check.json").write_text(json.dumps(current))
+
+    cli.match_check(tries=20, seed=0, matcher="disk", area=None, stale=True)
 
 
 def _wall_ahead(distance: float = 20.0, height: float = 5.0):

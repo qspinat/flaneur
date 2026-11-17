@@ -1806,20 +1806,29 @@ def _checked_in(near_by: list[match.Panorama]) -> dict[str, list[str]]:
     """For each area, the matchers whose known-answer check passed there for its panoramas as
     they are: how sure a placement of each is there (see placed.Matched), not whether it is
     tried."""
-    checked: dict[str, list[str]] = {}
-    for name in pilot.AREAS:
-        checked[name] = []
-        for matcher in MATCHERS:
-            check = _per_area(MATCH_CHECK, matcher).get(name, {})
-            if check.get("passed") and check.get("setup") == _check_setup(matcher, name, near_by):
-                checked[name].append(matcher)
-            else:
-                typer.echo(
-                    f"{MATCHERS[matcher].label} pas encore contrôlé dans « {name} » pour ces "
-                    f"panoramas : ses placements le disent "
-                    f"(`flaneur match-check --matcher {matcher} --area {name}`)"
-                )
+    checked = {
+        name: [
+            m
+            for m in MATCHERS
+            if (check := _per_area(MATCH_CHECK, m).get(name, {})).get("passed")
+            and _check_current(check, m, name, near_by)
+        ]
+        for name in pilot.AREAS
+    }
+    if waiting := [
+        f"{MATCHERS[m].label} ({a})" for a, ms in checked.items() for m in MATCHERS if m not in ms
+    ]:
+        typer.echo(
+            f"pas encore contrôlés pour ces panoramas, leurs placements le disent : "
+            f"{', '.join(waiting)} (`flaneur match-check --perimes`)"
+        )
     return checked
+
+
+def _check_current(check: dict, matcher: str, area: str, near_by: list[match.Panorama]) -> bool:
+    """Whether a matcher's known-answer check in an area (as kept) was made for its panoramas
+    and the code as they are (see _check_setup)."""
+    return check.get("setup") == _check_setup(matcher, area, near_by)
 
 
 @app.command("match")
@@ -2390,6 +2399,13 @@ def match_check(
     if area is not None and area not in pilot.AREAS:
         raise typer.BadParameter(f"quartier : l'un de {', '.join(pilot.AREAS)}")
     heights, near_by, then = _matching()
+    areas = [area] if area else list(pilot.AREAS)
+    if stale:
+        kept = _per_area(MATCH_CHECK, matcher)
+        areas = [a for a in areas if not _check_current(kept.get(a, {}), matcher, a, near_by)]
+        if not areas:
+            typer.echo(f"{MATCHERS[matcher].label} : chaque contrôle est à jour")
+            return
     year = date.today().year
     today = then(year)
     shown = functools.partial(  # only landmarks whose being hidden can be told
@@ -2403,15 +2419,9 @@ def match_check(
     # only panoramas COLMAP placed: another's place is borrowed from its run, or its phone's
     fixed = _colmap_fixed()
     walls = _wall_scenes(near_by, fixed)
-    areas = [area] if area else list(pilot.AREAS)
-    if stale:
-        kept = _per_area(MATCH_CHECK, matcher)
-        current = {
-            a for a in areas if kept.get(a, {}).get("setup") == _check_setup(matcher, a, near_by)
-        }
-        areas = [a for a in areas if a not in current]
     for name in areas:
         _check_area(name, tries, seed, matcher, near_by, fixed, heights, today, shown, views, walls)
+    write_json(CHECKED_AREAS, _checked_in(near_by))  # what the list says of each area: now
 
 
 def _wanting(
