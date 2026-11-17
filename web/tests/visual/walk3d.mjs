@@ -1,7 +1,8 @@
 // The 3D walk checked in a browser, on the built site with its security policy: a photo laid in
 // a panorama where the pipeline puts it (a checkerboard registered on a leaning panorama, see
 // alignment_fixture.py: the page's view against the pipeline's drawing, within 2 px), no script
-// error, nothing refused, the credits, a click on the photo opening its card, a step forward.
+// error, nothing refused, the credits, a click on the photo opening its card (saying how sure its
+// placement is), a step forward.
 // Usage: node tests/visual/walk3d.mjs <base-url> <fixture-folder> [screenshot-folder]
 import { chromium, firefox } from 'playwright';
 import { readFileSync } from 'node:fs';
@@ -23,7 +24,7 @@ await page.route('**/data/scene.json', async (route) => {
   const scene = await (await route.fetch()).json();
   const home = scene.panoramas.find((p) => p.id === fixture.panorama);
   home.image = `panoramas/${fixture.panorama}.jpg`;
-  scene.photos.push({ id: 'test:board', title: 'Damier', years: [1900, 1900], credit: 'Essai', image: 'photos/test-board.png', flipped: false, shown: [{ panorama: fixture.panorama, registration: fixture.registration, strength: 1 }] });
+  scene.photos.push({ id: 'test:board', title: 'Damier', years: [1900, 1900], credit: 'Essai', image: 'photos/test-board.png', flipped: false, shown: [{ panorama: fixture.panorama, registration: fixture.registration, strength: 1 }], status: 'automatic', unchecked_area: true, proposed_marks: false });
   await route.fulfill({ json: scene });
 });
 await page.route(`**/data/panoramas/${fixture.panorama}.jpg`, (route) => route.fulfill({ path: `${fixtures}/panorama.jpg` }));
@@ -65,6 +66,12 @@ check(credits.includes("Rue d'aujourd'hui") && credits.includes('Essai'), 'today
 await page.mouse.click(320, 300); // on the board
 await page.waitForTimeout(500);
 check(await page.locator('#card').isVisible(), 'a click on the photo opens its card');
+const said = await page.locator('#card-status').textContent();
+check(
+  said === "Placement automatique, pas encore vérifié. La méthode n'est pas encore contrôlée dans ce quartier.",
+  `its card says how sure its placement is (${said})`,
+);
+await page.screenshot({ path: `${out}/walk3d-card.png` });
 const before = await page.evaluate(() => location.hash);
 await page.keyboard.press('Escape');
 await page.evaluate(() => (window.ready = false));

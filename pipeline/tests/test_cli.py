@@ -1967,3 +1967,80 @@ def test_the_placed_list_is_written_from_the_answers_verdicts_and_matches(monkey
         "pm:4": ("automatic", "match", False),  # its marks were made on another crop
         "pp": ("checked", "match", False),
     }
+
+
+def test_only_the_photos_placed_with_a_registration_go_to_3d(monkeypatch):
+    reg = {"panorama": "p1", "m": [1.0] * 9, "view": {"heading": 0.0}}
+    monkeypatch.setattr(
+        cli,
+        "_placed_photos",
+        lambda write=False: {
+            "pm:1": cli.placed.Placed("pm:1", "automatic", "match", reg, "h"),
+            "pm:2": cli.placed.Placed("pm:2", "checked", "match", None, "h"),  # map only
+        },
+    )
+
+    assert cli._shown_in_3d() == {
+        "pm:1": {
+            "registration": reg,
+            "inputs": "h",
+            "flipped": False,
+            "status": "automatic",
+            "unchecked_area": False,
+            "proposed_marks": False,
+        }
+    }
+
+
+def test_a_match_placement_reaches_the_3d_walk_with_its_status(monkeypatch, tmp_path):
+    from test_scene3d import REG, _photo, _picture
+
+    (tmp_path / "walk.json").write_text(json.dumps({"photos": [{"id": "pm:1", "in_3d": True}]}))
+    (tmp_path / "panoramas").mkdir()
+    (tmp_path / "panoramas" / "p1.jpg").touch()
+    row = {"registration": REG, "inputs": "h", "flipped": False, "status": "near"}
+    for name, value in {
+        "WEB_DATA": tmp_path,
+        "PANORAMAS": tmp_path / "panoramas",
+        "_placing_answers": lambda: ({}, {}, set()),
+        "_walk": lambda conn, places: [_photo("pm:1")],
+        "_lined_up": lambda pictures: [_picture("p1", 2.3466)],
+        "_panoramas": lambda pictures, heights: [],
+        "_poised": lambda spheres: {},
+        "_carried": lambda shown, now: {},
+        "_shown_in_3d": lambda: {"pm:1": {**row, "unchecked_area": False, "proposed_marks": False}},
+    }.items():
+        monkeypatch.setattr(cli, name, value)
+    monkeypatch.setattr(cli.db, "connect", lambda path: SimpleNamespace(close=lambda: None))
+    monkeypatch.setattr(cli.panoramas, "load", lambda conn: [])
+
+    cli.write_scene()
+
+    shown = json.loads((tmp_path / "scene.json").read_text())["photos"]
+    assert [(p["id"], p["status"]) for p in shown] == [("pm:1", "near")]
+
+
+def test_porter_carries_a_placement_of_match_too(monkeypatch, tmp_path):
+    from test_scene3d import REG
+
+    row = {"registration": REG, "inputs": "h", "flipped": False, "status": "automatic"}
+    home = match.Panorama("p1", 0.0, 0.0, 0.0, 0.0, tmp_path / "p1.jpg")
+    for name, value in {
+        "CARRIED": tmp_path / "carried.json",
+        "_shown_in_3d": lambda: {"pm:1": row},
+        "_lined_up": lambda pictures: [],
+        "_panoramas": lambda pictures, heights: [home],
+        "_poised": lambda spheres: {},
+        "_views": lambda kept=None, matcher="disk": None,
+        "_to_neighbours": lambda r, home, spheres, street, views: (["copy"], set()),
+    }.items():
+        monkeypatch.setattr(cli, name, value)
+    monkeypatch.setattr(cli.db, "connect", lambda path: SimpleNamespace(close=lambda: None))
+    monkeypatch.setattr(cli.panoramas, "load", lambda conn: [])
+    monkeypatch.setattr(cli.panoramas, "links", lambda pictures: {})
+
+    cli.carry_placed()
+
+    carried = json.loads((tmp_path / "carried.json").read_text())
+    assert carried["pm:1"]["copies"] == ["copy"]
+    assert carried["pm:1"]["made"] == cli._answered_as(row)

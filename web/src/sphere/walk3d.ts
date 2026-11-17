@@ -41,6 +41,9 @@ export interface OldPhoto {
   image: string;
   flipped: boolean;
   shown: Shown[]; // its home first
+  status: 'checked' | 'near' | 'automatic'; // said yes or placed by hand; near; not seen yet
+  unchecked_area: boolean; // automatic: its matcher does not pass the check in its area yet
+  proposed_marks: boolean; // automatic: it rests on landmarks only proposed
 }
 
 export interface Scene {
@@ -171,4 +174,18 @@ export function toward(walk: WalkSpot[], here: Panorama, heading: number): WalkS
     if (cost < bestCost) [best, bestCost] = [p, cost];
   }
   return best;
+}
+
+const STATUS: Record<OldPhoto['status'], string> = {
+  checked: 'Placement vérifié.',
+  near: 'Placement approché : le bon lieu, le cadrage à reprendre.',
+  automatic: 'Placement automatique, pas encore vérifié.',
+};
+
+/** What a photo's card says of how sure its placement is. */
+export function statusLabel(photo: OldPhoto): string {
+  const notes = [STATUS[photo.status]];
+  if (photo.unchecked_area) notes.push('La méthode n\'est pas encore contrôlée dans ce quartier.');
+  if (photo.proposed_marks) notes.push('Ses repères sont proposés, pas encore vérifiés.');
+  return notes.join(' ');
 }

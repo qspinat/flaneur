@@ -126,9 +126,10 @@ def build3d(
 ) -> tuple[dict, set[str]]:
     """The 3D walk on today's panoramas: every panorama (levelled by the viewer from its
     azimuth, roll and pitch; the next ones along the street, by their index; its credit, by
-    its index in `credits`), and each photo placed in one (`shown`: the answers that hold, on
-    the image the photo has now), where it shows: its home, then its `copies` carried to the
-    neighbours. And the panoramas that hold a photo, to copy onto the site."""
+    its index in `credits`), and each photo placed in one (`shown`: as placed.Placed.for_scene
+    gives them, on the image the photo has now), where it shows: its home, then its `copies`
+    carried to the neighbours, and how sure its placement is. And the panoramas that hold a
+    photo, to copy onto the site."""
     by_id = {me.id: me for me in walk}
     known = {p.id for p in pictures}  # a photo or a copy on a panorama gone is left out
     photos, holding = [], set()
@@ -153,6 +154,7 @@ def build3d(
                 "image": image_name(me.id),
                 "flipped": row["flipped"],
                 "shown": where,
+                **{k: row[k] for k in ("status", "unchecked_area", "proposed_marks")},
             }
         )
     ways = panoramas.links(pictures)
