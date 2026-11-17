@@ -1974,7 +1974,7 @@ def test_only_the_photos_placed_with_a_registration_go_to_3d(monkeypatch):
     monkeypatch.setattr(
         cli,
         "_placed_photos",
-        lambda write=False: {
+        lambda write=False, answering=None: {
             "pm:1": cli.placed.Placed("pm:1", "automatic", "match", reg, "h"),
             "pm:2": cli.placed.Placed("pm:2", "checked", "match", None, "h"),  # map only
         },
@@ -2008,7 +2008,9 @@ def test_a_match_placement_reaches_the_3d_walk_with_its_status(monkeypatch, tmp_
         "_panoramas": lambda pictures, heights: [],
         "_poised": lambda spheres: {},
         "_carried": lambda shown, now: {},
-        "_shown_in_3d": lambda: {"pm:1": {**row, "unchecked_area": False, "proposed_marks": False}},
+        "_shown_in_3d": lambda answering=None: {
+            "pm:1": {**row, "unchecked_area": False, "proposed_marks": False}
+        },
     }.items():
         monkeypatch.setattr(cli, name, value)
     monkeypatch.setattr(cli.db, "connect", lambda path: SimpleNamespace(close=lambda: None))
@@ -2027,7 +2029,7 @@ def test_porter_carries_a_placement_of_match_too(monkeypatch, tmp_path):
     home = match.Panorama("p1", 0.0, 0.0, 0.0, 0.0, tmp_path / "p1.jpg")
     for name, value in {
         "CARRIED": tmp_path / "carried.json",
-        "_shown_in_3d": lambda: {"pm:1": row},
+        "_shown_in_3d": lambda answering=None: {"pm:1": row},
         "_lined_up": lambda pictures: [],
         "_panoramas": lambda pictures, heights: [home],
         "_poised": lambda spheres: {},

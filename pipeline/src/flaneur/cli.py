@@ -285,7 +285,7 @@ def _carried(placed: dict[str, dict], now: dict[str, tuple]) -> dict[str, dict]:
 @app.command("export")
 def export_walk(images: bool = True) -> None:
     """Écrit la balade (photos relues appliquées, liens, vue d'aujourd'hui) pour le site."""
-    places, in_3d, no_3d = _placing_answers()
+    answering = places, in_3d, no_3d = _placing_answers()
     with closing(db.connect(DB_PATH)) as conn:
         every = _walk(conn, places)
         walk = export.build(conn, DATA / "pilot", every)
@@ -293,7 +293,7 @@ def export_walk(images: bool = True) -> None:
     if elsewhere:  # their image changed since: the placing page asks for them again
         typer.echo(f"{elsewhere} photos placées sur une image qu'elles n'ont plus : à revoir")
     if images:
-        placed_on = {i: r["inputs"] for i, r in _shown_in_3d().items()}
+        placed_on = {i: r["inputs"] for i, r in _shown_in_3d(answering).items()}
         with httpx.Client(timeout=120, follow_redirects=True) as client:
             walk = export.write(walk, client, DATA / "raw" / "images", WEB_DATA, placed_on, no_3d)
             seeds = [me for me in every if me.seeded]  # for matching only, kept apart
@@ -2981,13 +2981,14 @@ PLACED_PHOTOS = DATA / "pilot" / "placed.json"  # the photos placed, each with i
 CHECKED_AREAS = DATA / "pilot" / "checked_areas.json"  # each area's matchers passing the check
 
 
-def _placed_photos(write: bool = False) -> dict[str, placed.Placed]:
+def _placed_photos(write: bool = False, answering: tuple | None = None) -> dict[str, placed.Placed]:
     """The photos placed now (see placed.build): the placing page's answers on the image each
     has now; match's placements of each photo as it is now (see _found_as_now), and the yes
     given to cameras matching turned down (as _situated), each with the user's word, whether
     its matcher passes the check in the area its camera stands in, its landmarks' state (on
-    that image). `write`: kept in PLACED_PHOTOS too, when changed."""
-    _, answers, far = _placing_answers()
+    that image). `write`: kept in PLACED_PHOTOS too, when changed; `answering`: the placing
+    page's answers, already read (see _placing_answers)."""
+    _, answers, far = answering or _placing_answers()
     scenes, judged, checked = _scenes_now(), _Judged(), register.load(CHECKED_AREAS)
     marks = marking.states(SIGHTS)
 
@@ -3020,10 +3021,13 @@ def _placed_photos(write: bool = False) -> dict[str, placed.Placed]:
     return found
 
 
-def _shown_in_3d() -> dict[str, dict]:
-    """The photos placed with a registration (see _placed_photos), as the 3D walk, the export
-    and the copies carried take them (see placed.Placed.for_scene)."""
-    return {k: p.for_scene() for k, p in _placed_photos().items() if p.registration}
+def _shown_in_3d(answering: tuple | None = None) -> dict[str, dict]:
+    """The photos placed with a registration (see _placed_photos; `answering`: the placing
+    page's answers, already read), as the 3D walk, the export and the copies carried take them
+    (see placed.Placed.for_scene)."""
+    return {
+        k: p.for_scene() for k, p in _placed_photos(answering=answering).items() if p.registration
+    }
 
 
 def _registered_as(kept: dict) -> str:
@@ -3333,8 +3337,8 @@ def _still_proposed(
 
 
 def _answered_as(row: dict) -> str:
-    """What a copy or a proposal was made from: the answer's registration on its image, the way
-    round it was shown."""
+    """What a copy or a proposal was made from: a placed photo's registration (the placing
+    page's or match's: see placed.Placed.for_scene) on its image, the way round it was shown."""
     made = json.dumps([row["registration"], row["inputs"], row["flipped"]], sort_keys=True)
     return hashlib.sha1(made.encode()).hexdigest()[:16]
 
@@ -3924,13 +3928,13 @@ def write_scene() -> None:
     dans l'un d'eux (à la main, ou par `match` et pas refusées : chacune dit son statut), avec
     leurs copies portées sur les voisins (`flaneur porter`) ; copie sur le site les panoramas
     qui portent une photo."""
-    places = _placing_answers()[0]
+    answering = _placing_answers()
     with closing(db.connect(DB_PATH)) as conn:
-        walk = _walk(conn, places)
+        walk = _walk(conn, answering[0])
         pictures = _lined_up(panoramas.load(conn))  # refused when tilts were measured otherwise
     site = json.loads((WEB_DATA / "walk.json").read_text())
     marked = {p["id"] for p in site["photos"] if p["in_3d"]}  # by the export, on its images
-    shown = {i: r for i, r in _shown_in_3d().items() if i in marked}
+    shown = {i: r for i, r in _shown_in_3d(answering).items() if i in marked}
     now = _poised(_panoramas(pictures, lambda x, y: 0.0))
     copies = {i: c["copies"] for i, c in _carried(shown, now).items()}
     built, holding = scene.build3d(
