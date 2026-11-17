@@ -1,5 +1,6 @@
 """Ligne de commande du pipeline : `uv run flaneur <étape>`."""
 
+import fcntl
 import functools
 import hashlib
 import io
@@ -8,13 +9,15 @@ import math
 import re
 import shutil
 import socket
+import subprocess
+import sys
 import threading
 import time
 from collections import Counter, OrderedDict, defaultdict
-from collections.abc import Callable, Iterable, Sequence, Set
-from contextlib import closing
+from collections.abc import Callable, Iterable, Iterator, Sequence, Set
+from contextlib import closing, contextmanager
 from dataclasses import asdict, fields, replace
-from datetime import date
+from datetime import date, datetime, timedelta
 from enum import StrEnum
 from http.server import HTTPServer
 from pathlib import Path
@@ -4216,6 +4219,141 @@ def _serve_page(start: Callable[[], HTTPServer], label: str, port: int, open_bro
         pass
     finally:
         server.server_close()
+
+
+ANSWER_FILES = (ANCHORS, PLACINGS, SIGHTS, REVIEWS, WALLS)  # what the user's pages write
+WATCH_S, QUIET_S = 5, 10  # answers looked at every WATCH_S; the update once QUIET_S calm
+REFRESH_LOCK = DATA / "pilot" / ".mise-a-jour.lock"  # one light update at a time
+NIGHT_STEPS = (  # each in its own process (one model in memory at a time), in this order
+    ("segmenter",),
+    ("murs", "--masques"),
+    ("murs",),
+    ("reperes-proposer", "--write"),
+    ("match-check", "--perimes", "--matcher", LOMAG),
+    ("match-check", "--perimes", "--matcher", DISK),
+    ("match",),
+    ("chain-check",),
+    ("chain",),
+    ("porter",),
+)
+
+
+@contextmanager
+def _refreshing() -> Iterator[None]:
+    """Held while a light update writes: a second one waits for it (REFRESH_LOCK)."""
+    REFRESH_LOCK.parent.mkdir(parents=True, exist_ok=True)
+    with REFRESH_LOCK.open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock, fcntl.LOCK_UN)
+
+
+def _update_light() -> None:
+    """The list of the photos placed written, then the walk, then the 3D scene (which read
+    it), one update at a time."""
+    with _refreshing():
+        _placed_photos(write=True)
+        export_walk()
+        write_scene()
+
+
+def _flaneur(*args: str) -> list[str]:
+    """A flaneur command, run in a process of its own."""
+    return [sys.executable, "-m", "flaneur", *args]
+
+
+def _until(hour: str | None) -> float:
+    """The next time it is `hour` ("HH:MM"), in epoch seconds; never (none)."""
+    if hour is None:
+        return math.inf
+    at = datetime.combine(date.today(), datetime.strptime(hour, "%H:%M").time())
+    return (at if at > datetime.now() else at + timedelta(days=1)).timestamp()
+
+
+def _run_night(
+    until: float, run: Callable = subprocess.run, clock: Callable[[], float] = time.time
+) -> None:
+    """The night's steps (NIGHT_STEPS) in order, each refreshing what is stale only: one that
+    fails is said and the next goes on; none starts after `until` (epoch seconds), and the one
+    running then is stopped (each writes its files whole: one panorama or photo lost at
+    most). Then the light update, whatever the hour: it is what shows the night's work."""
+    for step in NIGHT_STEPS:
+        left = until - clock()
+        if left <= 0:
+            typer.echo(f"{' '.join(step)} : pas lancée, l'heure est passée")
+            break
+        typer.echo(f"{' '.join(step)} : lancée {datetime.now():%H:%M}")
+        try:
+            done = run(_flaneur(*step), timeout=None if math.isinf(left) else left)
+        except subprocess.TimeoutExpired:
+            typer.echo(f"{' '.join(step)} : arrêtée, l'heure est passée", err=True)
+            continue
+        if done.returncode:
+            typer.echo(
+                f"{' '.join(step)} : échouée ({done.returncode}), la suite continue", err=True
+            )
+    run(_flaneur("mettre-a-jour"), timeout=None)
+
+
+def _stamp(paths: Iterable[Path]) -> tuple:
+    """When each file was last written, and how long it is (none: not there)."""
+    return tuple((s.st_mtime_ns, s.st_size) if (s := _stat(p)) else None for p in paths)
+
+
+def _stat(path: Path):
+    try:
+        return path.stat()
+    except FileNotFoundError:
+        return None
+
+
+def _follow(
+    update: Callable[[], None],
+    paths: Sequence[Path],
+    sleep: Callable[[float], None] = time.sleep,
+    clock: Callable[[], float] = time.monotonic,
+    stamp: Callable[[Sequence[Path]], object] = _stamp,
+) -> None:
+    """Looks at `paths` every WATCH_S; once one changed and all were calm QUIET_S since, runs
+    `update` (once for many changes). Never ends."""
+    seen, changed = stamp(paths), None
+    while True:
+        sleep(WATCH_S)
+        now = stamp(paths)
+        if now != seen:
+            seen, changed = now, clock()
+        elif changed is not None and clock() - changed >= QUIET_S:
+            changed = None
+            update()
+
+
+@app.command("mettre-a-jour")
+def update(
+    suivre: Annotated[
+        bool, typer.Option(help="refaire le léger après chaque annotation enregistrée")
+    ] = False,
+    nuit: Annotated[bool, typer.Option(help="les étapes lourdes, puis le léger")] = False,
+    jusqua: Annotated[
+        str | None, typer.Option(help="la nuit : aucune étape après cette heure (HH:MM)")
+    ] = None,
+) -> None:
+    """Remet à jour ce qui dépend des annotations. Par défaut le léger : la liste des photos
+    placées, la balade, la scène en 3D (une mise à jour à la fois). `--suivre` : le léger
+    refait dès que les pages ont enregistré une annotation (après 10 s de calme).
+    `--nuit` : les étapes lourdes dans l'ordre (segmenter, murs, repères proposés, contrôles
+    périmés, match, enchaînement, porter), chacune ne refaisant que ce qui est périmé, puis
+    le léger ; une étape qui échoue n'arrête pas les suivantes."""
+    if suivre and nuit:
+        raise typer.BadParameter("--suivre ou --nuit : pas les deux")
+    if nuit:
+        _run_night(_until(jusqua))
+    elif suivre:
+        typer.echo(f"regarde {', '.join(p.name for p in ANSWER_FILES)} (Ctrl-C pour arrêter)")
+        _follow(lambda: subprocess.run(_flaneur("mettre-a-jour")), ANSWER_FILES)
+    else:
+        _update_light()
 
 
 @app.command("stats")

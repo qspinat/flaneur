@@ -1,4 +1,5 @@
 import json
+import subprocess
 import threading
 from dataclasses import replace
 from types import SimpleNamespace
@@ -2186,3 +2187,96 @@ def test_a_panorama_that_cannot_be_segmented_leaves_the_others_segmented(monkeyp
     cli._segment_homes([broken, home, beside], [broken, home, beside], set(), masks)
 
     assert made == [home.id, beside.id]
+
+
+def test_the_light_update_writes_the_list_then_the_walk_then_the_scene(monkeypatch, tmp_path):
+    done = []
+    monkeypatch.setattr(cli, "REFRESH_LOCK", tmp_path / ".lock")
+    monkeypatch.setattr(cli, "_placed_photos", lambda write=False: done.append(("list", write)))
+    monkeypatch.setattr(cli, "export_walk", lambda: done.append("export"))
+    monkeypatch.setattr(cli, "write_scene", lambda: done.append("scene"))
+
+    cli._update_light()
+
+    assert done == [("list", True), "export", "scene"]
+
+
+def _ran(outcomes: dict | None = None, clock=None):
+    """A night's runner noting each step run (its arguments), returning its outcome (an exit
+    code, or an exception raised), advancing `clock` by a step's hour."""
+    ran = []
+
+    def run(command, timeout=None):
+        step = tuple(command[3:])  # past "python -m flaneur"
+        ran.append((step, timeout))
+        if clock is not None:
+            clock[0] += 3600.0
+        outcome = (outcomes or {}).get(step, 0)
+        if isinstance(outcome, Exception):
+            raise outcome
+        return SimpleNamespace(returncode=outcome)
+
+    return ran, run
+
+
+def test_the_night_runs_its_steps_in_order_and_goes_on_after_one_fails():
+    ran, run = _ran({("murs", "--masques"): 1})
+
+    cli._run_night(float("inf"), run=run, clock=lambda: 0.0)
+
+    assert [step for step, _ in ran] == [*cli.NIGHT_STEPS, ("mettre-a-jour",)]
+    assert ran[0][1] is None  # no hour: no timeout
+
+
+def test_no_night_step_starts_after_the_hour():
+    clock = [0.0]
+    stopped = subprocess.TimeoutExpired("murs", 1.0)
+    ran, run = _ran({cli.NIGHT_STEPS[2]: stopped}, clock)
+
+    cli._run_night(2.5 * 3600.0, run=run, clock=lambda: clock[0])
+
+    steps = [step for step, _ in ran]
+    assert steps == [*cli.NIGHT_STEPS[:3], ("mettre-a-jour",)]  # stopped at the hour; the light
+    assert ran[2][1] == pytest.approx(0.5 * 3600.0)  # the third may run until the hour only
+
+
+def test_following_updates_once_after_answers_settle():
+    now = [0.0]
+    writes = {5.0: 1, 10.0: 2}  # the page writes twice, 5 s apart; then quiet
+    updates = []
+
+    def sleep(seconds):
+        now[0] += seconds
+        if now[0] > 60.0:
+            raise _Stop
+
+    def stamp(paths):
+        return max((n for at, n in writes.items() if at <= now[0]), default=0)
+
+    with pytest.raises(_Stop):
+        cli._follow(
+            lambda: updates.append(now[0]), [], sleep=sleep, clock=lambda: now[0], stamp=stamp
+        )
+
+    assert updates == [20.0]  # once, 10 s after the last write
+
+
+class _Stop(Exception):
+    pass
+
+
+def test_a_second_update_waits_for_the_first(monkeypatch, tmp_path):
+    monkeypatch.setattr(cli, "REFRESH_LOCK", tmp_path / ".lock")
+    done = []
+    monkeypatch.setattr(cli, "_placed_photos", lambda write=False: done.append("list"))
+    monkeypatch.setattr(cli, "export_walk", lambda: None)
+    monkeypatch.setattr(cli, "write_scene", lambda: None)
+
+    with cli._refreshing():  # the first, under way
+        second = threading.Thread(target=cli._update_light)
+        second.start()
+        second.join(0.3)
+        waited = second.is_alive() and not done
+    second.join(5.0)
+
+    assert waited and done == ["list"]
