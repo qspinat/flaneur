@@ -14,7 +14,7 @@ from collections import Counter, OrderedDict, defaultdict
 from collections.abc import Callable, Iterable, Sequence, Set
 from contextlib import closing
 from dataclasses import asdict, fields, replace
-from datetime import date
+from datetime import date, datetime, timedelta
 from enum import StrEnum
 from http.server import HTTPServer
 from pathlib import Path
@@ -29,6 +29,7 @@ from dotenv import load_dotenv
 from PIL import Image
 from scipy.spatial import cKDTree
 from shapely.geometry import Point
+from shapely.geometry.base import BaseGeometry
 from shapely.ops import unary_union
 
 from flaneur import (
@@ -2900,16 +2901,23 @@ def _street_segments() -> Callable[[float, float], list[facades.Segment]]:
     return _street_facades(_buildings(area))
 
 
-def _wall_scenes(near_by: list[match.Panorama], fixed: set[str]) -> _Scenes:
+def _wall_scenes(
+    near_by: list[match.Panorama],
+    fixed: set[str],
+    views: Callable[[], match.Views] = _no_matcher,
+) -> _Scenes:
     """Today's walls around panoramas from the pairs on disk alone (listed once: the matcher
     never woken), segmented as `flaneur segmenter` left them, kept in WALLS_FITTED: those match
-    places its points on, and the confirmation page draws the parallax from."""
+    places its points on, and the confirmation page draws the parallax from. With `views` (see
+    _views), pairs are matched as needed (flaneur murs): those on disk looked at each time."""
     masks = segment.Segmenter(VIEW_STRUCTURE, threading.Lock(), _levelled_name, make=False)
-    made = frozenset(p.name for p in PAIR_MATCHES.glob("*.npz"))
+    made = (
+        None if views is not _no_matcher else frozenset(p.name for p in PAIR_MATCHES.glob("*.npz"))
+    )
     return _Scenes(
         near_by,
         fixed,
-        _no_matcher,
+        views,
         threading.Lock(),
         _street_segments(),
         WALLS,
@@ -2918,6 +2926,104 @@ def _wall_scenes(near_by: list[match.Panorama], fixed: set[str]) -> _Scenes:
         made=made,
         masks=masks,
     )
+
+
+def _wall_homes(
+    spheres: list[match.Panorama],
+    places: list[tuple[float, float]],
+    placed: list[tuple[float, float]],
+    areas: Sequence[BaseGeometry],
+) -> list[match.Panorama]:
+    """The panoramas whose walls match may use (within SCENE_REACH_M of a photo's place), in
+    the order the nights make them: within reach of a placement first, then in an area
+    (`areas`: grown by that reach), then the rest; the nearest a photo first."""
+    if not places:
+        return []
+    xy = np.array([(p.x, p.y) for p in spheres]).reshape(-1, 2)
+
+    def nearest(points: list[tuple[float, float]]) -> np.ndarray:
+        if not points:
+            return np.full(len(xy), np.inf)
+        return cKDTree(np.asarray(points, float)).query(xy)[0]
+
+    to_photo, to_placed = nearest(places), nearest(placed)
+    rank = [
+        0 if d <= SCENE_REACH_M else 1 if any(a.contains(Point(p.x, p.y)) for a in areas) else 2
+        for p, d in zip(spheres, to_placed, strict=True)
+    ]
+    order = sorted(range(len(spheres)), key=lambda i: (rank[i], to_photo[i]))
+    return [spheres[i] for i in order if to_photo[i] <= SCENE_REACH_M]
+
+
+def _segment_homes(
+    homes: list[match.Panorama], spheres: list[match.Panorama], fixed: set[str], masks
+) -> None:
+    """Segments, in the order of `homes`, each one and its neighbours walls are fitted from
+    (see depth.candidates) that has no mask yet (`masks`: a segment.Segmenter that makes them)."""
+    for n, home in enumerate(homes, 1):
+        for p in [home, *depth.candidates(home, spheres, fixed)]:
+            if not masks.kept(p):
+                started = time.monotonic()
+                masks.made(p)
+                typer.echo(f"{n} {p.id} segmenté en {time.monotonic() - started:.1f} s")
+
+
+def _make_walls(
+    homes: list[match.Panorama],
+    scenes: _Scenes,
+    until: float,
+    clock: Callable[[], float] = time.time,
+) -> int:
+    """Each home matched with its neighbours (the pairs missing, see _Scenes.pair) and its walls
+    fitted and kept (see _Scenes.scene, `made_only`), in order, until the hour `until` (epoch
+    seconds: checked between two panoramas); how many were made."""
+    for n, home in enumerate(homes):
+        if clock() > until:
+            typer.echo("arrêté : l'heure est passée")
+            return n
+        started = time.monotonic()
+        for other in scenes._asked(home, None, made_only=False):
+            scenes.pair(home, other)
+        found = scenes.scene(home.id, None, made_only=True)
+        walls = 0 if found is None else len(found.walls)
+        typer.echo(f"{n + 1} {home.id} : {walls} murs en {time.monotonic() - started:.1f} s")
+    return len(homes)
+
+
+def _until(hour: str | None) -> float:
+    """The next time it is `hour` ("HH:MM"), in epoch seconds; never (none)."""
+    if hour is None:
+        return float("inf")
+    at = datetime.combine(date.today(), datetime.strptime(hour, "%H:%M").time())
+    return (at if at > datetime.now() else at + timedelta(days=1)).timestamp()
+
+
+@app.command("murs")
+def make_walls(
+    masques: Annotated[bool, typer.Option(help="seulement la segmentation qui manque")] = False,
+    jusqua: Annotated[
+        str | None, typer.Option(help="s'arrête entre deux panoramas passé cette heure (HH:MM)")
+    ] = None,
+) -> None:
+    """Fait les murs ajustés que `match` et la page de confirmation lisent : chaque panorama à
+    moins de SCENE_REACH_M d'une photo, apparié à ses voisins (DISK, une fois par paire), ses
+    murs ajustés et gardés ; près des placements d'abord, puis dans les quartiers, puis le
+    reste, le plus près d'une photo d'abord. `--masques` : seulement la segmentation qui leur
+    manque (le modèle et l'apparieur ne tiennent pas ensemble en mémoire : deux passages).
+    Reprend où il s'était arrêté."""
+    heights, near_by, then = _matching()  # as match has them: the walls kept are its own
+    with closing(db.connect(DB_PATH)) as conn:
+        walk = export.photos(conn, DATA / "pilot", REVIEWS)
+    fixed = _colmap_fixed()
+    placed = [(m["x"], m["y"]) for m in _matches().values() if m and "x" in m]
+    areas = [square.buffer(SCENE_REACH_M) for square in pilot.AREAS.values()]
+    homes = _wall_homes(near_by, [_place_of(me) for me in walk], placed, areas)
+    typer.echo(f"{len(homes)} panoramas à moins de {SCENE_REACH_M:.0f} m d'une photo")
+    if masques:
+        masks = segment.Segmenter(VIEW_STRUCTURE, threading.Lock(), _levelled_name)
+        _segment_homes(homes, near_by, fixed, masks)
+        return
+    _make_walls(homes, _wall_scenes(near_by, fixed, lambda: _views(kept=8)), _until(jusqua))
 
 
 def _wall_depth(scenes: _Scenes, but: frozenset[str] = frozenset()) -> match.Depth:

@@ -2123,3 +2123,45 @@ def test_the_areas_message_tells_a_check_not_made_from_one_that_failed(
     assert "contrôle non passé : DISK (saint-severin), DISK (cite)" in said
     assert "`flaneur match-check --perimes --matcher lomag`" in said
     assert "--matcher disk" not in said  # done for these panoramas: doing it again changes nothing
+
+
+def test_walls_go_near_the_placements_first_then_the_areas_then_the_rest():
+    from shapely.geometry import box
+
+    spheres = [_panorama(n, 100.0 * n, 0.0) for n in range(4)]  # 0, 100, 200, 300 m east
+    places = [(5.0 + 100.0 * n, 0.0) for n in range(3)]  # a photo by each but the last
+    near_placed = [(210.0, 0.0)]
+    in_area = [box(90.0, -10.0, 110.0, 10.0)]
+
+    homes = cli._wall_homes(spheres, places, near_placed, in_area)
+
+    assert [p.id for p in homes] == [spheres[2].id, spheres[1].id, spheres[0].id]
+
+
+def test_walls_masks_only_segments_what_is_missing(monkeypatch):
+    home, beside = _panorama(1, 0.0, 0.0), _panorama(2, 5.0, 0.0)
+    monkeypatch.setattr(cli.depth, "candidates", lambda home, spheres, fixed: [beside])
+    made = []
+    masks = SimpleNamespace(kept=lambda p: p is home, made=lambda p: made.append(p.id))
+
+    cli._segment_homes([home], [home, beside], set(), masks)
+
+    assert made == [beside.id]
+
+
+def test_walls_stop_between_two_panoramas_after_the_hour(monkeypatch, tmp_path):
+    _, scenes, home = _scenes(monkeypatch, tmp_path, kept=tmp_path / "fitted")
+    hours = iter([0.0, 10.0, 20.0])
+
+    done = cli._make_walls([home, home, home], scenes, until=5.0, clock=lambda: next(hours))
+
+    assert done == 1
+
+
+def test_walls_made_are_cached_for_match(monkeypatch, tmp_path):
+    asked, scenes, home = _scenes(monkeypatch, tmp_path, kept=tmp_path / "fitted")
+
+    cli._make_walls([home], scenes, until=float("inf"))
+
+    assert asked == [("home", "beside")]  # the pair made
+    assert (tmp_path / "fitted" / f"{cli._levelled_name(home)}.json").exists()  # its walls kept
