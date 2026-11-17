@@ -1963,14 +1963,19 @@ def _same_camera(camera: dict, other: dict) -> bool:
 
 
 def _stands(photo_id: str, kept: dict | None, inputs: str, judged: "_Judged") -> bool:
-    """Whether a placement as kept stands as it is now: the user said yes to it and the photo
-    is the same, or it was made from `inputs` (the photo and its panoramas as they are now) and
-    the user did not turn it down (see _Judged)."""
+    """Whether a placement as kept stands as it is now (see _found_as_now) and the user did not
+    turn it down, unless the yes holds (see _Judged)."""
+    return _found_as_now(photo_id, kept, inputs, judged) and (
+        judged.holds(photo_id, kept) or not judged.turned_down(photo_id, kept)
+    )
+
+
+def _found_as_now(photo_id: str, kept: dict | None, inputs: str, judged: "_Judged") -> bool:
+    """Whether a placement as kept is one of the photo as it is now: the user said yes to it and
+    the photo is the same, or it was made from `inputs` (the photo and its panoramas now)."""
     if not kept or "x" not in kept:
         return False
-    return judged.holds(photo_id, kept) or (
-        _placed_now(kept, inputs) and not judged.turned_down(photo_id, kept)
-    )
+    return judged.holds(photo_id, kept) or _placed_now(kept, inputs)
 
 
 def _photo_of(inputs: str) -> str:
@@ -2977,39 +2982,41 @@ CHECKED_AREAS = DATA / "pilot" / "checked_areas.json"  # each area's matchers pa
 
 
 def _placed_photos(write: bool = False) -> dict[str, placed.Placed]:
-    """The photos placed now (see placed.build): the placing page's answers; match's placements
-    made from what each photo is now (or said yes to, the photo the same), with the user's word,
-    each registered on its own (see _registrations); the area each camera stands in, and whether
-    the photo's landmarks are checked. `write`: kept in PLACED_PHOTOS too."""
+    """The photos placed now (see placed.build): the placing page's answers on the image each
+    has now; match's placements of each photo as it is now (see _found_as_now), and the yes
+    given to cameras matching turned down (as _situated), each with the user's word, whether
+    its matcher passes the check in the area its camera stands in, its landmarks' state (on
+    that image). `write`: kept in PLACED_PHOTOS too, when changed."""
     _, answers, far = _placing_answers()
-    scenes, judged = _scenes_now(), _Judged()
-    standing = {
-        k: m
+    scenes, judged, checked = _scenes_now(), _Judged(), register.load(CHECKED_AREAS)
+    marks = marking.states(SIGHTS)
+
+    def weighed(k: str, m: dict) -> placed.Matched:
+        said, image = judged.on(k, m), _image(k)
+        mark, marked_on = marks.get(k, (None, None))
+        area = checked.get(_area_of((m["x"], m["y"])), [])
+        return placed.Matched(
+            m,
+            said and said["verdict"],
+            image,
+            (m.get("matcher") or DISK) in area,
+            mark if marked_on == image else None,
+        )
+
+    matched = {
+        k: weighed(k, m)
         for k, m in _matches().items()
-        if m
-        and "x" in m
-        and k in scenes
+        if k in scenes
         and _exported(k).exists()
-        and (_placed_now(m, _inputs(scenes[k], k)) or judged.holds(k, m))
+        and _found_as_now(k, m, _inputs(scenes[k], k), judged)
     }
-    marks = {
-        k: "checked" if marking.checked(rows) else "proposed"
-        for k, rows in marking.by_photo(SIGHTS).items()
-        if any("landmarks" in r for r in rows)
-    }
-    found = placed.build(
-        answers,
-        far,
-        standing,
-        {k: said["verdict"] for k, m in standing.items() if (said := judged.on(k, m))},
-        _registrations(standing),
-        {k: _image(k) for k in {*standing, *answers} if _exported(k).exists()},
-        register.load(CHECKED_AREAS),
-        {k: _area_of((m["x"], m["y"])) for k, m in standing.items()},
-        marks,
-    )
-    if write:
-        write_json(PLACED_PHOTOS, {k: asdict(p) for k, p in found.items()})
+    for k, p in _proposed_now(scenes, judged).items():
+        if judged.said_yes(k, p) and not (k in matched and matched[k].verdict == "yes"):
+            matched[k] = weighed(k, p)  # the user's yes wins over a placement not judged
+    found = placed.build(_on_image_now(answers), far, matched, _registrations)
+    rows = {k: asdict(p) for k, p in found.items()}
+    if write and rows != register.load(PLACED_PHOTOS):
+        write_json(PLACED_PHOTOS, rows)
     return found
 
 

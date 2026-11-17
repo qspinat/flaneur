@@ -1922,8 +1922,19 @@ def test_the_placed_list_is_written_from_the_answers_verdicts_and_matches(monkey
     exported = tmp_path / "old.jpg"
     exported.touch()
     answer = {"registration": {"panorama": "q"}, "inputs": "h", "flipped": False}
+    said = [("pm:1", "near", "i"), ("pp", "yes", "i:proposed-ab12cd34")]  # pp: a camera refused
     (tmp_path / "anchors.jsonl").write_text(
-        json.dumps({"photo_id": "pm:1", "verdict": "near", "inputs": "i"}) + "\n"
+        "".join(json.dumps({"photo_id": k, "verdict": v, "inputs": i}) + "\n" for k, v, i in said)
+    )
+    marked = [("pm:3", "h"), ("pm:4", "before")]  # proposed on today's crop, on an older one
+    (tmp_path / "sights.jsonl").write_text(
+        "".join(
+            json.dumps(
+                {"photo_id": k, "image": i, "landmarks": ["notre-dame-tours"], "column": 0.5}
+            )
+            + "\n"
+            for k, i in marked
+        )
     )
     for name, value in {
         "PLACED_PHOTOS": tmp_path / "placed.json",
@@ -1931,8 +1942,14 @@ def test_the_placed_list_is_written_from_the_answers_verdicts_and_matches(monkey
         "SIGHTS": tmp_path / "sights.jsonl",
         "ANCHORS": tmp_path / "anchors.jsonl",
         "_placing_answers": lambda: ({}, {"pa": answer}, set()),
-        "_scenes_now": lambda: {"pm:1": "s", "pm:2": "s"},
-        "_matches": lambda: {"pm:1": _kept(), "pm:2": _kept(inputs="before")},
+        "_scenes_now": lambda: {k: "s" for k in ("pm:1", "pm:2", "pm:3", "pm:4", "pp")},
+        "_matches": lambda: {
+            "pm:1": _kept(),
+            "pm:2": _kept(inputs="before"),
+            "pm:3": _kept(),
+            "pm:4": _kept(),
+        },
+        "_proposed_now": lambda scenes, judged: {"pp": _kept(inputs="i:proposed-ab12cd34")},
         "_inputs": lambda scene, photo_id: "i",
         "_exported": lambda photo_id: exported,
         "_image": lambda photo_id: "h",
@@ -1943,7 +1960,10 @@ def test_the_placed_list_is_written_from_the_answers_verdicts_and_matches(monkey
     cli._placed_photos(write=True)
 
     written = json.loads((tmp_path / "placed.json").read_text())
-    assert {k: (p["status"], p["source"]) for k, p in written.items()} == {
-        "pa": ("checked", "page"),
-        "pm:1": ("near", "match"),  # pm:2 was placed from what the photo no longer is
+    assert {k: (p["status"], p["source"], p["proposed_marks"]) for k, p in written.items()} == {
+        "pa": ("checked", "page", False),
+        "pm:1": ("near", "match", False),  # pm:2 was placed from what the photo no longer is
+        "pm:3": ("automatic", "match", True),
+        "pm:4": ("automatic", "match", False),  # its marks were made on another crop
+        "pp": ("checked", "match", False),
     }
