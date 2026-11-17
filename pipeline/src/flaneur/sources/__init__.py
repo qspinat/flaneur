@@ -1,9 +1,11 @@
 """Archive sources. Each module exposes `harvest(client, cache_dir) -> Iterator[Photo]`."""
 
+import glob
 import hashlib
 import json
 import math
-import tempfile
+import os
+import secrets
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -14,17 +16,27 @@ def write_atomic(path: Path, write: Callable[[BinaryIO], None]) -> None:
     """Write a file whole, then name it: an interrupted write never leaves a truncated one, and
     two processes writing it at once each name a whole draft of their own (the last wins)."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.NamedTemporaryFile(
-        "wb", dir=path.parent, prefix=f"{path.name}.", suffix=".tmp", delete=False
-    ) as out:
-        try:
+    for left in path.parent.glob(f"{glob.escape(path.name)}.*-*.tmp"):  # a writer killed
+        if not _alive(int(left.name[len(path.name) + 1 :].split("-")[0])):
+            left.unlink(missing_ok=True)
+    draft = path.with_name(f"{path.name}.{os.getpid()}-{secrets.token_hex(4)}.tmp")  # its own
+    try:
+        with draft.open("wb") as out:
             write(out)
-        except BaseException:
-            out.close()
-            Path(out.name).unlink(missing_ok=True)
-            raise
-    Path(out.name).chmod(0o644)  # as written plainly (a draft is the owner's only)
-    Path(out.name).replace(path)
+        draft.replace(path)
+    finally:
+        draft.unlink(missing_ok=True)
+
+
+def _alive(pid: int) -> bool:
+    """Whether a process runs with this id."""
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:  # another user's
+        return True
+    return True
 
 
 def sha256(path: Path) -> str:

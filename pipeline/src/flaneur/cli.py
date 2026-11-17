@@ -3051,7 +3051,11 @@ def _make_walls(homes: list[match.Panorama], scenes: _Scenes) -> None:
     written whole."""
     for n, home in enumerate(homes, 1):
         started = time.monotonic()
-        found = scenes.make(home)
+        try:
+            found = scenes.make(home)
+        except Exception as error:  # this one left (memory, a picture): the others go on
+            typer.echo(f"{home.id} : laissé ({error})", err=True)
+            continue
         walls = 0 if found is None else len(found.walls)
         typer.echo(f"{n} {home.id} : {walls} murs en {time.monotonic() - started:.1f} s")
 
@@ -3182,6 +3186,8 @@ def _placed_photos(write: bool = False, answering: tuple | None = None) -> dict[
     def weighed(k: str, m: dict) -> placed.Matched:
         said, image = judged.on(k, m), _image(k)
         mark, marked_on = marks.get(k, (None, None))
+        if _photo_of(m["inputs"]) != _photo_part(k):  # placed before these marks: not on them
+            mark = None
         area = checked.get(_area_of((m["x"], m["y"])), [])
         return placed.Matched(
             m,
@@ -3217,11 +3223,16 @@ def _shown_in_3d(answering: tuple | None = None) -> dict[str, dict]:
     }
 
 
+@functools.cache
+def _registering_code() -> str:
+    """The code a placement of match is registered by, hashed."""
+    return _hash_of(bridging, registration, placed)
+
+
 def _registered_as(kept: dict) -> str:
-    """What a placement's registration is made from: its inputs and its camera."""
-    return _digest(
-        [kept["inputs"], [round(kept[k], 3) for k in ("x", "y", "heading", "fov", "horizon")]]
-    )
+    """What a placement's registration is made from: its inputs, its camera and the code."""
+    camera = [round(kept[k], 3) for k in ("x", "y", "heading", "fov", "horizon")]
+    return _digest([kept["inputs"], camera, _registering_code()])
 
 
 def _registrations(standing: dict[str, dict]) -> dict[str, dict | None]:

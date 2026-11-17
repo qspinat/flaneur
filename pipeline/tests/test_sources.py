@@ -196,3 +196,13 @@ def test_two_writers_of_one_file_never_share_a_draft(tmp_path):
 
     assert path.read_bytes() == b"first whole"  # the last named, whole
     assert path.stat().st_mode & 0o777 == 0o644 and list(tmp_path.iterdir()) == [path]
+
+
+def test_a_draft_left_by_a_writer_stopped_dead_is_cleared(tmp_path):
+    path = tmp_path / "f.json"
+    left = tmp_path / "f.json.999999-1.tmp"  # no process 999999: killed mid-write
+    left.write_bytes(b"half")
+
+    write_atomic(path, lambda out: out.write(b"whole"))
+
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["f.json"]

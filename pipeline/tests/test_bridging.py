@@ -75,3 +75,12 @@ def test_fewer_than_fifteen_pairs_pair_nothing():
     points, observed = _seen(world, pixels, {"a": list(range(14)), "b": list(range(60))})
 
     assert bridging.paired(points, observed, A, (600, 800)) is None
+
+
+def test_a_detail_matched_twice_by_a_panorama_keeps_its_first_ray():
+    world, pixels = facade_seen_from_the_origin()
+    points, observed = _seen(world, pixels, {"a": [0, 1, 0]})  # detail 0 matched twice
+
+    rows = bridging.own_rows(points, observed, "a")
+
+    assert rows[0] == 0

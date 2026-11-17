@@ -38,8 +38,9 @@ def own_rows(points: match.Points, observed: match.Observed, panorama: str) -> n
     first: one ray a detail and a panorama); -1 where it matched none."""
     rays = observed.rays
     mine = np.flatnonzero(rays.sources == panorama)
+    keys, first = np.unique(rays.keys[mine], return_index=True)
     row_of = np.full(len(observed.pixels), -1)
-    row_of[rays.keys[mine][::-1]] = mine[::-1]  # the first written last: it holds
+    row_of[keys] = mine[first]
     keys = _keys_of(points.pixels, observed)
     return np.where(keys >= 0, row_of[np.maximum(keys, 0)], -1)
 

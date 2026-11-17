@@ -2045,6 +2045,7 @@ def test_the_placed_list_is_written_from_the_answers_verdicts_and_matches(monkey
             "pp": _kept(inputs="i:proposed-ab12cd34")
         },
         "_inputs": lambda scene, photo_id: "i",
+        "_photo_part": lambda photo_id: "",  # each placed from the photo as it is (see "i")
         "_exported": lambda photo_id: exported,
         "_image": lambda photo_id: "h",
         "_registrations": lambda standing: {k: {"panorama": "p"} for k in standing},
@@ -2390,3 +2391,69 @@ def test_no_test_reaches_the_pipeline_s_data(tmp_path):
     written = [cli.CHECKED_AREAS, cli.PLACED_PHOTOS, cli.REGISTERED, cli.MATCHES, cli.WEB_DATA]
 
     assert all(path.is_relative_to(tmp_path) for path in written)
+
+
+def test_a_panorama_whose_walls_fail_leaves_the_others_made(capsys):
+    broken, home = _panorama(1, 0.0, 0.0), _panorama(2, 5.0, 0.0)
+    made = []
+
+    def make(p):
+        if p is broken:
+            raise MemoryError("out of memory")
+        made.append(p.id)
+
+    cli._make_walls([broken, home], SimpleNamespace(make=make))
+
+    assert made == [home.id] and "laissé" in capsys.readouterr().err
+
+
+def test_a_registration_is_made_again_when_the_registering_code_changes(monkeypatch, tmp_path):
+    monkeypatch.setattr(cli, "REGISTERED", tmp_path / "registered.json")
+    monkeypatch.setattr(cli, "_registering_world", lambda: ({}, set()))
+    made = []
+    monkeypatch.setattr(cli, "_register_one", lambda k, m, by_id, fixed: made.append(k) or None)
+    placed_at = _kept(matcher="lomag")
+
+    cli._registrations({"pm:1": placed_at})
+    monkeypatch.setattr(cli, "_registering_code", lambda: "fixed since")
+    cli._registrations({"pm:1": placed_at})
+
+    assert made == ["pm:1", "pm:1"]
+
+
+def test_proposed_marks_are_said_only_of_a_placement_made_with_them(monkeypatch, tmp_path):
+    exported = tmp_path / "old.jpg"
+    exported.touch()
+    (tmp_path / "anchors.jsonl").write_text("")
+    (tmp_path / "sights.jsonl").write_text(
+        "".join(
+            json.dumps(
+                {"photo_id": k, "image": "h", "landmarks": ["notre-dame-tours"], "column": 0.5}
+            )
+            + "\n"
+            for k in ("with", "before")
+        )
+    )
+    for name, value in {
+        "PLACED_PHOTOS": tmp_path / "placed.json",
+        "CHECKED_AREAS": tmp_path / "checked_areas.json",
+        "SIGHTS": tmp_path / "sights.jsonl",
+        "ANCHORS": tmp_path / "anchors.jsonl",
+        "_placing_answers": lambda: ({}, {}, set()),
+        "_scenes_now": lambda: {"with": "s", "before": "s"},
+        "_matches": lambda: {
+            "with": _kept(inputs="s:h:abcd1234"),  # placed with today's marks
+            "before": _kept(inputs="s:h"),  # placed before they were proposed
+        },
+        "_proposed_now": lambda scenes, judged, marks=True: {},
+        "_inputs": lambda scene, photo_id: "s:h:abcd1234",
+        "_photo_part": lambda photo_id: "h:abcd1234",
+        "_exported": lambda photo_id: exported,
+        "_image": lambda photo_id: "h",
+        "_registrations": lambda standing: {k: {"panorama": "p"} for k in standing},
+    }.items():
+        monkeypatch.setattr(cli, name, value)
+
+    found = cli._placed_photos()
+
+    assert (found["with"].proposed_marks, found["before"].proposed_marks) == (True, False)
