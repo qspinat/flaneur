@@ -1049,11 +1049,14 @@ def _found_inputs(placed: str, matcher: str | None) -> str:
 
 def _tried(kept: dict | None, inputs: str) -> list[str]:
     """The matchers a photo was tried with from these `inputs` (none: from others, or never;
-    before LoMa-G, only DISK was)."""
+    before LoMa-G, only DISK was): a placement kept though they found nothing says so
+    (`tried_from`, see _still_shown)."""
     if not kept:
         return []
     if "x" in kept:
-        return kept.get("tried", [kept.get("matcher") or DISK]) if _placed_now(kept, inputs) else []
+        if _placed_now(kept, inputs):
+            return kept.get("tried", [kept.get("matcher") or DISK])
+        return kept.get("tried", []) if kept.get("tried_from") == inputs else []
     return kept.get("tried", [DISK]) if kept.get("inputs") == inputs else []
 
 
@@ -1789,7 +1792,11 @@ def _match_with(matcher: str, photos: list[export.WalkPhoto], at: _Run) -> None:
         if camera is None:  # kept, with what it was tried from: not tried again for nothing
             before = at.found.get(me.id)
             if not _stands(me.id, before, inputs, at.judged):
-                at.found[me.id] = {"inputs": inputs, "tried": at.tried[me.id]}
+                at.found[me.id] = (
+                    {**before, "tried": at.tried[me.id], "tried_from": inputs}
+                    if _still_shown(me.id, before, inputs, at.judged)  # near, or marked since
+                    else {"inputs": inputs, "tried": at.tried[me.id]}
+                )
             typer.echo(f"{me.id} : rien de sûr ({MATCHERS[matcher].label})")
         else:
             moved = float(np.hypot(camera.x - here[0], camera.y - here[1]))
@@ -2017,6 +2024,17 @@ def _found_as_now(
         return True
     placed_from = _placed_inputs(inputs, kept.get("matcher"))
     return _marks_aside(kept["inputs"]) == _marks_aside(placed_from)
+
+
+def _still_shown(photo_id: str, kept: dict | None, inputs: str, judged: "_Judged") -> bool:
+    """Whether a placement a run found nothing better than is kept all the same: shown as the
+    photo is now (see _found_as_now, its marks aside) and not refused (said near: the right
+    place, the camera to set by hand). Kept, it says what it was tried from (see _tried):
+    not tried again every night."""
+    said = judged.on(photo_id, kept) if kept else None
+    return _found_as_now(photo_id, kept, inputs, judged, marks=False) and not (
+        said and said["verdict"] == "no"
+    )
 
 
 def _marks_aside(inputs: str) -> str:

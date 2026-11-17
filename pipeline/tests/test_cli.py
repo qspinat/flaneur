@@ -745,6 +745,45 @@ def test_a_run_that_finds_nothing_replaces_a_stale_or_refused_placement(
     assert kept == {"inputs": "i", "tried": ["lomag", "disk"], "fitted_from": "walls"}
 
 
+def _alone(tmp_path, monkeypatch, before: dict) -> list[str]:
+    """`match` over pm:1 alone, placed as `before`, no matcher finding anything: the matchers
+    tried, in order."""
+    tries = []
+    _match_world(tmp_path, monkeypatch, {"pm:1": dict(before)}, lambda m: tries.append(m))
+    monkeypatch.setattr(cli.export, "photos", lambda *args: [SimpleNamespace(id="pm:1")])
+    return tries
+
+
+def test_a_near_placement_stays_when_the_other_matcher_finds_nothing(tmp_path, monkeypatch):
+    before = _kept(inputs="i:lomag", matcher="lomag", tried=["lomag"], fitted_from="walls")
+    tries = _alone(tmp_path, monkeypatch, before)
+    said = _said("near", "i:lomag", x=1.0, y=2.0)
+    (tmp_path / "anchors.jsonl").write_text(json.dumps({**said, "photo_id": "pm:1"}) + "\n")
+
+    cli.match_photos(photo=None, again=False)
+    kept = json.loads((tmp_path / "matches.json").read_text())["pm:1"]
+    monkeypatch.setattr(cli, "_matches", lambda: {"pm:1": kept})
+    cli.match_photos(photo=None, again=False)  # the next night
+
+    assert (kept["x"], kept["tried"]) == (before["x"], ["lomag", "disk"])  # still near, shown
+    assert tries == ["disk"]  # DISK tried once, not every night
+
+
+def test_a_placement_marked_since_stays_when_its_redo_finds_nothing(tmp_path, monkeypatch):
+    image = "1234567890abcdef"
+    before = _kept(inputs=f"s:{image}", matcher="disk", tried=["disk"], fitted_from="walls")
+    tries = _alone(tmp_path, monkeypatch, before)
+    monkeypatch.setattr(cli, "_inputs", lambda scene, photo_id: f"s:{image}:ab12cd34")
+
+    cli.match_photos(photo=None, again=False)
+    kept = json.loads((tmp_path / "matches.json").read_text())["pm:1"]
+    monkeypatch.setattr(cli, "_matches", lambda: {"pm:1": kept})
+    cli.match_photos(photo=None, again=False)  # the next night
+
+    assert (kept["x"], kept["inputs"]) == (before["x"], before["inputs"])
+    assert tries == ["lomag", "disk"]  # tried with the marks once, not every night
+
+
 def _candidate(agree, why, x=10.0):
     return {
         "x": x,
@@ -2345,3 +2384,9 @@ def test_a_proposed_camera_and_a_confirmed_place_stay_once_marked(monkeypatch, t
 
     assert set(cli._proposed_now({"pp": "s"}, judged, marks=False)) == {"pp"}
     assert set(cli._confirmed()) == {"pp"}  # the walk keeps its place
+
+
+def test_no_test_reaches_the_pipeline_s_data(tmp_path):
+    written = [cli.CHECKED_AREAS, cli.PLACED_PHOTOS, cli.REGISTERED, cli.MATCHES, cli.WEB_DATA]
+
+    assert all(path.is_relative_to(tmp_path) for path in written)

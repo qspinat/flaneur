@@ -3,6 +3,7 @@
 import hashlib
 import json
 import math
+import tempfile
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -10,12 +11,20 @@ from typing import Any, BinaryIO
 
 
 def write_atomic(path: Path, write: Callable[[BinaryIO], None]) -> None:
-    """Write a file whole, then name it: an interrupted write never leaves a truncated one."""
+    """Write a file whole, then name it: an interrupted write never leaves a truncated one, and
+    two processes writing it at once each name a whole draft of their own (the last wins)."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    with tmp.open("wb") as out:
-        write(out)
-    tmp.replace(path)
+    with tempfile.NamedTemporaryFile(
+        "wb", dir=path.parent, prefix=f"{path.name}.", suffix=".tmp", delete=False
+    ) as out:
+        try:
+            write(out)
+        except BaseException:
+            out.close()
+            Path(out.name).unlink(missing_ok=True)
+            raise
+    Path(out.name).chmod(0o644)  # as written plainly (a draft is the owner's only)
+    Path(out.name).replace(path)
 
 
 def sha256(path: Path) -> str:
