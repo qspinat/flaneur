@@ -478,3 +478,26 @@ def test_walls_drawn_at_a_panorama_follow_it_when_it_is_set_right(tmp_path):
 
     assert [*walls[0].a, *walls[0].b] == pytest.approx([110.0, 200.0, 110.0, 190.0])
     assert [*removed[0][0], *removed[0][1]] == pytest.approx([105.0, 210.0, 115.0, 210.0])
+
+
+def test_a_scene_gives_a_ray_its_point_and_wall_row_and_nothing_on_the_street_or_the_sky():
+    wall = facades.Wall((-5.0, 10.0), (5.0, 10.0), 9.0, "fitted")
+    scene = facades.Scene("p", (0.0, 0.0, 2.5), 0.0, (wall,), (), 0)
+    rays = np.array([[0.0, 1.0, 0.0], [0.0, 0.2, -1.0], [0.0, 0.3, 1.0]])
+    rays /= np.linalg.norm(rays, axis=1, keepdims=True)
+
+    points, rows = facades.depth_of(scene, rays)
+
+    assert points[0] == pytest.approx([0.0, 10.0, 2.5])
+    assert rows[0].tolist() == [-5.0, 10.0, 5.0, 10.0, 0.0, 9.0]
+    assert np.isnan(points[1:]).all() and np.isnan(rows[1:]).all()  # the street, the sky
+
+
+def test_walls_drawn_at_a_panorama_left_out_are_not_read(tmp_path):
+    path = tmp_path / "walls.jsonl"
+    facades.record(path, "me", [facades.Wall((0.0, 5.0), (4.0, 5.0), None, "drawn")], [])
+    facades.record(path, "other", [facades.Wall((0.0, 6.0), (4.0, 6.0), None, "drawn")], [])
+
+    drawn, _ = facades.saved_near(path, 0.0, 0.0, but=frozenset({"me"}))
+
+    assert [w.at for w in drawn] == ["other"]
