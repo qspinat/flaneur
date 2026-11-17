@@ -2106,3 +2106,20 @@ def test_the_export_checks_a_hand_placement_against_the_image_it_writes(monkeypa
     monkeypatch.setattr(cli, "_shown_in_3d", lambda answering=None: shown)
 
     assert cli._placed_on(({}, answers, set())) == {"pa": "h", "pm:1": "new"}
+
+
+def test_the_areas_message_tells_a_check_not_made_from_one_that_failed(
+    monkeypatch, tmp_path, capsys
+):
+    monkeypatch.setattr(cli, "MATCH_CHECK", tmp_path / "check.json")
+    monkeypatch.setattr(cli, "_check_setup", lambda matcher, area, near_by: "now")
+    failed = {a: {"passed": False, "setup": "now"} for a in ("cite", "saint-severin")}
+    (tmp_path / "check.json").write_text(json.dumps(failed))  # DISK's: done, not passed
+    # LoMa-G's: never made
+
+    cli._checked_in([])
+
+    said = capsys.readouterr().out
+    assert "contrôle non passé : DISK (saint-severin), DISK (cite)" in said
+    assert "`flaneur match-check --perimes --matcher lomag`" in said
+    assert "--matcher disk" not in said  # done for these panoramas: doing it again changes nothing

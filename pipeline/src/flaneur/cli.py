@@ -10,7 +10,7 @@ import shutil
 import socket
 import threading
 import time
-from collections import Counter, OrderedDict
+from collections import Counter, OrderedDict, defaultdict
 from collections.abc import Callable, Iterable, Sequence, Set
 from contextlib import closing
 from dataclasses import asdict, fields, replace
@@ -1805,23 +1805,25 @@ def _match_with(matcher: str, photos: list[export.WalkPhoto], at: _Run) -> None:
 def _checked_in(near_by: list[match.Panorama]) -> dict[str, list[str]]:
     """For each area, the matchers whose known-answer check passed there for its panoramas as
     they are: how sure a placement of each is there (see placed.Matched), not whether it is
-    tried."""
-    checked = {
-        name: [
-            m
-            for m in MATCHERS
-            if (check := _per_area(MATCH_CHECK, m).get(name, {})).get("passed")
-            and _check_current(check, m, name, near_by)
-        ]
-        for name in pilot.AREAS
-    }
-    if waiting := [
-        f"{MATCHERS[m].label} ({a})" for a, ms in checked.items() for m in MATCHERS if m not in ms
-    ]:
+    tried. Says which checks are still to make (with the command), and which failed."""
+    checked: dict[str, list[str]] = {name: [] for name in pilot.AREAS}
+    to_make, failed = defaultdict(list), []
+    for name in pilot.AREAS:
+        for m in MATCHERS:
+            check = _per_area(MATCH_CHECK, m).get(name, {})
+            if not _check_current(check, m, name, near_by):
+                to_make[m].append(name)
+            elif check.get("passed"):
+                checked[name].append(m)
+            else:
+                failed.append(f"{MATCHERS[m].label} ({name})")
+    for m, areas in to_make.items():
         typer.echo(
-            f"pas encore contrôlés pour ces panoramas, leurs placements le disent : "
-            f"{', '.join(waiting)} (`flaneur match-check --perimes`)"
+            f"{MATCHERS[m].label} pas encore contrôlé pour ces panoramas ({', '.join(areas)}) : "
+            f"`flaneur match-check --perimes --matcher {m}`"
         )
+    if failed:
+        typer.echo(f"contrôle non passé : {', '.join(failed)} (leurs placements le disent)")
     return checked
 
 
