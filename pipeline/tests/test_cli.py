@@ -2046,3 +2046,11 @@ def test_porter_carries_a_placement_of_match_too(monkeypatch, tmp_path):
     carried = json.loads((tmp_path / "carried.json").read_text())
     assert carried["pm:1"]["copies"] == ["copy"]
     assert carried["pm:1"]["made"] == cli._answered_as(row)
+
+
+def test_the_export_checks_a_hand_placement_against_the_image_it_writes(monkeypatch):
+    answers = {"pa": {"inputs": "h"}, "pm:1": {"inputs": "old"}}  # pa: its image not yet written
+    shown = {"pm:1": {"inputs": "new"}}  # pm:1's answer was on an old image: match's instead
+    monkeypatch.setattr(cli, "_shown_in_3d", lambda answering=None: shown)
+
+    assert cli._placed_on(({}, answers, set())) == {"pa": "h", "pm:1": "new"}

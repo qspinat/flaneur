@@ -282,6 +282,14 @@ def _carried(placed: dict[str, dict], now: dict[str, tuple]) -> dict[str, dict]:
     }
 
 
+def _placed_on(answering: tuple) -> dict[str, str]:
+    """The image each photo is placed in 3D on (its hash), for the export to check against the
+    image it writes (see export.mark_3d): the list's (see _shown_in_3d), and every answer of
+    the placing page's own, for a photo whose image the export is about to write."""
+    answered = {i: r["inputs"] for i, r in answering[1].items()}
+    return answered | {i: r["inputs"] for i, r in _shown_in_3d(answering).items()}
+
+
 @app.command("export")
 def export_walk(images: bool = True) -> None:
     """Écrit la balade (photos relues appliquées, liens, vue d'aujourd'hui) pour le site."""
@@ -293,7 +301,7 @@ def export_walk(images: bool = True) -> None:
     if elsewhere:  # their image changed since: the placing page asks for them again
         typer.echo(f"{elsewhere} photos placées sur une image qu'elles n'ont plus : à revoir")
     if images:
-        placed_on = {i: r["inputs"] for i, r in _shown_in_3d(answering).items()}
+        placed_on = _placed_on(answering)
         with httpx.Client(timeout=120, follow_redirects=True) as client:
             walk = export.write(walk, client, DATA / "raw" / "images", WEB_DATA, placed_on, no_3d)
             seeds = [me for me in every if me.seeded]  # for matching only, kept apart
