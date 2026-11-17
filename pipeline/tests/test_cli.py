@@ -1916,3 +1916,34 @@ def test_a_registration_is_made_again_only_when_its_placement_changes(monkeypatc
     cli._registrations({"pm:1": {**placed_at, "heading": placed_at["heading"] + 5}})
 
     assert made == ["pm:1", "pm:1"]
+
+
+def test_the_placed_list_is_written_from_the_answers_verdicts_and_matches(monkeypatch, tmp_path):
+    exported = tmp_path / "old.jpg"
+    exported.touch()
+    answer = {"registration": {"panorama": "q"}, "inputs": "h", "flipped": False}
+    (tmp_path / "anchors.jsonl").write_text(
+        json.dumps({"photo_id": "pm:1", "verdict": "near", "inputs": "i"}) + "\n"
+    )
+    for name, value in {
+        "PLACED_PHOTOS": tmp_path / "placed.json",
+        "CHECKED_AREAS": tmp_path / "checked_areas.json",
+        "SIGHTS": tmp_path / "sights.jsonl",
+        "ANCHORS": tmp_path / "anchors.jsonl",
+        "_placing_answers": lambda: ({}, {"pa": answer}, set()),
+        "_scenes_now": lambda: {"pm:1": "s", "pm:2": "s"},
+        "_matches": lambda: {"pm:1": _kept(), "pm:2": _kept(inputs="before")},
+        "_inputs": lambda scene, photo_id: "i",
+        "_exported": lambda photo_id: exported,
+        "_image": lambda photo_id: "h",
+        "_registrations": lambda standing: {k: {"panorama": "p"} for k in standing},
+    }.items():
+        monkeypatch.setattr(cli, name, value)
+
+    cli._placed_photos(write=True)
+
+    written = json.loads((tmp_path / "placed.json").read_text())
+    assert {k: (p["status"], p["source"]) for k, p in written.items()} == {
+        "pa": ("checked", "page"),
+        "pm:1": ("near", "match"),  # pm:2 was placed from what the photo no longer is
+    }

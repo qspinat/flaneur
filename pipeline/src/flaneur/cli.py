@@ -2972,6 +2972,45 @@ def _kept_store(m: match.Situated, kept: dict | None) -> tuple[chain.Store, str]
 
 
 REGISTERED = DATA / "pilot" / "registered.json"  # each placement of match registered on its own
+PLACED_PHOTOS = DATA / "pilot" / "placed.json"  # the photos placed, each with its status
+CHECKED_AREAS = DATA / "pilot" / "checked_areas.json"  # each area's matchers passing the check
+
+
+def _placed_photos(write: bool = False) -> dict[str, placed.Placed]:
+    """The photos placed now (see placed.build): the placing page's answers; match's placements
+    made from what each photo is now (or said yes to, the photo the same), with the user's word,
+    each registered on its own (see _registrations); the area each camera stands in, and whether
+    the photo's landmarks are checked. `write`: kept in PLACED_PHOTOS too."""
+    _, answers, far = _placing_answers()
+    scenes, judged = _scenes_now(), _Judged()
+    standing = {
+        k: m
+        for k, m in _matches().items()
+        if m
+        and "x" in m
+        and k in scenes
+        and _exported(k).exists()
+        and (_placed_now(m, _inputs(scenes[k], k)) or judged.holds(k, m))
+    }
+    marks = {
+        k: "checked" if marking.checked(rows) else "proposed"
+        for k, rows in marking.by_photo(SIGHTS).items()
+        if any("landmarks" in r for r in rows)
+    }
+    found = placed.build(
+        answers,
+        far,
+        standing,
+        {k: said["verdict"] for k, m in standing.items() if (said := judged.on(k, m))},
+        _registrations(standing),
+        {k: _image(k) for k in {*standing, *answers} if _exported(k).exists()},
+        register.load(CHECKED_AREAS),
+        {k: _area_of((m["x"], m["y"])) for k, m in standing.items()},
+        marks,
+    )
+    if write:
+        write_json(PLACED_PHOTOS, {k: asdict(p) for k, p in found.items()})
+    return found
 
 
 def _registered_as(kept: dict) -> str:

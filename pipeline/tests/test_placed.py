@@ -59,3 +59,73 @@ def test_the_panorama_where_most_pairs_agree_wins_over_the_first():
     )
 
     assert placed.registered(points, observed, [A, HERE]).panorama == "here"
+
+
+REG = {"panorama": "p", "m": [1.0] * 9, "view": {"heading": 0.0, "pitch": 5.0, "fov": 75.0}}
+
+
+def _build(**given):
+    """The list from a few photos: `standing` placements of match (matcher LoMa-G), the
+    verdicts given, the page's answers; images all 'img'; area 'cite' checked for LoMa-G."""
+    standing = given.get("standing", {})
+    return placed.build(
+        answers=given.get("answers", {}),
+        far=given.get("far", set()),
+        standing={k: {"matcher": "lomag"} for k in standing},
+        verdicts=given.get("verdicts", {}),
+        registrations={k: REG for k in standing},
+        images={k: "img" for k in [*standing, *given.get("answers", {})]},
+        checked_areas=given.get("checked_areas", {"cite": ["lomag"]}),
+        area_of={k: "cite" for k in standing},
+        marks=given.get("marks", {}),
+    )
+
+
+def test_a_yes_is_checked_a_near_is_near_an_unseen_one_is_automatic():
+    found = _build(standing=["y", "n", "u"], verdicts={"y": "yes", "n": "near"})
+
+    assert {k: p.status for k, p in found.items()} == {
+        "y": placed.CHECKED,
+        "n": placed.NEAR,
+        "u": placed.AUTOMATIC,
+    }
+
+
+def test_a_no_leaves_the_list():
+    assert _build(standing=["x"], verdicts={"x": "no"}) == {}
+
+
+def test_an_answer_on_the_placing_page_wins_and_is_checked():
+    answer = {"registration": {**REG, "panorama": "q"}, "inputs": "img", "flipped": True}
+
+    found = _build(standing=["x"], answers={"x": answer})["x"]
+
+    assert (found.status, found.source, found.registration["panorama"], found.flipped) == (
+        placed.CHECKED,
+        "page",
+        "q",
+        True,
+    )
+
+
+def test_an_answer_far_takes_the_match_placement_out():
+    assert _build(standing=["x"], far={"x"}) == {}
+
+
+def test_an_answer_on_an_older_image_gives_way_to_match():
+    answer = {"registration": {**REG, "panorama": "q"}, "inputs": "old", "flipped": False}
+
+    found = _build(standing=["x"], answers={"x": answer})["x"]
+
+    assert (found.source, found.registration["panorama"]) == ("match", "p")
+
+
+def test_an_automatic_one_says_whether_its_area_passes_and_its_marks_are_checked():
+    passes = _build(standing=["x"], marks={"x": "checked"})["x"].for_scene()
+    not_yet = _build(standing=["x"], checked_areas={"cite": []}, marks={"x": "proposed"})["x"]
+
+    assert (passes["unchecked_area"], passes["proposed_marks"]) == (False, False)
+    assert (not_yet.for_scene()["unchecked_area"], not_yet.for_scene()["proposed_marks"]) == (
+        True,
+        True,
+    )
