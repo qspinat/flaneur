@@ -10,23 +10,20 @@ def registered(
     points: match.Points, observed: match.Observed, spheres: Sequence[match.Panorama]
 ) -> registration.Registration | None:
     """A placement of `match` registered on its own, as the placing page registers matched
-    pairs: in the first of `spheres` its points give pairs in (see bridging.paired) that a flat
-    warp fits; none if no panorama does."""
-    for sphere in spheres:
-        if (pairs := bridging.paired(points, observed, sphere, observed.size)) is None:
-            continue
-        try:
-            found, _ = registration.fit(
-                pairs.photo_px,
-                pairs.view_px,
-                observed.size,
-                placing.SHOWN,
-                sphere.id,
-                pairs.view,
-                sphere.axes,
-                robust=True,
-            )
-        except registration.NotFitted:
-            continue
-        return found
-    return None
+    pairs: in the panorama of `spheres` where most of its pairs (see bridging.paired) agree on
+    one flat warp, the first of equals; none if no panorama fits."""
+
+    def tries():
+        for sphere in spheres:
+            if (pairs := bridging.paired(points, observed, sphere, observed.size)) is not None:
+                yield (
+                    pairs.photo_px,
+                    pairs.view_px,
+                    observed.size,
+                    placing.SHOWN,
+                    sphere.id,
+                    pairs.view,
+                    sphere.axes,
+                )
+
+    return registration.most_agreeing(tries())

@@ -8,7 +8,7 @@ facade) or a photographer standing at the panorama; a street in depth lines up o
 Points are in pixels with a pixel's corners at whole numbers (as a browser's clicks are), and
 normalised to [0, 1] by the picture's width and height, x right, y down."""
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import asdict, dataclass
 
 import cv2
@@ -173,6 +173,20 @@ def fit(
     if not frame_ok(in_unit):
         raise NotFitted("la photo se replie, se retourne ou sort presque de la vue")
     return of(panorama, _to_camera(view, axes) @ in_unit, view, axes), kept
+
+
+def most_agreeing(tries: Iterable[tuple]) -> Registration | None:
+    """Of robust fits (each one's arguments to fit, but `robust`), the one where most pairs
+    agree; the first of equals; none if none fits."""
+    found, most = None, 0
+    for args in tries:
+        try:
+            r, kept = fit(*args, robust=True)
+        except (NotFitted, cv2.error):  # OpenCV's estimators assert on some degenerate sets
+            continue
+        if kept.sum() > most:
+            found, most = r, int(kept.sum())
+    return found
 
 
 @dataclass(frozen=True)

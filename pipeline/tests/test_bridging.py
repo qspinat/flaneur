@@ -13,10 +13,10 @@ def _units(v: np.ndarray) -> np.ndarray:
     return v / np.linalg.norm(v, axis=1, keepdims=True)
 
 
-def _seen(world: np.ndarray, pixels: np.ndarray, by: dict[str, list[int]]):
+def _seen(world: np.ndarray, pixels: np.ndarray, by: dict[str, list[int]], at=AT):
     """The photo's points and what each panorama in `by` matched of them (their rows)."""
     rows = [(name, i) for name, kept in by.items() for i in kept]
-    origins = np.array([[AT[n].x, AT[n].y, AT[n].z] for n, _ in rows])
+    origins = np.array([[at[n].x, at[n].y, at[n].z] for n, _ in rows])
     keys = np.array([i for _, i in rows])
     rays = match.Rays(
         keys,

@@ -1916,24 +1916,3 @@ def test_a_registration_is_made_again_only_when_its_placement_changes(monkeypatc
     cli._registrations({"pm:1": {**placed_at, "heading": placed_at["heading"] + 5}})
 
     assert made == ["pm:1", "pm:1"]
-
-
-def test_a_panorama_with_no_picture_on_disk_is_passed_over(monkeypatch, tmp_path):
-    a, b = (match.Panorama(i, 0.0, 0.0, 0.0, 0.0, tmp_path / f"{i}.jpg") for i in "ab")
-    monkeypatch.setattr(cli, "PANORAMAS", tmp_path)
-    (tmp_path / "b.jpg").touch()  # a's picture is not on disk
-    monkeypatch.setattr(cli, "_points_of", lambda *args: "points")
-    monkeypatch.setattr(
-        cli,
-        "_kept_store",
-        lambda m, kept: (SimpleNamespace(observed=lambda i, inputs: "seen"), "i"),
-    )
-    monkeypatch.setattr(cli, "_sources_first", lambda *args: [a, b])
-    tried = []
-    monkeypatch.setattr(
-        cli.placed, "registered", lambda points, seen, spheres: tried.extend(spheres)
-    )
-
-    cli._register_one("pm:1", _kept(matcher="lomag"), {"a": a, "b": b}, set())
-
-    assert tried == [b]

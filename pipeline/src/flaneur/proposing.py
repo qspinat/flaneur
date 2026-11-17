@@ -5,11 +5,10 @@ registration) in the view where most details agree, when they pass the checks. O
 today's street match poorly (20 to 60 pairs is the norm): no proposal is better than a wrong
 one, the user then clicks points."""
 
-import cv2
 import numpy as np
 
 from flaneur import match, registration
-from flaneur.registration import NotFitted, Registration, ViewOf
+from flaneur.registration import Registration, ViewOf
 
 SIDE = match.VIEW_SIDE
 
@@ -34,11 +33,11 @@ def best(
     matcher,
 ) -> Registration | None:
     """The registration in the view where most matched details agree, if any passes."""
-    found, most = None, 0
-    for view, seen in cut:
-        pairs = matcher.pairs(photo, seen)
-        try:
-            r, kept = registration.fit(
+
+    def tries():
+        for view, seen in cut:
+            pairs = matcher.pairs(photo, seen)
+            yield (
                 photo.keypoints[pairs[:, 0]],
                 seen.keypoints[pairs[:, 1]],
                 photo.size,
@@ -46,13 +45,9 @@ def best(
                 panorama,
                 view,
                 axes,
-                robust=True,
             )
-        except (NotFitted, cv2.error):  # OpenCV's estimators assert on some degenerate sets
-            continue
-        if kept.sum() > most:
-            found, most = r, int(kept.sum())
-    return found
+
+    return registration.most_agreeing(tries())
 
 
 def propose(

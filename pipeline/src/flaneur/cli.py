@@ -2976,49 +2976,50 @@ REGISTERED = DATA / "pilot" / "registered.json"  # each placement of match regis
 
 def _registered_as(kept: dict) -> str:
     """What a placement's registration is made from: its inputs and its camera."""
-    camera = [round(kept[k], 3) for k in ("x", "y", "heading", "fov", "horizon")]
-    return hashlib.sha1(json.dumps([kept["inputs"], camera]).encode()).hexdigest()[:16]
+    return _digest(
+        [kept["inputs"], [round(kept[k], 3) for k in ("x", "y", "heading", "fov", "horizon")]]
+    )
 
 
 def _registrations(standing: dict[str, dict]) -> dict[str, dict | None]:
     """Each placement of match (`standing`: as kept in matches.json) registered on its own in a
     panorama it was found from (see placed.registered), as the placing page writes registrations;
     none where none fits. Kept (REGISTERED), made again only when the placement changes."""
-    kept = register.load(REGISTERED)
-    todo = [k for k, m in standing.items() if kept.get(k, {}).get("made") != _registered_as(m)]
-    if todo:
+    was = register.load(REGISTERED)
+    made = {k: _registered_as(m) for k, m in standing.items()}
+    kept = {k: was[k] for k in standing if was.get(k, {}).get("made") == made[k]}
+    if todo := [k for k in standing if k not in kept]:
         by_id, fixed = _registering_world()
         for k in todo:
             found = _register_one(k, standing[k], by_id, fixed)
-            kept[k] = {
-                "made": _registered_as(standing[k]),
-                "registration": found and registration.to_json(found),
-            }
+            kept[k] = {"made": made[k], "registration": found and registration.to_json(found)}
+    if kept != was:  # made, or left (no longer placed)
         write_json(REGISTERED, kept)
     return {k: kept[k]["registration"] for k in standing}
 
 
 def _registering_world() -> tuple[dict[str, match.Panorama], set[str]]:
-    """The panoramas as the 3D walk shows them (levelled), by id, and those COLMAP placed."""
+    """The panoramas as the 3D walk shows them (levelled, their picture at hand), by id, and
+    those COLMAP placed."""
     with closing(db.connect(DB_PATH)) as conn:
-        pictures = _lined_up(panoramas.load(conn))
-    return {p.id: p for p in _panoramas(pictures, lambda x, y: 0.0)}, _colmap_fixed()
+        pictures = panoramas.load(conn)
+    spheres = _panoramas(_lined_up(pictures), lambda x, y: 0.0)
+    return {p.id: p for p in spheres}, _fixed_by_colmap(pictures, register.load(FIXES))
 
 
 def _register_one(
     photo_id: str, kept: dict, by_id: dict[str, match.Panorama], fixed: set[str]
 ) -> registration.Registration | None:
-    """A placement of match registered on its own in a panorama it was found from whose
-    picture is on disk (the 3D walk shows it), COLMAP's first (see _sources_first)."""
+    """A placement of match registered on its own in a panorama it was found from (`by_id`:
+    those the 3D walk can show), COLMAP's first among equals (see _sources_first)."""
     m = _situation(kept)
-    points, at = _points_of(photo_id, m, kept), _kept_store(m, kept)
-    observed = at and at[0].observed(photo_id, at[1])
-    if points is None or not observed:
+    if (at := _kept_store(m, kept)) is None:  # a camera proposed: no points kept
         return None
-    shown = [
-        p for p in _sources_first(points, by_id, m, fixed) if (PANORAMAS / f"{p.id}.jpg").exists()
-    ]
-    return placed.registered(points, observed, shown)
+    store, inputs = at
+    points, observed = store.points(photo_id, inputs), store.observed(photo_id, inputs)
+    if points is None or observed is None:
+        return None
+    return placed.registered(points, observed, _sources_first(points, by_id, m, fixed))
 
 
 def _points_of(photo_id: str, m: match.Situated, kept: dict | None) -> match.Points | None:
