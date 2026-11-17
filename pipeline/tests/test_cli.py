@@ -2002,7 +2002,9 @@ def test_the_placed_list_is_written_from_the_answers_verdicts_and_matches(monkey
             "pm:3": _kept(),
             "pm:4": _kept(),
         },
-        "_proposed_now": lambda scenes, judged: {"pp": _kept(inputs="i:proposed-ab12cd34")},
+        "_proposed_now": lambda scenes, judged, marks=True: {
+            "pp": _kept(inputs="i:proposed-ab12cd34")
+        },
         "_inputs": lambda scene, photo_id: "i",
         "_exported": lambda photo_id: exported,
         "_image": lambda photo_id: "h",
@@ -2308,14 +2310,38 @@ def test_walls_made_at_night_load_the_matcher_once(monkeypatch):
     assert loaded == [1]
 
 
-def test_a_mark_made_since_leaves_a_match_placement_shown(tmp_path):
+def test_a_mark_made_since_leaves_a_match_placement_shown_not_standing_for_match(tmp_path):
     image, other = "1234567890abcdef", "fedcba0987654321"
     yes = {"photo_id": "y", "verdict": "yes", "inputs": f"old:{image}"}
     (tmp_path / "anchors.jsonl").write_text(json.dumps(yes) + "\n")
     judged = cli._Judged(tmp_path / "anchors.jsonl")
-    kept = _kept(inputs=f"scene:{image}")
+    kept, marked = _kept(inputs=f"scene:{image}"), f"scene:{image}:ab12cd34"
 
-    assert cli._shown_as_now("p", kept, f"scene:{image}:ab12cd34", judged)  # marked since
-    assert not cli._shown_as_now("p", kept, f"scene:{other}:ab12cd34", judged)  # cropped since
+    assert cli._found_as_now("p", kept, marked, judged, marks=False)  # shown
+    assert not cli._found_as_now("p", kept, marked, judged)  # match redoes it
+    assert not cli._found_as_now("p", kept, f"scene:{other}:ab12cd34", judged, marks=False)
     said = _kept(inputs=f"old:{image}")
-    assert cli._shown_as_now("y", said, f"new:{image}:ab12cd34", judged)  # a yes: the photo's
+    assert cli._found_as_now("y", said, f"new:{image}:ab12cd34", judged, marks=False)
+
+
+def test_a_proposed_camera_and_a_confirmed_place_stay_once_marked(monkeypatch, tmp_path):
+    image, fp = "1234567890abcdef", "proposed-0a1b2c3d"
+    proposed = _kept(inputs=f"s:{image}:{fp}", matcher=fp)
+    (tmp_path / "proposed.json").write_text(json.dumps({"pp": proposed}))
+    yes = {"photo_id": "pp", "verdict": "yes", "inputs": proposed["inputs"]}
+    (tmp_path / "anchors.jsonl").write_text(json.dumps(yes) + "\n")
+    exported = tmp_path / "pp.jpg"
+    exported.touch()
+    for name, value in {
+        "PROPOSED_CAMERAS": tmp_path / "proposed.json",
+        "ANCHORS": tmp_path / "anchors.jsonl",
+        "_exported": lambda photo_id: exported,
+        "_inputs": lambda scene, photo_id: f"s:{image}:ab12cd34",  # marked since
+        "_scenes_now": lambda: {"pp": "s"},
+        "_matches": lambda: {},
+    }.items():
+        monkeypatch.setattr(cli, name, value)
+    judged = cli._Judged()
+
+    assert set(cli._proposed_now({"pp": "s"}, judged, marks=False)) == {"pp"}
+    assert set(cli._confirmed()) == {"pp"}  # the walk keeps its place

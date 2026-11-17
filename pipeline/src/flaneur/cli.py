@@ -1089,19 +1089,19 @@ def _not_chained(matches: dict[str, dict | None], situated: dict[str, match.Situ
     }
 
 
-def _situated() -> dict[str, match.Situated]:
+def _situated(marks: bool = True) -> dict[str, match.Situated]:
     """The old photos whose camera was found against today's panoramas, from what they are
     now (a match found from other panoramas or another crop of the photo is left out, unless
     the user said yes to it and the photo is the same: see _Judged.holds), and not turned down
     by the user (as placed, or as found again: see _Judged.on); and those whose camera matching
-    turned down the user said yes to (see _proposals)."""
+    turned down the user said yes to (see _proposals). Without `marks`: see _found_as_now."""
     scenes, judged, matches = _scenes_now(), _Judged(), _matches()
     found = {}
     for photo_id, m in matches.items():
         if m and "x" in m and photo_id in scenes and _exported(photo_id).exists():
-            if _stands(photo_id, m, _inputs(scenes[photo_id], photo_id), judged):
+            if _stands(photo_id, m, _inputs(scenes[photo_id], photo_id), judged, marks):
                 found[photo_id] = _situation(m)
-    for photo_id, p in _proposed_now(scenes, judged).items():
+    for photo_id, p in _proposed_now(scenes, judged, marks).items():
         if judged.said_yes(photo_id, p) and not (
             photo_id in found and judged.said_yes(photo_id, matches[photo_id])
         ):  # the user's yes wins over a placement not judged
@@ -1109,14 +1109,16 @@ def _situated() -> dict[str, match.Situated]:
     return found
 
 
-def _proposed_now(scenes: dict[str, str], judged: "_Judged") -> dict[str, dict]:
+def _proposed_now(scenes: dict[str, str], judged: "_Judged", marks: bool = True) -> dict[str, dict]:
     """The cameras proposed (see _proposals) for photos as they are now (`scenes`: each one's,
     see _scene_of) the user did not turn down, or said yes to while the photo is the same (see
-    _stands)."""
+    _stands, `marks`)."""
     return {
         k: p
         for k, p in register.load(PROPOSED_CAMERAS).items()
-        if k in scenes and _exported(k).exists() and _stands(k, p, _inputs(scenes[k], k), judged)
+        if k in scenes
+        and _exported(k).exists()
+        and _stands(k, p, _inputs(scenes[k], k), judged, marks)
     }
 
 
@@ -1195,7 +1197,9 @@ def _confirmed() -> dict[str, match.Situated]:
     Photos placed by chaining are not among them: chaining is set aside."""
     judged = _Judged()
     return {
-        photo_id: m for photo_id, m in _situated().items() if judged.said_yes(photo_id, asdict(m))
+        photo_id: m
+        for photo_id, m in _situated(marks=False).items()  # shown: marks aside
+        if judged.said_yes(photo_id, asdict(m))
     }
 
 
@@ -1987,29 +1991,28 @@ def _same_camera(camera: dict, other: dict) -> bool:
     )
 
 
-def _stands(photo_id: str, kept: dict | None, inputs: str, judged: "_Judged") -> bool:
-    """Whether a placement as kept stands as it is now (see _found_as_now) and the user did not
-    turn it down, unless the yes holds (see _Judged)."""
-    return _found_as_now(photo_id, kept, inputs, judged) and (
+def _stands(
+    photo_id: str, kept: dict | None, inputs: str, judged: "_Judged", marks: bool = True
+) -> bool:
+    """Whether a placement as kept stands as it is now (see _found_as_now, `marks`) and the
+    user did not turn it down, unless the yes holds (see _Judged)."""
+    return _found_as_now(photo_id, kept, inputs, judged, marks) and (
         judged.holds(photo_id, kept) or not judged.turned_down(photo_id, kept)
     )
 
 
-def _found_as_now(photo_id: str, kept: dict | None, inputs: str, judged: "_Judged") -> bool:
+def _found_as_now(
+    photo_id: str, kept: dict | None, inputs: str, judged: "_Judged", marks: bool = True
+) -> bool:
     """Whether a placement as kept is one of the photo as it is now: the user said yes to it and
-    the photo is the same, or it was made from `inputs` (the photo and its panoramas now)."""
+    the photo is the same, or it was made from `inputs` (the photo and its panoramas now).
+    Without `marks`, its landmarks' marks aside, for what shows it: they only help match find
+    the camera, so one marked since stays shown, on the same image, until match redoes it (an
+    annotation never takes a placement away)."""
     if not kept or "x" not in kept:
         return False
-    return judged.holds(photo_id, kept) or _placed_now(kept, inputs)
-
-
-def _shown_as_now(photo_id: str, kept: dict | None, inputs: str, judged: "_Judged") -> bool:
-    """Whether a placement as kept may be shown for the photo as it is now (see
-    _found_as_now), its landmarks' marks aside: they only help match find the camera, so one
-    marked since stays shown, on the same image, until match redoes it (an annotation never
-    takes a placement away)."""
-    if not kept or "x" not in kept:
-        return False
+    if marks:
+        return judged.holds(photo_id, kept) or _placed_now(kept, inputs)
     if judged.said_yes(photo_id, kept) and _image_of(kept["inputs"]) == _image_of(inputs):
         return True
     placed_from = _placed_inputs(inputs, kept.get("matcher"))
@@ -3175,9 +3178,9 @@ def _placed_photos(write: bool = False, answering: tuple | None = None) -> dict[
         for k, m in _matches().items()
         if k in scenes
         and _exported(k).exists()
-        and _shown_as_now(k, m, _inputs(scenes[k], k), judged)
+        and _found_as_now(k, m, _inputs(scenes[k], k), judged, marks=False)
     }
-    for k, p in _proposed_now(scenes, judged).items():
+    for k, p in _proposed_now(scenes, judged, marks=False).items():
         if judged.said_yes(k, p) and not (k in matched and matched[k].verdict == "yes"):
             matched[k] = weighed(k, p)  # the user's yes wins over a placement not judged
     found = placed.build(_on_image_now(answers), far, matched, _registrations)
