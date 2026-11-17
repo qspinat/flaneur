@@ -2003,6 +2003,32 @@ def _found_as_now(photo_id: str, kept: dict | None, inputs: str, judged: "_Judge
     return judged.holds(photo_id, kept) or _placed_now(kept, inputs)
 
 
+def _shown_as_now(photo_id: str, kept: dict | None, inputs: str, judged: "_Judged") -> bool:
+    """Whether a placement as kept may be shown for the photo as it is now (see
+    _found_as_now), its landmarks' marks aside: they only help match find the camera, so one
+    marked since stays shown, on the same image, until match redoes it (an annotation never
+    takes a placement away)."""
+    if not kept or "x" not in kept:
+        return False
+    if judged.said_yes(photo_id, kept) and _image_of(kept["inputs"]) == _image_of(inputs):
+        return True
+    placed_from = _placed_inputs(inputs, kept.get("matcher"))
+    return _marks_aside(kept["inputs"]) == _marks_aside(placed_from)
+
+
+def _marks_aside(inputs: str) -> str:
+    """A placement's inputs (see _inputs, _placed_inputs) without its landmarks' mark."""
+    fields = inputs.split(":")
+    if len(fields) > 2 and re.fullmatch(r"[0-9a-f]{8}", fields[2]):
+        del fields[2]
+    return ":".join(fields)
+
+
+def _image_of(inputs: str) -> str:
+    """The photo's image a placement's inputs were made from (see _inputs)."""
+    return _photo_of(inputs).split(":")[0]
+
+
 def _photo_of(inputs: str) -> str:
     """The part of a placement's inputs the photo itself gives (see _inputs): its image, and
     its landmarks' mark when it has any."""
@@ -3149,7 +3175,7 @@ def _placed_photos(write: bool = False, answering: tuple | None = None) -> dict[
         for k, m in _matches().items()
         if k in scenes
         and _exported(k).exists()
-        and _found_as_now(k, m, _inputs(scenes[k], k), judged)
+        and _shown_as_now(k, m, _inputs(scenes[k], k), judged)
     }
     for k, p in _proposed_now(scenes, judged).items():
         if judged.said_yes(k, p) and not (k in matched and matched[k].verdict == "yes"):
@@ -4060,7 +4086,11 @@ def write_scene() -> None:
     dans l'un d'eux (à la main, ou par `match` et pas refusées : chacune dit son statut), avec
     leurs copies portées sur les voisins (`flaneur porter`) ; copie sur le site les panoramas
     qui portent une photo."""
-    answering = _placing_answers()
+    _write_scene(_placing_answers())
+
+
+def _write_scene(answering: tuple) -> None:
+    """The 3D scene written (see write_scene), from the placing page's answers as read."""
     with closing(db.connect(DB_PATH)) as conn:
         walk = _walk(conn, answering[0])
         pictures = _lined_up(panoramas.load(conn))  # refused when tilts were measured otherwise
@@ -4222,7 +4252,7 @@ def _serve_page(start: Callable[[], HTTPServer], label: str, port: int, open_bro
         server.server_close()
 
 
-ANSWER_FILES = (ANCHORS, PLACINGS, SIGHTS, REVIEWS, WALLS)  # what the user's pages write
+ANSWER_FILES = (ANCHORS, PLACINGS, SIGHTS, REVIEWS)  # the answers the light update reads
 WATCH_S, QUIET_S = 5, 10  # answers looked at every WATCH_S; the update once QUIET_S calm
 REFRESH_LOCK = DATA / "pilot" / ".mise-a-jour.lock"  # one light update at a time
 NIGHT_STEPS = (  # each in its own process (one model in memory at a time), in this order
@@ -4230,12 +4260,11 @@ NIGHT_STEPS = (  # each in its own process (one model in memory at a time), in t
     ("murs", "--masques"),
     ("murs",),
     ("reperes-proposer", "--write"),
-    ("match-check", "--perimes", "--matcher", LOMAG),
-    ("match-check", "--perimes", "--matcher", DISK),
+    *(("match-check", "--perimes", "--matcher", m) for m in MATCHERS),
     ("match",),
+    ("porter",),  # before chaining, which the hour cuts first: only the confirmation reads it
     ("chain-check",),
     ("chain",),
-    ("porter",),
 )
 
 
@@ -4244,20 +4273,21 @@ def _refreshing() -> Iterator[None]:
     """Held while a light update writes: a second one waits for it (REFRESH_LOCK)."""
     REFRESH_LOCK.parent.mkdir(parents=True, exist_ok=True)
     with REFRESH_LOCK.open("a") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
-        try:
-            yield
-        finally:
-            fcntl.flock(lock, fcntl.LOCK_UN)
+        fcntl.flock(lock, fcntl.LOCK_EX)  # let go when the file closes
+        yield
 
 
 def _update_light() -> None:
-    """The list of the photos placed written, then the walk, then the 3D scene (which read
-    it), one update at a time."""
+    """The walk exported, then the list of the photos placed and the 3D scene, judged on the
+    images it wrote (a photo cropped since leaves the 3D until match places it again), one
+    update at a time."""
     with _refreshing():
-        _placed_photos(write=True)
         export_walk()
-        write_scene()
+        _image.cache_clear()  # the export's images: read again
+        _sights.cache_clear()
+        answering = _placing_answers()
+        _placed_photos(write=True, answering=answering)
+        _write_scene(answering)
 
 
 def _flaneur(*args: str) -> list[str]:
@@ -4265,49 +4295,48 @@ def _flaneur(*args: str) -> list[str]:
     return [sys.executable, "-m", "flaneur", *args]
 
 
-def _until(hour: str | None) -> float:
-    """The next time it is `hour` ("HH:MM"), in epoch seconds; never (none)."""
+def _until(hour: str | None) -> float | None:
+    """The next time it is `hour` ("HH:MM"), in epoch seconds; none: never."""
     if hour is None:
-        return math.inf
+        return None
     at = datetime.combine(date.today(), datetime.strptime(hour, "%H:%M").time())
     return (at if at > datetime.now() else at + timedelta(days=1)).timestamp()
 
 
 def _run_night(
-    until: float, run: Callable = subprocess.run, clock: Callable[[], float] = time.time
+    until: float | None, run: Callable = subprocess.run, clock: Callable[[], float] = time.time
 ) -> None:
-    """The night's steps (NIGHT_STEPS) in order, each refreshing what is stale only: one that
-    fails is said and the next goes on; none starts after `until` (epoch seconds), and the one
-    running then is stopped (each writes its files whole: one panorama or photo lost at
-    most). Then the light update, whatever the hour: it is what shows the night's work."""
+    """The night's steps (NIGHT_STEPS) in order (all but chaining refresh what is stale only;
+    chaining is redone whole): one that fails is said and the next goes on; none starts after
+    `until` (epoch seconds), and the one running then is stopped (each writes its files whole:
+    one panorama or photo lost at most). Then the light update, whatever the hour: it is what
+    shows the night's work."""
     for step in NIGHT_STEPS:
-        left = until - clock()
-        if left <= 0:
-            typer.echo(f"{' '.join(step)} : pas lancée, l'heure est passée")
+        name, left = " ".join(step), None if until is None else until - clock()
+        if left is not None and left <= 0:
+            typer.echo(f"{name} : pas lancée, l'heure est passée")
             break
-        typer.echo(f"{' '.join(step)} : lancée {datetime.now():%H:%M}")
+        typer.echo(f"{name} : lancée {datetime.now():%H:%M}")
         try:
-            done = run(_flaneur(*step), timeout=None if math.isinf(left) else left)
+            failed = run(_flaneur(*step), timeout=left).returncode
         except subprocess.TimeoutExpired:
-            typer.echo(f"{' '.join(step)} : arrêtée, l'heure est passée", err=True)
-            continue
-        if done.returncode:
-            typer.echo(
-                f"{' '.join(step)} : échouée ({done.returncode}), la suite continue", err=True
-            )
+            failed = "arrêtée à l'heure"
+        if failed:
+            typer.echo(f"{name} : échouée ({failed}), la suite continue", err=True)
     run(_flaneur("mettre-a-jour"), timeout=None)
 
 
 def _stamp(paths: Iterable[Path]) -> tuple:
     """When each file was last written, and how long it is (none: not there)."""
-    return tuple((s.st_mtime_ns, s.st_size) if (s := _stat(p)) else None for p in paths)
 
+    def of(path: Path) -> tuple[int, int] | None:
+        try:
+            found = path.stat()
+        except FileNotFoundError:
+            return None
+        return found.st_mtime_ns, found.st_size
 
-def _stat(path: Path):
-    try:
-        return path.stat()
-    except FileNotFoundError:
-        return None
+    return tuple(of(p) for p in paths)
 
 
 def _follow(
@@ -4344,8 +4373,8 @@ def update(
     placées, la balade, la scène en 3D (une mise à jour à la fois). `--suivre` : le léger
     refait dès que les pages ont enregistré une annotation (après 10 s de calme).
     `--nuit` : les étapes lourdes dans l'ordre (segmenter, murs, repères proposés, contrôles
-    périmés, match, enchaînement, porter), chacune ne refaisant que ce qui est périmé, puis
-    le léger ; une étape qui échoue n'arrête pas les suivantes."""
+    périmés, match, porter : chacune ne refait que ce qui est périmé ; puis l'enchaînement,
+    refait en entier), puis le léger ; une étape qui échoue n'arrête pas les suivantes."""
     if suivre and nuit:
         raise typer.BadParameter("--suivre ou --nuit : pas les deux")
     if nuit:

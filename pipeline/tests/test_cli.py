@@ -2189,16 +2189,31 @@ def test_a_panorama_that_cannot_be_segmented_leaves_the_others_segmented(monkeyp
     assert made == [home.id, beside.id]
 
 
-def test_the_light_update_writes_the_list_then_the_walk_then_the_scene(monkeypatch, tmp_path):
-    done = []
+def test_the_light_update_lists_on_the_images_the_export_wrote(monkeypatch, tmp_path):
+    image = tmp_path / "p.jpg"
+    image.write_bytes(b"before the crop")
     monkeypatch.setattr(cli, "REFRESH_LOCK", tmp_path / ".lock")
-    monkeypatch.setattr(cli, "_placed_photos", lambda write=False: done.append(("list", write)))
-    monkeypatch.setattr(cli, "export_walk", lambda: done.append("export"))
-    monkeypatch.setattr(cli, "write_scene", lambda: done.append("scene"))
+    monkeypatch.setattr(cli, "_exported", lambda photo_id: image)
+    monkeypatch.setattr(cli, "_placing_answers", lambda: "answers")
+    done = []
 
-    cli._update_light()
+    def export():
+        cli._image("p")  # the export reads the image it is about to replace
+        image.write_bytes(b"cropped since")
+        done.append("export")
 
-    assert done == [("list", True), "export", "scene"]
+    monkeypatch.setattr(cli, "export_walk", export)
+    monkeypatch.setattr(
+        cli, "_placed_photos", lambda write, answering: done.append(("list", cli._image("p")))
+    )
+    monkeypatch.setattr(cli, "_write_scene", lambda answering: done.append(("scene", answering)))
+    cli._image.cache_clear()
+    try:
+        cli._update_light()
+    finally:
+        cli._image.cache_clear()
+
+    assert done == ["export", ("list", cli.landmarks.image_hash(image)), ("scene", "answers")]
 
 
 def _ran(outcomes: dict | None = None, clock=None):
@@ -2222,7 +2237,7 @@ def _ran(outcomes: dict | None = None, clock=None):
 def test_the_night_runs_its_steps_in_order_and_goes_on_after_one_fails():
     ran, run = _ran({("murs", "--masques"): 1})
 
-    cli._run_night(float("inf"), run=run, clock=lambda: 0.0)
+    cli._run_night(None, run=run, clock=lambda: 0.0)
 
     assert [step for step, _ in ran] == [*cli.NIGHT_STEPS, ("mettre-a-jour",)]
     assert ran[0][1] is None  # no hour: no timeout
@@ -2268,9 +2283,10 @@ class _Stop(Exception):
 def test_a_second_update_waits_for_the_first(monkeypatch, tmp_path):
     monkeypatch.setattr(cli, "REFRESH_LOCK", tmp_path / ".lock")
     done = []
-    monkeypatch.setattr(cli, "_placed_photos", lambda write=False: done.append("list"))
+    monkeypatch.setattr(cli, "_placing_answers", lambda: None)
+    monkeypatch.setattr(cli, "_placed_photos", lambda write, answering: done.append("list"))
     monkeypatch.setattr(cli, "export_walk", lambda: None)
-    monkeypatch.setattr(cli, "write_scene", lambda: None)
+    monkeypatch.setattr(cli, "_write_scene", lambda answering: None)
 
     with cli._refreshing():  # the first, under way
         second = threading.Thread(target=cli._update_light)
@@ -2290,3 +2306,16 @@ def test_walls_made_at_night_load_the_matcher_once(monkeypatch):
     scenes.views(), scenes.views()
 
     assert loaded == [1]
+
+
+def test_a_mark_made_since_leaves_a_match_placement_shown(tmp_path):
+    image, other = "1234567890abcdef", "fedcba0987654321"
+    yes = {"photo_id": "y", "verdict": "yes", "inputs": f"old:{image}"}
+    (tmp_path / "anchors.jsonl").write_text(json.dumps(yes) + "\n")
+    judged = cli._Judged(tmp_path / "anchors.jsonl")
+    kept = _kept(inputs=f"scene:{image}")
+
+    assert cli._shown_as_now("p", kept, f"scene:{image}:ab12cd34", judged)  # marked since
+    assert not cli._shown_as_now("p", kept, f"scene:{other}:ab12cd34", judged)  # cropped since
+    said = _kept(inputs=f"old:{image}")
+    assert cli._shown_as_now("y", said, f"new:{image}:ab12cd34", judged)  # a yes: the photo's
