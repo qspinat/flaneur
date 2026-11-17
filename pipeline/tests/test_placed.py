@@ -140,3 +140,14 @@ def test_an_automatic_one_says_whether_its_area_passes_and_its_marks_are_checked
     assert (passes["unchecked_area"], passes["proposed_marks"]) == (False, False)
     assert (not_yet["unchecked_area"], not_yet["proposed_marks"]) == (True, True)
     assert (seen.unchecked_area, seen.proposed_marks) == (False, False)  # notes: for unseen
+
+
+def test_points_bunched_on_one_part_of_the_photo_still_register_it_whole():
+    world, pixels = _in_the_photo()
+    corner = (pixels[:, 0] < 360) & (pixels[:, 1] < 300)  # a fifth of the photo, as on facades
+    world, pixels = world[corner], pixels[corner]
+    points, observed = _seen(world, pixels, {"here": list(range(len(world)))}, WITH_HERE)
+
+    r = placed.registered(points, observed, [HERE])
+
+    assert r is not None and _off_in_view(r, HERE, world, pixels) < 1e-3

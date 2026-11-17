@@ -88,9 +88,9 @@ def build(
 def registered(
     points: match.Points, observed: match.Observed, spheres: Sequence[match.Panorama]
 ) -> registration.Registration | None:
-    """A placement of `match` registered on its own, as the placing page registers matched
-    pairs: in the panorama of `spheres` where most of its pairs (see bridging.paired) agree on
-    one flat warp, the first of equals; none if no panorama fits."""
+    """A placement of `match` registered on its own: in the panorama of `spheres` where most of
+    its pairs (see bridging.paired) agree, the camera turned through them (see
+    registration.turned_through), the first of equals; none if no panorama fits."""
 
     def tries():
         for sphere in spheres:
@@ -105,4 +105,4 @@ def registered(
                     sphere.axes,
                 )
 
-    return registration.most_agreeing(tries())
+    return registration.most_agreeing(tries(), registration.turned_through)

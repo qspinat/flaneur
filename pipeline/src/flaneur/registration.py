@@ -8,6 +8,7 @@ facade) or a photographer standing at the panorama; a street in depth lines up o
 Points are in pixels with a pixel's corners at whole numbers (as a browser's clicks are), and
 normalised to [0, 1] by the picture's width and height, x right, y down."""
 
+import functools
 from collections.abc import Callable, Iterable
 from dataclasses import asdict, dataclass
 
@@ -175,13 +176,41 @@ def fit(
     return of(panorama, _to_camera(view, axes) @ in_unit, view, axes), kept
 
 
-def most_agreeing(tries: Iterable[tuple]) -> Registration | None:
-    """Of robust fits (each one's arguments to fit, but `robust`), the one where most pairs
-    agree; the first of equals; none if none fits."""
+def turned_through(
+    photo_px: np.ndarray,
+    view_px: np.ndarray,
+    photo_size: tuple[int, int],
+    side: int,
+    panorama: str,
+    view: ViewOf,
+    axes: np.ndarray,
+) -> tuple[Registration, np.ndarray]:
+    """Matched pairs registered as the photo's camera turned and zoomed (as clicked, see fit)
+    through those that agree on one flat warp (MAGSAC), and which those are: whatever little of
+    the photo they cover (match's, bunched on the facades it found), it never folds the photo
+    (measured 17/11: right on 5 of 6 photos said yes, the flat warp on 4)."""
+    photo_px, view_px = np.asarray(photo_px, float), np.asarray(view_px, float)
+    kept = np.zeros(len(photo_px), bool)
+    if len(photo_px) >= 4:
+        _, mask = cv2.findHomography(photo_px, view_px, cv2.USAC_MAGSAC, MATCHED_PX)
+        if mask is not None:
+            kept = mask.ravel().astype(bool)
+    if kept.sum() < MIN_MATCHED:
+        raise NotFitted(f"il faut au moins {MIN_MATCHED} points qui s'accordent")
+    r, _ = fit(photo_px[kept], view_px[kept], photo_size, side, panorama, view, axes)
+    return r, kept
+
+
+def most_agreeing(
+    tries: Iterable[tuple], way: Callable[..., tuple[Registration, np.ndarray]] | None = None
+) -> Registration | None:
+    """Of fits (each one's arguments to fit, but `robust`) made `way` (none: fit, robust), the
+    one where most pairs agree; the first of equals; none if none fits."""
+    way = way or functools.partial(fit, robust=True)
     found, most = None, 0
     for args in tries:
         try:
-            r, kept = fit(*args, robust=True)
+            r, kept = way(*args)
         except (NotFitted, cv2.error):  # OpenCV's estimators assert on some degenerate sets
             continue
         if kept.sum() > most:
