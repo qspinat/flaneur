@@ -1802,22 +1802,21 @@ def _match_with(matcher: str, photos: list[export.WalkPhoto], at: _Run) -> None:
         write_json(MATCHES, at.found)
 
 
-def _checked_in(near_by: list[match.Panorama], force: bool = False) -> dict[str, list[str]]:
+def _checked_in(near_by: list[match.Panorama]) -> dict[str, list[str]]:
     """For each area, the matchers whose known-answer check passed there for its panoramas as
-    they are (every matcher when `force`d): a photo is matched by those of its area only."""
+    they are: how sure a placement of each is there (see placed.Matched), not whether it is
+    tried."""
     checked: dict[str, list[str]] = {}
     for name in pilot.AREAS:
         checked[name] = []
         for matcher in MATCHERS:
             check = _per_area(MATCH_CHECK, matcher).get(name, {})
-            if force or (
-                check.get("passed") and check.get("setup") == _check_setup(matcher, name, near_by)
-            ):
+            if check.get("passed") and check.get("setup") == _check_setup(matcher, name, near_by):
                 checked[name].append(matcher)
             else:
                 typer.echo(
-                    f"{MATCHERS[matcher].label} laissé de côté dans « {name} » : son contrôle à "
-                    f"réponse connue n'y est pas passé pour ces panoramas "
+                    f"{MATCHERS[matcher].label} pas encore contrôlé dans « {name} » pour ces "
+                    f"panoramas : ses placements le disent "
                     f"(`flaneur match-check --matcher {matcher} --area {name}`)"
                 )
     return checked
@@ -1832,17 +1831,16 @@ def match_photos(
             help="refaire les photos déjà faites (une place trouvée reste si rien n'est trouvé)"
         ),
     ] = False,
-    force: Annotated[bool, typer.Option(help="sans le contrôle à réponse connue")] = False,
 ) -> None:
     """Situe les photos en les comparant aux panoramas d'aujourd'hui autour d'elles : position,
     direction, champ et horizon, là où des façades d'alors sont encore debout. Avec LoMa-G
-    d'abord, puis DISK pour celles qu'il n'a pas situées (la page de confirmation dit lequel)."""
+    d'abord, puis DISK pour celles qu'il n'a pas situées (la page de confirmation dit lequel),
+    dans tous les quartiers : le contrôle à réponse connue dit seulement combien chacun y est
+    sûr (data/pilot/checked_areas.json, lu par la liste des photos placées)."""
     with closing(db.connect(DB_PATH)) as conn:
         walk = export.photos(conn, DATA / "pilot", REVIEWS)
     heights, near_by, then = _matching()
-    checked = _checked_in(near_by, force)
-    if not any(checked.values()):
-        raise typer.BadParameter("aucun apparieur contrôlé : lancer `flaneur match-check` d'abord")
+    write_json(CHECKED_AREAS, _checked_in(near_by))
     scenes = _scenes(walk, near_by)
     blocks = then(date.today().year).blocks
     found, judged, proposed = _matches(), _Judged(), register.load(PROPOSED_CAMERAS)
@@ -1856,10 +1854,6 @@ def match_photos(
         if any(p and judged.holds(me.id, p) for p in (kept, proposed.get(me.id))):
             tried[me.id], to_try[me.id] = _tried(kept, inputs), []  # said yes to: never redone
             continue
-        area = checked[_area_of(_place_of(me))]  # the matchers checked where it stands
-        if not area:
-            tried[me.id], to_try[me.id] = _tried(kept, inputs), []
-            continue
         fitted_from[me.id] = walls_of(_place_of(me))
         if again or photo or (kept and kept.get("fitted_from") != fitted_from[me.id]):
             tried[me.id], to_try[me.id] = [], list(MATCHERS)  # new walls: redone, still shown
@@ -1867,7 +1861,6 @@ def match_photos(
             turned_down = bool(kept) and "x" in kept and judged.turned_down(me.id, kept)
             tried[me.id] = _tried(kept, inputs)
             to_try[me.id] = _left_to_try(kept, inputs, turned_down)
-        to_try[me.id] = [m for m in to_try[me.id] if m in area]
     at = _Run(
         near_by=near_by,
         then=then,
@@ -2380,14 +2373,18 @@ def match_check(
     seed: int = 0,
     matcher: Annotated[str, typer.Option(help="lomag ou disk")] = DISK,
     area: Annotated[str | None, typer.Option(help="un quartier (sinon : chacun)")] = None,
+    stale: Annotated[
+        bool, typer.Option("--perimes", help="seulement ceux dont le contrôle n'est plus à jour")
+    ] = False,
 ) -> None:
     """Contrôle à réponse connue, sur `tries` panoramas. Une vue découpée dans l'un, prise
     pour une vieille photo, est située contre les autres et comparée à sa vraie caméra ; puis
     la même vue dont il ne reste qu'une bande (le reste : une autre rue), vieillie ; puis une
     vue vieillie d'une autre rue, qui ne doit pas être située. La porte (assez de vues
     situées, à moins de CHECK_M et CHECK_DEG en médiane, presque aucune fausse) est gardée pour
-    chaque apparieur (`--matcher`) et chaque quartier (`--area`) : `match` n'emploie, pour
-    une photo, que ceux dont la porte est passée dans son quartier."""
+    chaque apparieur (`--matcher`) et chaque quartier (`--area`) : un placement de `match` dit
+    si la porte de son apparieur est passée dans son quartier. `--perimes` : seulement les
+    quartiers dont le contrôle a été fait pour d'autres panoramas ou un autre code."""
     if matcher not in MATCHERS:
         raise typer.BadParameter(f"apparieur : l'un de {', '.join(MATCHERS)}")
     if area is not None and area not in pilot.AREAS:
@@ -2406,7 +2403,14 @@ def match_check(
     # only panoramas COLMAP placed: another's place is borrowed from its run, or its phone's
     fixed = _colmap_fixed()
     walls = _wall_scenes(near_by, fixed)
-    for name in [area] if area else list(pilot.AREAS):
+    areas = [area] if area else list(pilot.AREAS)
+    if stale:
+        kept = _per_area(MATCH_CHECK, matcher)
+        current = {
+            a for a in areas if kept.get(a, {}).get("setup") == _check_setup(matcher, a, near_by)
+        }
+        areas = [a for a in areas if a not in current]
+    for name in areas:
         _check_area(name, tries, seed, matcher, near_by, fixed, heights, today, shown, views, walls)
 
 

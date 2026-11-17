@@ -654,6 +654,8 @@ def _match_world(tmp_path, monkeypatch, previous: dict, places) -> None:
         "MATCHES": tmp_path / "matches.json",
         "MATCH_TRACE": tmp_path / "trace.json",
         "ANCHORS": tmp_path / "anchors.jsonl",  # the user's verdicts: none unless a test says
+        "MATCH_CHECK": tmp_path / "match_check.json",  # none passed unless a test says
+        "CHECKED_AREAS": tmp_path / "checked_areas.json",
         "_matching": lambda: (heights, [], lambda year: SimpleNamespace(blocks=None)),
         "_colmap_fixed": set,
         "_wall_scenes": lambda near_by, fixed: "scenes",
@@ -700,7 +702,7 @@ def test_match_tries_lomag_then_disk_on_the_photos_left_and_keeps_what_each_did(
         tmp_path, monkeypatch, {}, lambda matcher: CAMERA if matcher == "disk" else None
     )
 
-    cli.match_photos(photo=None, again=False, force=True)
+    cli.match_photos(photo=None, again=False)
 
     kept = json.loads((tmp_path / "matches.json").read_text())
     assert {k: (m["matcher"], m["tried"]) for k, m in kept.items()} == {
@@ -715,7 +717,7 @@ def test_a_redo_that_finds_nothing_keeps_the_placement_made_from_these_inputs(
     before = _kept(matcher="disk", tried=["disk"])  # placed from today's inputs ("i")
     _match_world(tmp_path, monkeypatch, {"pm:1": dict(before)}, lambda matcher: None)
 
-    cli.match_photos(photo=["pm:1"], again=False, force=True)
+    cli.match_photos(photo=["pm:1"], again=False)
 
     kept = json.loads((tmp_path / "matches.json").read_text())["pm:1"]
     assert kept == {**before, "fitted_from": "walls"}  # tried with these walls
@@ -736,7 +738,7 @@ def test_a_run_that_finds_nothing_replaces_a_stale_or_refused_placement(
         "".join(json.dumps({**r, "photo_id": "pm:1"}) + "\n" for r in said)
     )
 
-    cli.match_photos(photo=None, again=False, force=True)
+    cli.match_photos(photo=None, again=False)
 
     kept = json.loads((tmp_path / "matches.json").read_text())["pm:1"]
     assert kept == {"inputs": "i", "tried": ["lomag", "disk"], "fitted_from": "walls"}
@@ -1091,7 +1093,7 @@ def test_matching_never_takes_away_a_placement_said_yes_to(
     yes = {**_said("yes", "old:h", x=1.0, y=2.0), "photo_id": "pm:1"}
     (tmp_path / "anchors.jsonl").write_text(json.dumps(yes) + "\n")
 
-    cli.match_photos(photo=photo, again=again, force=True)
+    cli.match_photos(photo=photo, again=again)
 
     written = tmp_path / "matches.json"  # none when nothing was matched
     assert not written.exists() or json.loads(written.read_text())["pm:1"] == before
@@ -1106,7 +1108,7 @@ def test_matching_never_redoes_a_photo_whose_proposed_camera_was_said_yes_to(tmp
     yes = {**_said("yes", proposal["inputs"], x=20.0, y=2.0), "photo_id": "pm:1"}
     (tmp_path / "anchors.jsonl").write_text(json.dumps(yes) + "\n")
 
-    cli.match_photos(photo=["pm:1", "pm:2"], again=True, force=True)
+    cli.match_photos(photo=["pm:1", "pm:2"], again=True)
 
     kept = json.loads((tmp_path / "matches.json").read_text())
     assert kept["pm:1"] == unplaced
@@ -1219,21 +1221,47 @@ def test_a_photo_belongs_to_the_area_it_stands_in_else_the_nearest():
     assert cli._area_of((cite.x + 2000.0, cite.y)) == "cite"  # east of both: the Cité is nearer
 
 
-@pytest.mark.parametrize(("passed_in", "placed"), [("cite", True), ("saint-severin", False)])
-def test_a_photo_is_matched_only_by_matchers_checked_in_its_area(
-    tmp_path, monkeypatch, passed_in, placed
-):
-    _match_world(tmp_path, monkeypatch, {}, lambda matcher: CAMERA)
-    monkeypatch.setattr(cli, "MATCH_CHECK", tmp_path / "match_check.json")
-    monkeypatch.setattr(cli, "_area_of", lambda here: "cite")  # where the photos stand
-    check = {passed_in: {"passed": True, "setup": cli._check_setup("disk", passed_in, [])}}
-    (tmp_path / "match_check.json").write_text(json.dumps(check))  # DISK's, checked there only
+def test_a_photo_in_an_area_no_check_passes_is_matched_with_every_matcher(tmp_path, monkeypatch):
+    _match_world(tmp_path, monkeypatch, {}, lambda matcher: CAMERA if matcher == "disk" else None)
+    monkeypatch.setattr(cli, "_area_of", lambda here: "cite")  # no check passes there
 
-    cli.match_photos(photo=None, again=False, force=False)
+    cli.match_photos(photo=None, again=False)
 
-    kept = json.loads((tmp_path / "matches.json").read_text()) if placed else {}
-    assert ("x" in kept.get("pm:1", {})) == placed
-    assert kept.get("pm:1", {}).get("matcher", "disk") == "disk"
+    kept = json.loads((tmp_path / "matches.json").read_text())["pm:1"]
+    assert (kept["matcher"], kept["tried"]) == ("disk", ["lomag", "disk"])
+
+
+def test_match_writes_the_areas_checked(tmp_path, monkeypatch):
+    _match_world(tmp_path, monkeypatch, {}, lambda matcher: None)
+    check = {"cite": {"passed": True, "setup": cli._check_setup("disk", "cite", [])}}
+    (tmp_path / "match_check.json").write_text(json.dumps(check))  # DISK's, in the Cité only
+
+    cli.match_photos(photo=None, again=False)
+
+    written = json.loads((tmp_path / "checked_areas.json").read_text())
+    assert written == {"saint-severin": [], "cite": ["disk"]}
+
+
+def test_match_check_stale_only_checks_the_areas_whose_setup_changed(tmp_path, monkeypatch):
+    checked = []
+    heights = SimpleNamespace(streets=None, origin_z=0.0)
+    for name, value in {
+        "MATCH_CHECK": tmp_path / "check.json",
+        "_matching": lambda: (heights, [], lambda year: SimpleNamespace(blocks=None)),
+        "_views": lambda matcher="disk": None,
+        "_colmap_fixed": set,
+        "_wall_scenes": lambda near_by, fixed: None,
+        "_check_setup": lambda matcher, area, near_by: "now",
+        "_check_area": lambda name, *rest: checked.append(name),
+    }.items():
+        monkeypatch.setattr(cli, name, value)
+    monkeypatch.setattr(cli.landmarks, "among", lambda blocks: ())
+    kept = {"cite": {"passed": False, "setup": "now"}, "saint-severin": {"setup": "before"}}
+    (tmp_path / "check.json").write_text(json.dumps(kept))  # DISK's
+
+    cli.match_check(tries=20, seed=0, matcher="disk", area=None, stale=True)
+
+    assert checked == ["saint-severin"]  # the Cité's check is as things are: kept, failed or not
 
 
 def _wall_ahead(distance: float = 20.0, height: float = 5.0):
@@ -1601,7 +1629,7 @@ def test_a_photo_is_placed_where_its_focusing_pass_puts_it_and_the_pass_traced(
 
     monkeypatch.setattr(cli.match, "focus", focus)
 
-    cli.match_photos(photo=["pm:1"], again=False, force=True)
+    cli.match_photos(photo=["pm:1"], again=False)
 
     kept = json.loads((tmp_path / "matches.json").read_text())["pm:1"]
     assert (kept["x"], kept["heading"]) == (4.0, 92.0)
@@ -1764,7 +1792,7 @@ def test_match_places_from_the_walls_fitted(tmp_path, monkeypatch):
     monkeypatch.setattr(cli.match, "observe", observe)
     monkeypatch.setattr(cli.match, "focus", focus)
 
-    cli.match_photos(photo=["pm:1"], again=False, force=True)
+    cli.match_photos(photo=["pm:1"], again=False)
 
     assert given and set(given) == {"walls of scenes"}
 
@@ -1791,7 +1819,7 @@ def test_new_walls_redo_a_photo_in_match_but_never_hide_its_placement(tmp_path, 
     _match_world(tmp_path, monkeypatch, {"pm:1": dict(before)}, lambda matcher: CAMERA)
 
     assert cli._stands("pm:1", before, "i", cli._Judged())  # shown meanwhile: same inputs
-    cli.match_photos(photo=None, again=False, force=True)
+    cli.match_photos(photo=None, again=False)
 
     assert json.loads((tmp_path / "matches.json").read_text())["pm:1"]["fitted_from"] == "walls"
 
@@ -1800,7 +1828,7 @@ def test_the_same_walls_leave_a_placement_be(tmp_path, monkeypatch):
     before = _kept(matcher="disk", tried=["lomag", "disk"], fitted_from="walls")
     _match_world(tmp_path, monkeypatch, {"pm:1": dict(before)}, lambda matcher: NUDGED)
 
-    cli.match_photos(photo=None, again=False, force=True)
+    cli.match_photos(photo=None, again=False)
 
     assert json.loads((tmp_path / "matches.json").read_text())["pm:1"] == before
 
@@ -1809,7 +1837,7 @@ def test_a_placement_kept_when_new_walls_find_nothing_is_not_redone_again(tmp_pa
     before = _kept(matcher="disk", tried=["lomag", "disk"], fitted_from="old walls")
     _match_world(tmp_path, monkeypatch, {"pm:1": dict(before)}, lambda matcher: None)
 
-    cli.match_photos(photo=None, again=False, force=True)
+    cli.match_photos(photo=None, again=False)
 
     kept = json.loads((tmp_path / "matches.json").read_text())["pm:1"]
     assert kept == {**before, "fitted_from": "walls"}  # kept, tried with these walls
@@ -1821,7 +1849,7 @@ def test_a_photo_said_yes_is_not_redone_for_new_walls(tmp_path, monkeypatch):
     yes = {**_said("yes", "old:h", x=1.0, y=2.0), "photo_id": "pm:1"}
     (tmp_path / "anchors.jsonl").write_text(json.dumps(yes) + "\n")
 
-    cli.match_photos(photo=None, again=False, force=True)
+    cli.match_photos(photo=None, again=False)
 
     written = tmp_path / "matches.json"
     assert not written.exists() or json.loads(written.read_text())["pm:1"] == before
@@ -1888,7 +1916,7 @@ def test_a_redo_for_new_walls_cut_short_is_taken_up_again(tmp_path, monkeypatch)
     _match_world(tmp_path, monkeypatch, {"pm:1": dict(before)}, stopped)
 
     with pytest.raises(KeyboardInterrupt):
-        cli.match_photos(photo=None, again=False, force=True)
+        cli.match_photos(photo=None, again=False)
 
     written = tmp_path / "matches.json"
     assert not written.exists() or json.loads(written.read_text())["pm:1"] == before
