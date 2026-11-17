@@ -32,6 +32,7 @@ from shapely.geometry import Point
 from shapely.ops import unary_union
 
 from flaneur import (
+    bridging,
     buildings,
     carrying,
     chain,
@@ -2716,7 +2717,6 @@ def _sources_first(
 
 
 RAY_FAR_M = 100.0  # a point this far along a matched ray: where the ray meets today's view
-KEPT_DECIMALS = 3  # a point's pixel, as chain.Store.save_points rounds it
 
 
 def _matched_in(
@@ -2727,16 +2727,13 @@ def _matched_in(
     size: tuple[int, int],
 ) -> np.ndarray:
     """Where a `panorama` matched each of a camera's points (its own ray, kept by `match` in
-    `observed`; a point's pixel is its detail's, as chain.Store keeps it: to KEPT_DECIMALS), on
+    `observed`; a point's pixel is its detail's, as chain.Store keeps it: see bridging.keys_of), on
     today's view from it (`seen_from`, `size`); NaN where it saw none."""
     rays = observed.rays
-    kept = np.round(observed.pixels.astype(float), KEPT_DECIMALS).tolist()
-    key_of = {tuple(xy): k for k, xy in enumerate(kept)}
     row_of: dict[int, int] = {}
     for row in np.flatnonzero(rays.sources == panorama.id):
         row_of.setdefault(int(rays.keys[row]), int(row))
-    pixels = np.round(points.pixels, KEPT_DECIMALS).tolist()
-    rows = np.array([row_of.get(key_of.get(tuple(xy), -1), -1) for xy in pixels])
+    rows = np.array([row_of.get(int(k), -1) for k in bridging.keys_of(points.pixels, observed)])
     found = np.full((len(points.pixels), 2), np.nan)
     hit = rows >= 0
     if hit.any():
