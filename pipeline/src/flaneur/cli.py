@@ -2921,13 +2921,14 @@ def _wall_scenes(
     """Today's walls around panoramas from the pairs on disk alone (listed once: the matcher
     never woken), segmented as `flaneur segmenter` left them, kept in WALLS_FITTED: those match
     places its points on, and the confirmation page draws the parallax from. With `views` (see
-    _views), pairs are matched as needed (flaneur murs): those on disk looked at each time."""
+    _views: called once), pairs are matched as needed (flaneur murs): those on disk looked at
+    each time."""
     masks = segment.Segmenter(VIEW_STRUCTURE, threading.Lock(), _levelled_name, make=False)
     made = None if views else frozenset(p.name for p in PAIR_MATCHES.glob("*.npz"))
     return _Scenes(
         near_by,
         fixed,
-        views or _no_matcher,
+        functools.cache(views) if views else _no_matcher,  # the matcher loaded once
         threading.Lock(),
         _street_segments(),
         WALLS,

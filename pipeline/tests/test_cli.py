@@ -2280,3 +2280,13 @@ def test_a_second_update_waits_for_the_first(monkeypatch, tmp_path):
     second.join(5.0)
 
     assert waited and done == ["list"]
+
+
+def test_walls_made_at_night_load_the_matcher_once(monkeypatch):
+    monkeypatch.setattr(cli, "_street_segments", lambda: None)
+    loaded = []
+
+    scenes = cli._wall_scenes([_panorama(1, 0.0)], set(), lambda: loaded.append(1) or "views")
+    scenes.views(), scenes.views()
+
+    assert loaded == [1]
