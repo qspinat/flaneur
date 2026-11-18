@@ -33,6 +33,7 @@ import {
   nearestTo,
   pointers,
   shownHere,
+  statusLabel,
   stepTarget,
   toward,
   turn,
@@ -287,6 +288,7 @@ class Walk3d {
     $('card-when').textContent = whenLabel(photo.years);
     $('card-title').textContent = photo.title;
     $('card-credit').textContent = photo.credit;
+    $('card-status').textContent = statusLabel(photo);
     $('card-links').replaceChildren(Object.assign(document.createElement('a'), { href: `./${hashOf(photo.id)}`, textContent: 'Voir dans la balade' }));
   }
 

@@ -1,5 +1,6 @@
 """Ligne de commande du pipeline : `uv run flaneur <étape>`."""
 
+import fcntl
 import functools
 import hashlib
 import io
@@ -8,13 +9,15 @@ import math
 import re
 import shutil
 import socket
+import subprocess
+import sys
 import threading
 import time
-from collections import Counter, OrderedDict
-from collections.abc import Callable, Iterable, Sequence, Set
-from contextlib import closing
+from collections import Counter, OrderedDict, defaultdict
+from collections.abc import Callable, Iterable, Iterator, Sequence, Set
+from contextlib import closing, contextmanager
 from dataclasses import asdict, fields, replace
-from datetime import date
+from datetime import date, datetime, timedelta
 from enum import StrEnum
 from http.server import HTTPServer
 from pathlib import Path
@@ -29,9 +32,11 @@ from dotenv import load_dotenv
 from PIL import Image
 from scipy.spatial import cKDTree
 from shapely.geometry import Point
+from shapely.geometry.base import BaseGeometry
 from shapely.ops import unary_union
 
 from flaneur import (
+    bridging,
     buildings,
     carrying,
     chain,
@@ -52,6 +57,7 @@ from flaneur import (
     panoramas,
     panoramax,
     pilot,
+    placed,
     placements,
     placing,
     placings,
@@ -237,12 +243,12 @@ def _poised(spheres: Iterable[match.Panorama]) -> dict[str, tuple[float, ...]]:
 
 
 def _placing_answers(
-    path: Path = PLACINGS, corrected: bool = True
+    path: Path | None = None, corrected: bool = True
 ) -> tuple[dict[str, dict], dict[str, dict], set[str]]:
     """From the placing page's answers: where each photo answered stands (lon, lat, heading),
     the answers placing a photo in its panorama (on the image it had then), and the photos no
     panorama sees."""
-    held = placings.holding(path)
+    held = placings.holding(path or PLACINGS)
     if any(r.get("panorama_at") for r in held.values()):  # each following its panorama
         now = _standing_now(corrected)
         held = {i: placings.followed(r, now) for i, r in held.items()}
@@ -280,10 +286,18 @@ def _carried(placed: dict[str, dict], now: dict[str, tuple]) -> dict[str, dict]:
     }
 
 
+def _placed_on(answering: tuple) -> dict[str, str]:
+    """The image each photo is placed in 3D on (its hash), for the export to check against the
+    image it writes (see export.mark_3d): the list's (see _shown_in_3d), and every answer of
+    the placing page's own, for a photo whose image the export is about to write."""
+    answered = {i: r["inputs"] for i, r in answering[1].items()}
+    return answered | {i: r["inputs"] for i, r in _shown_in_3d(answering).items()}
+
+
 @app.command("export")
 def export_walk(images: bool = True) -> None:
     """Écrit la balade (photos relues appliquées, liens, vue d'aujourd'hui) pour le site."""
-    places, in_3d, no_3d = _placing_answers()
+    answering = places, in_3d, no_3d = _placing_answers()
     with closing(db.connect(DB_PATH)) as conn:
         every = _walk(conn, places)
         walk = export.build(conn, DATA / "pilot", every)
@@ -291,9 +305,14 @@ def export_walk(images: bool = True) -> None:
     if elsewhere:  # their image changed since: the placing page asks for them again
         typer.echo(f"{elsewhere} photos placées sur une image qu'elles n'ont plus : à revoir")
     if images:
-        placed_on = {i: r["inputs"] for i, r in in_3d.items()}
+        placed_on = _placed_on(answering)
         with httpx.Client(timeout=120, follow_redirects=True) as client:
             walk = export.write(walk, client, DATA / "raw" / "images", WEB_DATA, placed_on, no_3d)
+            _image.cache_clear()  # images written for the first time: what is placed on them
+            _sights.cache_clear()
+            if (now := _placed_on(answering)) != placed_on:
+                export.mark_3d(walk, WEB_DATA, now, no_3d)
+                write_json(WEB_DATA / "walk.json", {"photos": [p.for_site() for p in walk]})
             seeds = [me for me in every if me.seeded]  # for matching only, kept apart
             kept = export.write_seeds(seeds, client, DATA / "raw" / "images", SEEDED)
         typer.echo(f"{kept} images d'amorces gardées à part ({SEEDED})")
@@ -543,6 +562,15 @@ class _Scenes:
             path.parent.mkdir(parents=True, exist_ok=True)
             write_atomic(path, lambda out: np.savez(out, a=rays_a, b=rays_b))
         return rays_a.astype(float), rays_b.astype(float)
+
+    def make(self, home: match.Panorama) -> facades.Scene | None:
+        """A panorama matched with those of its neighbours (see _asked) it is not matched with
+        yet, either way round, and its walls fitted from the pairs on disk, kept (see scene,
+        `made_only`): nothing new, nothing paired or fitted again."""
+        for other in self._asked(home, None, made_only=False):
+            if not self._made(home, other):
+                self.pair(home, other)
+        return self.scene(home.id, None, made_only=True)
 
     def has_pairs(self, home: match.Panorama) -> bool:
         """Whether a panorama is matched with a neighbour already, both segmented when that
@@ -1026,11 +1054,14 @@ def _found_inputs(placed: str, matcher: str | None) -> str:
 
 def _tried(kept: dict | None, inputs: str) -> list[str]:
     """The matchers a photo was tried with from these `inputs` (none: from others, or never;
-    before LoMa-G, only DISK was)."""
+    before LoMa-G, only DISK was): a placement kept though they found nothing says so
+    (`tried_from`, see _still_shown)."""
     if not kept:
         return []
     if "x" in kept:
-        return kept.get("tried", [kept.get("matcher") or DISK]) if _placed_now(kept, inputs) else []
+        if _placed_now(kept, inputs):
+            return kept.get("tried", [kept.get("matcher") or DISK])
+        return kept.get("tried", []) if kept.get("tried_from") == inputs else []
     return kept.get("tried", [DISK]) if kept.get("inputs") == inputs else []
 
 
@@ -1066,19 +1097,19 @@ def _not_chained(matches: dict[str, dict | None], situated: dict[str, match.Situ
     }
 
 
-def _situated() -> dict[str, match.Situated]:
+def _situated(marks: bool = True) -> dict[str, match.Situated]:
     """The old photos whose camera was found against today's panoramas, from what they are
     now (a match found from other panoramas or another crop of the photo is left out, unless
     the user said yes to it and the photo is the same: see _Judged.holds), and not turned down
     by the user (as placed, or as found again: see _Judged.on); and those whose camera matching
-    turned down the user said yes to (see _proposals)."""
+    turned down the user said yes to (see _proposals). Without `marks`: see _found_as_now."""
     scenes, judged, matches = _scenes_now(), _Judged(), _matches()
     found = {}
     for photo_id, m in matches.items():
         if m and "x" in m and photo_id in scenes and _exported(photo_id).exists():
-            if _stands(photo_id, m, _inputs(scenes[photo_id], photo_id), judged):
+            if _stands(photo_id, m, _inputs(scenes[photo_id], photo_id), judged, marks):
                 found[photo_id] = _situation(m)
-    for photo_id, p in _proposed_now(scenes, judged).items():
+    for photo_id, p in _proposed_now(scenes, judged, marks).items():
         if judged.said_yes(photo_id, p) and not (
             photo_id in found and judged.said_yes(photo_id, matches[photo_id])
         ):  # the user's yes wins over a placement not judged
@@ -1086,14 +1117,16 @@ def _situated() -> dict[str, match.Situated]:
     return found
 
 
-def _proposed_now(scenes: dict[str, str], judged: "_Judged") -> dict[str, dict]:
+def _proposed_now(scenes: dict[str, str], judged: "_Judged", marks: bool = True) -> dict[str, dict]:
     """The cameras proposed (see _proposals) for photos as they are now (`scenes`: each one's,
     see _scene_of) the user did not turn down, or said yes to while the photo is the same (see
-    _stands)."""
+    _stands, `marks`)."""
     return {
         k: p
         for k, p in register.load(PROPOSED_CAMERAS).items()
-        if k in scenes and _exported(k).exists() and _stands(k, p, _inputs(scenes[k], k), judged)
+        if k in scenes
+        and _exported(k).exists()
+        and _stands(k, p, _inputs(scenes[k], k), judged, marks)
     }
 
 
@@ -1172,7 +1205,9 @@ def _confirmed() -> dict[str, match.Situated]:
     Photos placed by chaining are not among them: chaining is set aside."""
     judged = _Judged()
     return {
-        photo_id: m for photo_id, m in _situated().items() if judged.said_yes(photo_id, asdict(m))
+        photo_id: m
+        for photo_id, m in _situated(marks=False).items()  # shown: marks aside
+        if judged.said_yes(photo_id, asdict(m))
     }
 
 
@@ -1762,7 +1797,11 @@ def _match_with(matcher: str, photos: list[export.WalkPhoto], at: _Run) -> None:
         if camera is None:  # kept, with what it was tried from: not tried again for nothing
             before = at.found.get(me.id)
             if not _stands(me.id, before, inputs, at.judged):
-                at.found[me.id] = {"inputs": inputs, "tried": at.tried[me.id]}
+                at.found[me.id] = (
+                    {**before, "tried": at.tried[me.id], "tried_from": inputs}
+                    if _still_shown(me.id, before, inputs, at.judged)  # near, or marked since
+                    else {"inputs": inputs, "tried": at.tried[me.id]}
+                )
             typer.echo(f"{me.id} : rien de sûr ({MATCHERS[matcher].label})")
         else:
             moved = float(np.hypot(camera.x - here[0], camera.y - here[1]))
@@ -1792,25 +1831,35 @@ def _match_with(matcher: str, photos: list[export.WalkPhoto], at: _Run) -> None:
         write_json(MATCHES, at.found)
 
 
-def _checked_in(near_by: list[match.Panorama], force: bool = False) -> dict[str, list[str]]:
+def _checked_in(near_by: list[match.Panorama]) -> dict[str, list[str]]:
     """For each area, the matchers whose known-answer check passed there for its panoramas as
-    they are (every matcher when `force`d): a photo is matched by those of its area only."""
-    checked: dict[str, list[str]] = {}
+    they are: how sure a placement of each is there (see placed.Matched), not whether it is
+    tried. Says which checks are still to make (with the command), and which failed."""
+    checked: dict[str, list[str]] = {name: [] for name in pilot.AREAS}
+    to_make, failed = defaultdict(list), []
     for name in pilot.AREAS:
-        checked[name] = []
-        for matcher in MATCHERS:
-            check = _per_area(MATCH_CHECK, matcher).get(name, {})
-            if force or (
-                check.get("passed") and check.get("setup") == _check_setup(matcher, name, near_by)
-            ):
-                checked[name].append(matcher)
+        for m in MATCHERS:
+            check = _per_area(MATCH_CHECK, m).get(name, {})
+            if not _check_current(check, m, name, near_by):
+                to_make[m].append(name)
+            elif check.get("passed"):
+                checked[name].append(m)
             else:
-                typer.echo(
-                    f"{MATCHERS[matcher].label} laissé de côté dans « {name} » : son contrôle à "
-                    f"réponse connue n'y est pas passé pour ces panoramas "
-                    f"(`flaneur match-check --matcher {matcher} --area {name}`)"
-                )
+                failed.append(f"{MATCHERS[m].label} ({name})")
+    for m, areas in to_make.items():
+        typer.echo(
+            f"{MATCHERS[m].label} pas encore contrôlé pour ces panoramas ({', '.join(areas)}) : "
+            f"`flaneur match-check --perimes --matcher {m}`"
+        )
+    if failed:
+        typer.echo(f"contrôle non passé : {', '.join(failed)} (leurs placements le disent)")
     return checked
+
+
+def _check_current(check: dict, matcher: str, area: str, near_by: list[match.Panorama]) -> bool:
+    """Whether a matcher's known-answer check in an area (as kept) was made for its panoramas
+    and the code as they are (see _check_setup)."""
+    return check.get("setup") == _check_setup(matcher, area, near_by)
 
 
 @app.command("match")
@@ -1822,17 +1871,16 @@ def match_photos(
             help="refaire les photos déjà faites (une place trouvée reste si rien n'est trouvé)"
         ),
     ] = False,
-    force: Annotated[bool, typer.Option(help="sans le contrôle à réponse connue")] = False,
 ) -> None:
     """Situe les photos en les comparant aux panoramas d'aujourd'hui autour d'elles : position,
     direction, champ et horizon, là où des façades d'alors sont encore debout. Avec LoMa-G
-    d'abord, puis DISK pour celles qu'il n'a pas situées (la page de confirmation dit lequel)."""
+    d'abord, puis DISK pour celles qu'il n'a pas situées (la page de confirmation dit lequel),
+    dans tous les quartiers : le contrôle à réponse connue dit seulement combien chacun y est
+    sûr (data/pilot/checked_areas.json, lu par la liste des photos placées)."""
     with closing(db.connect(DB_PATH)) as conn:
         walk = export.photos(conn, DATA / "pilot", REVIEWS)
     heights, near_by, then = _matching()
-    checked = _checked_in(near_by, force)
-    if not any(checked.values()):
-        raise typer.BadParameter("aucun apparieur contrôlé : lancer `flaneur match-check` d'abord")
+    write_json(CHECKED_AREAS, _checked_in(near_by))
     scenes = _scenes(walk, near_by)
     blocks = then(date.today().year).blocks
     found, judged, proposed = _matches(), _Judged(), register.load(PROPOSED_CAMERAS)
@@ -1846,10 +1894,6 @@ def match_photos(
         if any(p and judged.holds(me.id, p) for p in (kept, proposed.get(me.id))):
             tried[me.id], to_try[me.id] = _tried(kept, inputs), []  # said yes to: never redone
             continue
-        area = checked[_area_of(_place_of(me))]  # the matchers checked where it stands
-        if not area:
-            tried[me.id], to_try[me.id] = _tried(kept, inputs), []
-            continue
         fitted_from[me.id] = walls_of(_place_of(me))
         if again or photo or (kept and kept.get("fitted_from") != fitted_from[me.id]):
             tried[me.id], to_try[me.id] = [], list(MATCHERS)  # new walls: redone, still shown
@@ -1857,7 +1901,6 @@ def match_photos(
             turned_down = bool(kept) and "x" in kept and judged.turned_down(me.id, kept)
             tried[me.id] = _tried(kept, inputs)
             to_try[me.id] = _left_to_try(kept, inputs, turned_down)
-        to_try[me.id] = [m for m in to_try[me.id] if m in area]
     at = _Run(
         near_by=near_by,
         then=then,
@@ -1960,15 +2003,56 @@ def _same_camera(camera: dict, other: dict) -> bool:
     )
 
 
-def _stands(photo_id: str, kept: dict | None, inputs: str, judged: "_Judged") -> bool:
-    """Whether a placement as kept stands as it is now: the user said yes to it and the photo
-    is the same, or it was made from `inputs` (the photo and its panoramas as they are now) and
-    the user did not turn it down (see _Judged)."""
+def _stands(
+    photo_id: str, kept: dict | None, inputs: str, judged: "_Judged", marks: bool = True
+) -> bool:
+    """Whether a placement as kept stands as it is now (see _found_as_now, `marks`) and the
+    user did not turn it down, unless the yes holds (see _Judged)."""
+    return _found_as_now(photo_id, kept, inputs, judged, marks) and (
+        judged.holds(photo_id, kept) or not judged.turned_down(photo_id, kept)
+    )
+
+
+def _found_as_now(
+    photo_id: str, kept: dict | None, inputs: str, judged: "_Judged", marks: bool = True
+) -> bool:
+    """Whether a placement as kept is one of the photo as it is now: the user said yes to it and
+    the photo is the same, or it was made from `inputs` (the photo and its panoramas now).
+    Without `marks`, its landmarks' marks aside, for what shows it: they only help match find
+    the camera, so one marked since stays shown, on the same image, until match redoes it (an
+    annotation never takes a placement away)."""
     if not kept or "x" not in kept:
         return False
-    return judged.holds(photo_id, kept) or (
-        _placed_now(kept, inputs) and not judged.turned_down(photo_id, kept)
+    if marks:
+        return judged.holds(photo_id, kept) or _placed_now(kept, inputs)
+    if judged.said_yes(photo_id, kept) and _image_of(kept["inputs"]) == _image_of(inputs):
+        return True
+    placed_from = _placed_inputs(inputs, kept.get("matcher"))
+    return _marks_aside(kept["inputs"]) == _marks_aside(placed_from)
+
+
+def _still_shown(photo_id: str, kept: dict | None, inputs: str, judged: "_Judged") -> bool:
+    """Whether a placement a run found nothing better than is kept all the same: shown as the
+    photo is now (see _found_as_now, its marks aside) and not refused (said near: the right
+    place, the camera to set by hand). Kept, it says what it was tried from (see _tried):
+    not tried again every night."""
+    said = judged.on(photo_id, kept) if kept else None
+    return _found_as_now(photo_id, kept, inputs, judged, marks=False) and not (
+        said and said["verdict"] == "no"
     )
+
+
+def _marks_aside(inputs: str) -> str:
+    """A placement's inputs (see _inputs, _placed_inputs) without its landmarks' mark."""
+    fields = inputs.split(":")
+    if len(fields) > 2 and re.fullmatch(r"[0-9a-f]{8}", fields[2]):
+        del fields[2]
+    return ":".join(fields)
+
+
+def _image_of(inputs: str) -> str:
+    """The photo's image a placement's inputs were made from (see _inputs)."""
+    return _photo_of(inputs).split(":")[0]
 
 
 def _photo_of(inputs: str) -> str:
@@ -2365,19 +2449,30 @@ def match_check(
     seed: int = 0,
     matcher: Annotated[str, typer.Option(help="lomag ou disk")] = DISK,
     area: Annotated[str | None, typer.Option(help="un quartier (sinon : chacun)")] = None,
+    stale: Annotated[
+        bool, typer.Option("--perimes", help="seulement ceux dont le contrôle n'est plus à jour")
+    ] = False,
 ) -> None:
     """Contrôle à réponse connue, sur `tries` panoramas. Une vue découpée dans l'un, prise
     pour une vieille photo, est située contre les autres et comparée à sa vraie caméra ; puis
     la même vue dont il ne reste qu'une bande (le reste : une autre rue), vieillie ; puis une
     vue vieillie d'une autre rue, qui ne doit pas être située. La porte (assez de vues
     situées, à moins de CHECK_M et CHECK_DEG en médiane, presque aucune fausse) est gardée pour
-    chaque apparieur (`--matcher`) et chaque quartier (`--area`) : `match` n'emploie, pour
-    une photo, que ceux dont la porte est passée dans son quartier."""
+    chaque apparieur (`--matcher`) et chaque quartier (`--area`) : un placement de `match` dit
+    si la porte de son apparieur est passée dans son quartier. `--perimes` : seulement les
+    quartiers dont le contrôle a été fait pour d'autres panoramas ou un autre code."""
     if matcher not in MATCHERS:
         raise typer.BadParameter(f"apparieur : l'un de {', '.join(MATCHERS)}")
     if area is not None and area not in pilot.AREAS:
         raise typer.BadParameter(f"quartier : l'un de {', '.join(pilot.AREAS)}")
     heights, near_by, then = _matching()
+    areas = [area] if area else list(pilot.AREAS)
+    if stale:
+        kept = _per_area(MATCH_CHECK, matcher)
+        areas = [a for a in areas if not _check_current(kept.get(a, {}), matcher, a, near_by)]
+        if not areas:
+            typer.echo(f"{MATCHERS[matcher].label} : chaque contrôle est à jour")
+            return
     year = date.today().year
     today = then(year)
     shown = functools.partial(  # only landmarks whose being hidden can be told
@@ -2391,8 +2486,9 @@ def match_check(
     # only panoramas COLMAP placed: another's place is borrowed from its run, or its phone's
     fixed = _colmap_fixed()
     walls = _wall_scenes(near_by, fixed)
-    for name in [area] if area else list(pilot.AREAS):
+    for name in areas:
         _check_area(name, tries, seed, matcher, near_by, fixed, heights, today, shown, views, walls)
+    write_json(CHECKED_AREAS, _checked_in(near_by))  # what the list says of each area: now
 
 
 def _wanting(
@@ -2716,7 +2812,6 @@ def _sources_first(
 
 
 RAY_FAR_M = 100.0  # a point this far along a matched ray: where the ray meets today's view
-KEPT_DECIMALS = 3  # a point's pixel, as chain.Store.save_points rounds it
 
 
 def _matched_in(
@@ -2727,16 +2822,9 @@ def _matched_in(
     size: tuple[int, int],
 ) -> np.ndarray:
     """Where a `panorama` matched each of a camera's points (its own ray, kept by `match` in
-    `observed`; a point's pixel is its detail's, as chain.Store keeps it: to KEPT_DECIMALS), on
+    `observed`; a point's pixel is its detail's, as chain.Store keeps it: see bridging.own_rows), on
     today's view from it (`seen_from`, `size`); NaN where it saw none."""
-    rays = observed.rays
-    kept = np.round(observed.pixels.astype(float), KEPT_DECIMALS).tolist()
-    key_of = {tuple(xy): k for k, xy in enumerate(kept)}
-    row_of: dict[int, int] = {}
-    for row in np.flatnonzero(rays.sources == panorama.id):
-        row_of.setdefault(int(rays.keys[row]), int(row))
-    pixels = np.round(points.pixels, KEPT_DECIMALS).tolist()
-    rows = np.array([row_of.get(key_of.get(tuple(xy), -1), -1) for xy in pixels])
+    rays, rows = observed.rays, bridging.own_rows(points, observed, panorama.id)
     found = np.full((len(points.pixels), 2), np.nan)
     hit = rows >= 0
     if hit.any():
@@ -2877,16 +2965,22 @@ def _street_segments() -> Callable[[float, float], list[facades.Segment]]:
     return _street_facades(_buildings(area))
 
 
-def _wall_scenes(near_by: list[match.Panorama], fixed: set[str]) -> _Scenes:
+def _wall_scenes(
+    near_by: list[match.Panorama],
+    fixed: set[str],
+    views: Callable[[], match.Views] | None = None,
+) -> _Scenes:
     """Today's walls around panoramas from the pairs on disk alone (listed once: the matcher
     never woken), segmented as `flaneur segmenter` left them, kept in WALLS_FITTED: those match
-    places its points on, and the confirmation page draws the parallax from."""
+    places its points on, and the confirmation page draws the parallax from. With `views` (see
+    _views: called once), pairs are matched as needed (flaneur murs): those on disk looked at
+    each time."""
     masks = segment.Segmenter(VIEW_STRUCTURE, threading.Lock(), _levelled_name, make=False)
-    made = frozenset(p.name for p in PAIR_MATCHES.glob("*.npz"))
+    made = None if views else frozenset(p.name for p in PAIR_MATCHES.glob("*.npz"))
     return _Scenes(
         near_by,
         fixed,
-        _no_matcher,
+        functools.cache(views) if views else _no_matcher,  # the matcher loaded once
         threading.Lock(),
         _street_segments(),
         WALLS,
@@ -2895,6 +2989,107 @@ def _wall_scenes(near_by: list[match.Panorama], fixed: set[str]) -> _Scenes:
         made=made,
         masks=masks,
     )
+
+
+def _wall_homes(
+    spheres: list[match.Panorama],
+    places: list[tuple[float, float]],
+    placed: list[tuple[float, float]],
+    areas: Sequence[BaseGeometry],
+) -> list[match.Panorama]:
+    """The panoramas whose walls match may use (within SCENE_REACH_M of a photo's place), in
+    the order the nights make them: within reach of a placement first, then in an area
+    (`areas`: grown by that reach), then the rest; the nearest a photo first."""
+    if not places:
+        return []
+    xy = np.array([(p.x, p.y) for p in spheres]).reshape(-1, 2)
+
+    def nearest(points: list[tuple[float, float]]) -> np.ndarray:
+        if not points:
+            return np.full(len(xy), np.inf)
+        return cKDTree(np.asarray(points, float)).query(xy)[0]
+
+    to_photo, to_placed = nearest(places), nearest(placed)
+    rank = [
+        0 if d <= SCENE_REACH_M else 1 if any(a.contains(Point(p.x, p.y)) for a in areas) else 2
+        for p, d in zip(spheres, to_placed, strict=True)
+    ]
+    order = sorted(range(len(spheres)), key=lambda i: (rank[i], to_photo[i]))
+    return [spheres[i] for i in order if to_photo[i] <= SCENE_REACH_M]
+
+
+def _segment_homes(
+    homes: list[match.Panorama],
+    spheres: list[match.Panorama],
+    fixed: set[str],
+    masks: segment.Segmenter,
+) -> None:
+    """Segments, in the order of `homes`, each one and its neighbours walls are fitted from
+    (see depth.candidates) that has no mask yet (`masks` makes them)."""
+    seen: set[str] = set()
+    wanted = [
+        p
+        for home in homes
+        for p in [home, *depth.candidates(home, spheres, fixed)]
+        if not (p.id in seen or seen.add(p.id))
+    ]
+    _segment_each([p for p in wanted if not masks.kept(p)], masks)
+
+
+def _segment_each(panoramas: list[match.Panorama], masks: segment.Segmenter) -> None:
+    """Segments each panorama in turn; one that fails (memory, a picture) is said and left,
+    the others go on."""
+    started = time.monotonic()
+    for n, panorama in enumerate(panoramas, 1):
+        try:
+            if masks.made(panorama) is None:
+                typer.echo(f"{panorama.id} : image illisible")
+        except Exception as error:  # this one left: the others go on
+            typer.echo(f"{panorama.id} : laissé ({error})", err=True)
+        if n % 50 == 0 or n == len(panoramas):
+            typer.echo(f"{n}/{len(panoramas)} ({time.monotonic() - started:.0f} s)")
+
+
+def _make_walls(homes: list[match.Panorama], scenes: _Scenes) -> None:
+    """Each home matched with its neighbours and its walls fitted and kept (see _Scenes.make),
+    in order. Stopped at any time, it loses one panorama at most: each pair and walls kept are
+    written whole."""
+    for n, home in enumerate(homes, 1):
+        started = time.monotonic()
+        try:
+            found = scenes.make(home)
+        except Exception as error:  # this one left (memory, a picture): the others go on
+            typer.echo(f"{home.id} : laissé ({error})", err=True)
+            continue
+        walls = 0 if found is None else len(found.walls)
+        typer.echo(f"{n} {home.id} : {walls} murs en {time.monotonic() - started:.1f} s")
+
+
+@app.command("murs")
+def make_walls(
+    masques: Annotated[bool, typer.Option(help="seulement la segmentation qui manque")] = False,
+    page: Annotated[int, typer.Option(help="le port de la page pour placer")] = 8772,
+) -> None:
+    """Fait les murs ajustés que `match` et la page de confirmation lisent : chaque panorama à
+    moins de SCENE_REACH_M d'une photo, apparié à ses voisins (DISK, une fois par paire), ses
+    murs ajustés et gardés ; près des placements d'abord, puis dans les quartiers, puis le
+    reste, le plus près d'une photo d'abord. `--masques` : seulement la segmentation qui leur
+    manque (le modèle et l'apparieur ne tiennent pas ensemble en mémoire : deux passages).
+    Reprend où il s'était arrêté ; refusé pendant que la page pour placer tourne (mémoire)."""
+    _page_closed(page)
+    heights, near_by, then = _matching()  # as match has them: the walls kept are its own
+    with closing(db.connect(DB_PATH)) as conn:
+        walk = export.photos(conn, DATA / "pilot", REVIEWS)
+    fixed = _colmap_fixed()
+    placed = [(m["x"], m["y"]) for m in _matches().values() if m and "x" in m]
+    areas = [square.buffer(SCENE_REACH_M) for square in pilot.AREAS.values()]
+    homes = _wall_homes(near_by, [_place_of(me) for me in walk], placed, areas)
+    typer.echo(f"{len(homes)} panoramas à moins de {SCENE_REACH_M:.0f} m d'une photo")
+    if masques:
+        masks = segment.Segmenter(VIEW_STRUCTURE, threading.Lock(), _levelled_name)
+        _segment_homes(homes, near_by, fixed, masks)
+        return
+    _make_walls(homes, _wall_scenes(near_by, fixed, lambda: _views(kept=8)))
 
 
 def _wall_depth(scenes: _Scenes, but: frozenset[str] = frozenset()) -> match.Depth:
@@ -2977,6 +3172,129 @@ def _kept_store(m: match.Situated, kept: dict | None) -> tuple[chain.Store, str]
     return chain.Store(MATCHERS[matcher].photos, None), _found_inputs(m.inputs, matcher)
 
 
+REGISTERED = DATA / "pilot" / "registered.json"  # each placement of match registered on its own
+PLACED_PHOTOS = DATA / "pilot" / "placed.json"  # the photos placed, each with its status
+CHECKED_AREAS = DATA / "pilot" / "checked_areas.json"  # each area's matchers passing the check
+
+
+def _placed_photos(write: bool = False, answering: tuple | None = None) -> dict[str, placed.Placed]:
+    """The photos placed now (see placed.build): the placing page's answers on the image each
+    has now; match's placements of each photo as it is now (see _found_as_now), and the yes
+    given to cameras matching turned down (as _situated), each with the user's word, whether
+    its matcher passes the check in the area its camera stands in, its landmarks' state (on
+    that image). `write`: kept in PLACED_PHOTOS too, when changed; `answering`: the placing
+    page's answers, already read (see _placing_answers)."""
+    _, answers, far = answering or _placing_answers()
+    scenes, judged, checked = _scenes_now(), _Judged(), register.load(CHECKED_AREAS)
+    marks = marking.states(SIGHTS)
+
+    def weighed(k: str, m: dict) -> placed.Matched:
+        said, image = judged.on(k, m), _image(k)
+        mark, marked_on = marks.get(k, (None, None))
+        if _photo_of(m["inputs"]) != _photo_part(k):  # placed before these marks: not on them
+            mark = None
+        area = checked.get(_area_of((m["x"], m["y"])), [])
+        return placed.Matched(
+            m,
+            said and said["verdict"],
+            image,
+            (m.get("matcher") or DISK) in area,
+            mark if marked_on == image else None,
+        )
+
+    matched = {
+        k: weighed(k, m)
+        for k, m in _matches().items()
+        if k in scenes
+        and _exported(k).exists()
+        and _found_as_now(k, m, _inputs(scenes[k], k), judged, marks=False)
+    }
+    for k, p in _proposed_now(scenes, judged, marks=False).items():
+        if judged.said_yes(k, p) and not (k in matched and matched[k].verdict == "yes"):
+            matched[k] = weighed(k, p)  # the user's yes wins over a placement not judged
+    found = placed.build(_on_image_now(answers), far, matched, _registrations)
+    rows = {k: asdict(p) for k, p in found.items()}
+    if write and rows != register.load(PLACED_PHOTOS):
+        write_json(PLACED_PHOTOS, rows)
+    return found
+
+
+def _shown_in_3d(answering: tuple | None = None) -> dict[str, dict]:
+    """The photos placed with a registration (see _placed_photos; `answering`: the placing
+    page's answers, already read), as the 3D walk, the export and the copies carried take them
+    (see placed.Placed.for_scene)."""
+    return {
+        k: p.for_scene() for k, p in _placed_photos(answering=answering).items() if p.registration
+    }
+
+
+@functools.cache
+def _registering_code() -> str:
+    """The code a placement of match is registered by, hashed."""
+    return _hash_of(bridging, registration, placed)
+
+
+def _registered_as(kept: dict) -> str:
+    """What a placement's registration is made from: its inputs, its camera and the code."""
+    camera = [round(kept[k], 3) for k in ("x", "y", "heading", "fov", "horizon")]
+    return _digest([kept["inputs"], camera, _registering_code()])
+
+
+def _registrations(standing: dict[str, dict]) -> dict[str, dict | None]:
+    """Each placement of match (`standing`: as kept in matches.json) registered on its own in a
+    panorama it was found from (see placed.registered), as the placing page writes registrations;
+    none where none fits. Kept (REGISTERED), made again only when the placement changes."""
+    was = register.load(REGISTERED)
+    made = {k: _registered_as(m) for k, m in standing.items()}
+    kept = {k: was[k] for k in standing if was.get(k, {}).get("made") == made[k]}
+    if todo := [k for k in standing if k not in kept]:
+        by_id, fixed = _registering_world()
+        for k in todo:
+            try:
+                found = _register_one(k, standing[k], by_id, fixed)
+            except Exception as error:  # this one left, tried again next time: the others go on
+                typer.echo(f"{k} : pas recalée ({error})", err=True)
+                continue
+            kept[k] = {"made": made[k], "registration": found and registration.to_json(found)}
+    if kept != was:  # made, or left (no longer placed)
+        write_json(REGISTERED, kept)
+    return {k: (kept.get(k) or {}).get("registration") for k in standing}
+
+
+def _registering_world() -> tuple[dict[str, match.Panorama], set[str]]:
+    """The panoramas as the 3D walk shows them (levelled, their picture at hand), by id, and
+    those COLMAP placed."""
+    with closing(db.connect(DB_PATH)) as conn:
+        pictures = panoramas.load(conn)
+    spheres = _panoramas(_lined_up(pictures), lambda x, y: 0.0)
+    return {p.id: p for p in spheres}, _fixed_by_colmap(pictures, register.load(FIXES))
+
+
+def _observed_of(store: chain.Store, photo_id: str, inputs: str, kept: dict | None):
+    """A placement's observation (see chain.Store.observed): as found from its `inputs`, else,
+    for one kept though a run found nothing better (see _still_shown), as that run left it: the
+    same photo and panoramas, its marks aside, the rays its points were found on."""
+    found = store.observed(photo_id, inputs)
+    if found is None and (tried := (kept or {}).get("tried_from")):
+        found = store.observed(photo_id, tried)
+    return found
+
+
+def _register_one(
+    photo_id: str, kept: dict, by_id: dict[str, match.Panorama], fixed: set[str]
+) -> registration.Registration | None:
+    """A placement of match registered on its own in a panorama it was found from (`by_id`:
+    those the 3D walk can show), COLMAP's first among equals (see _sources_first)."""
+    m = _situation(kept)
+    if (at := _kept_store(m, kept)) is None:  # a camera proposed: no points kept
+        return None
+    store, inputs = at
+    points, observed = store.points(photo_id, inputs), _observed_of(store, photo_id, inputs, kept)
+    if points is None or observed is None:
+        return None
+    return placed.registered(points, observed, _sources_first(points, by_id, m, fixed))
+
+
 def _points_of(photo_id: str, m: match.Situated, kept: dict | None) -> match.Points | None:
     """The points a placement against today was found from, as `match` kept them (none: a
     camera proposed, or the points kept for another placement)."""
@@ -3004,7 +3322,7 @@ def confirm_placed(port: int = 8768, open_browser: bool = True) -> None:
     walls = _ViewWalls(near_by, fixed, today.blocks)
     by_id = {p.id: p for p in near_by}
     chained = _chained()
-    situated, rounds = _with_chained(_situated(), chained, set(titles))
+    situated, rounds = _with_chained(_situated(marks=False), chained, set(titles))  # as shown
     for k, why in chained.get("doubts", {}).items():
         if k in rounds:
             rounds[k]["doubt"] = why
@@ -3092,7 +3410,7 @@ def confirm_placed(port: int = 8768, open_browser: bool = True) -> None:
         pairs, seen_from, counted = None, _toward(f.camera, f.panorama), {}
         if points is not None:
             at = _kept_store(m, kept.get(photo_id))
-            observed = at[0].observed(photo_id, at[1]) if at else None
+            observed = _observed_of(*at, kept.get(photo_id)) if at else None
             matched = observed and _matched_in(points, observed, f.panorama, seen_from, size)
             pairs = _pairs_shown(points, f.photo.shape, size, seen_from, matched)
             counted = {
@@ -3236,8 +3554,8 @@ def _still_proposed(
 
 
 def _answered_as(row: dict) -> str:
-    """What a copy or a proposal was made from: the answer's registration on its image, the way
-    round it was shown."""
+    """What a copy or a proposal was made from: a placed photo's registration (the placing
+    page's or match's: see placed.Placed.for_scene) on its image, the way round it was shown."""
     made = json.dumps([row["registration"], row["inputs"], row["flipped"]], sort_keys=True)
     return hashlib.sha1(made.encode()).hexdigest()[:16]
 
@@ -3293,7 +3611,7 @@ def carry_placed() -> None:
     mêmes façades, de proche en proche le long de la rue, s'estompant au loin
     (data/pilot/carried.json) ; seules les photos répondues depuis la dernière fois sont
     refaites."""
-    held = _on_image_now(_placing_answers()[1])  # those placed on another image: not exported
+    held = _shown_in_3d()  # placed by hand or by match, on the image each has now
     with closing(db.connect(DB_PATH)) as conn:
         pictures = _lined_up(panoramas.load(conn))  # refused when tilts were measured otherwise
     spheres = {p.id: p for p in _panoramas(pictures, lambda x, y: 0.0)}
@@ -3451,15 +3769,7 @@ def segment_panoramas(answers: Path = PLACINGS, page: int = 8772) -> None:
         return
     left = [p for p in reached if not segmenter.kept(p)]
     typer.echo(f"{len(reached)} panoramas à moins de {reach:g} m d'une photo, {len(left)} à faire")
-    started = time.monotonic()
-    for n, panorama in enumerate(left, 1):
-        try:
-            if segmenter.made(panorama) is None:
-                typer.echo(f"{panorama.id} : image illisible")
-        except Exception as error:  # this one left (memory, a picture): the others go on
-            typer.echo(f"{panorama.id} : laissé ({error})", err=True)
-        if n % 50 == 0 or n == len(left):
-            typer.echo(f"{n}/{len(left)} ({time.monotonic() - started:.0f} s)")
+    _segment_each(left, segmenter)
 
 
 LIDAR_MNS = DATA / "raw" / "lidar_mns"  # IGN's LiDAR HD surface model, patches around panoramas
@@ -3823,16 +4133,21 @@ def place_photos(
 
 @app.command("scene")
 def write_scene() -> None:
-    """Écrit la scène de la balade en 3D : les panoramas d'aujourd'hui, et les photos que
-    l'utilisateur a placées dans l'un d'eux, avec leurs copies portées sur les voisins
-    (`flaneur porter`) ; copie sur le site les panoramas qui portent une photo."""
-    places, in_3d, _ = _placing_answers()
+    """Écrit la scène de la balade en 3D : les panoramas d'aujourd'hui, et les photos placées
+    dans l'un d'eux (à la main, ou par `match` et pas refusées : chacune dit son statut), avec
+    leurs copies portées sur les voisins (`flaneur porter`) ; copie sur le site les panoramas
+    qui portent une photo."""
+    _write_scene(_placing_answers())
+
+
+def _write_scene(answering: tuple) -> None:
+    """The 3D scene written (see write_scene), from the placing page's answers as read."""
     with closing(db.connect(DB_PATH)) as conn:
-        walk = _walk(conn, places)
+        walk = _walk(conn, answering[0])
         pictures = _lined_up(panoramas.load(conn))  # refused when tilts were measured otherwise
     site = json.loads((WEB_DATA / "walk.json").read_text())
     marked = {p["id"] for p in site["photos"] if p["in_3d"]}  # by the export, on its images
-    shown = {i: r for i, r in in_3d.items() if i in marked}
+    shown = {i: r for i, r in _shown_in_3d(answering).items() if i in marked}
     now = _poised(_panoramas(pictures, lambda x, y: 0.0))
     copies = {i: c["copies"] for i, c in _carried(shown, now).items()}
     built, holding = scene.build3d(
@@ -3986,6 +4301,140 @@ def _serve_page(start: Callable[[], HTTPServer], label: str, port: int, open_bro
         pass
     finally:
         server.server_close()
+
+
+ANSWER_FILES = (ANCHORS, PLACINGS, SIGHTS, REVIEWS)  # the answers the light update reads
+WATCH_S, QUIET_S = 5, 10  # answers looked at every WATCH_S; the update once QUIET_S calm
+REFRESH_LOCK = DATA / "pilot" / ".mise-a-jour.lock"  # one light update at a time
+NIGHT_STEPS = (  # each in its own process (one model in memory at a time), in this order
+    ("segmenter",),
+    ("murs", "--masques"),
+    ("murs",),
+    ("reperes-proposer", "--write"),
+    *(("match-check", "--perimes", "--matcher", m) for m in MATCHERS),
+    ("match",),
+    ("porter",),  # before chaining, which the hour cuts first: only the confirmation reads it
+    ("chain-check",),
+    ("chain",),
+)
+
+
+@contextmanager
+def _refreshing() -> Iterator[None]:
+    """Held while a light update writes: a second one waits for it (REFRESH_LOCK)."""
+    REFRESH_LOCK.parent.mkdir(parents=True, exist_ok=True)
+    with REFRESH_LOCK.open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)  # let go when the file closes
+        yield
+
+
+def _update_light() -> None:
+    """The walk exported, then the list of the photos placed and the 3D scene, judged on the
+    images it wrote (a photo cropped since leaves the 3D until match places it again), one
+    update at a time."""
+    with _refreshing():
+        export_walk()
+        _image.cache_clear()  # the export's images: read again
+        _sights.cache_clear()
+        answering = _placing_answers()
+        _placed_photos(write=True, answering=answering)
+        _write_scene(answering)
+
+
+def _flaneur(*args: str) -> list[str]:
+    """A flaneur command, run in a process of its own."""
+    return [sys.executable, "-m", "flaneur", *args]
+
+
+def _until(hour: str | None) -> float | None:
+    """The next time it is `hour` ("HH:MM"), in epoch seconds; none: never."""
+    if hour is None:
+        return None
+    at = datetime.combine(date.today(), datetime.strptime(hour, "%H:%M").time())
+    return (at if at > datetime.now() else at + timedelta(days=1)).timestamp()
+
+
+def _run_night(
+    until: float | None, run: Callable = subprocess.run, clock: Callable[[], float] = time.time
+) -> None:
+    """The night's steps (NIGHT_STEPS) in order (all but chaining refresh what is stale only;
+    chaining is redone whole): one that fails is said and the next goes on; none starts after
+    `until` (epoch seconds), and the one running then is stopped (each writes its files whole:
+    one panorama or photo lost at most). Then the light update, whatever the hour: it is what
+    shows the night's work."""
+    for step in NIGHT_STEPS:
+        name, left = " ".join(step), None if until is None else until - clock()
+        if left is not None and left <= 0:
+            typer.echo(f"{name} : pas lancée, l'heure est passée")
+            break
+        typer.echo(f"{name} : lancée {datetime.now():%H:%M}")
+        try:
+            failed = run(_flaneur(*step), timeout=left).returncode
+        except subprocess.TimeoutExpired:
+            failed = "arrêtée à l'heure"
+        if failed:
+            typer.echo(f"{name} : échouée ({failed}), la suite continue", err=True)
+    run(_flaneur("mettre-a-jour"), timeout=None)
+
+
+def _stamp(paths: Iterable[Path]) -> tuple:
+    """When each file was last written, and how long it is (none: not there)."""
+
+    def of(path: Path) -> tuple[int, int] | None:
+        try:
+            found = path.stat()
+        except FileNotFoundError:
+            return None
+        return found.st_mtime_ns, found.st_size
+
+    return tuple(of(p) for p in paths)
+
+
+def _follow(
+    update: Callable[[], None],
+    paths: Sequence[Path],
+    sleep: Callable[[float], None] = time.sleep,
+    clock: Callable[[], float] = time.monotonic,
+    stamp: Callable[[Sequence[Path]], object] = _stamp,
+) -> None:
+    """Looks at `paths` every WATCH_S; once one changed and all were calm QUIET_S since, runs
+    `update` (once for many changes). Never ends."""
+    seen, changed = stamp(paths), None
+    while True:
+        sleep(WATCH_S)
+        now = stamp(paths)
+        if now != seen:
+            seen, changed = now, clock()
+        elif changed is not None and clock() - changed >= QUIET_S:
+            changed = None
+            update()
+
+
+@app.command("mettre-a-jour")
+def update(
+    suivre: Annotated[
+        bool, typer.Option(help="refaire le léger après chaque annotation enregistrée")
+    ] = False,
+    nuit: Annotated[bool, typer.Option(help="les étapes lourdes, puis le léger")] = False,
+    jusqua: Annotated[
+        str | None, typer.Option(help="la nuit : aucune étape après cette heure (HH:MM)")
+    ] = None,
+) -> None:
+    """Remet à jour ce qui dépend des annotations. Par défaut le léger : la liste des photos
+    placées, la balade, la scène en 3D (une mise à jour à la fois). `--suivre` : le léger
+    refait dès que les pages ont enregistré une annotation (après 10 s de calme).
+    `--nuit` : les étapes lourdes dans l'ordre (segmenter, murs, repères proposés, contrôles
+    périmés, match, porter : chacune ne refait que ce qui est périmé ; puis l'enchaînement,
+    refait en entier), puis le léger ; une étape qui échoue n'arrête pas les suivantes."""
+    if suivre and nuit:
+        raise typer.BadParameter("--suivre ou --nuit : pas les deux")
+    if nuit:
+        _run_night(_until(jusqua))
+    elif suivre:
+        typer.echo(f"regarde {', '.join(p.name for p in ANSWER_FILES)} (Ctrl-C pour arrêter)")
+        _follow(lambda: subprocess.run(_flaneur("mettre-a-jour")), ANSWER_FILES)
+    else:
+        _update_light()
 
 
 @app.command("stats")

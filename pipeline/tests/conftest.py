@@ -6,6 +6,28 @@ import pytest
 FIXTURES = Path(__file__).parent / "fixtures"
 
 
+@pytest.fixture(autouse=True)
+def _away_from_the_pipeline_s_data(tmp_path, monkeypatch):
+    """Every path of the pipeline's commands into its data or the site's, moved into the
+    test's own folder: no test writes (or reads) the real ones."""
+    from flaneur import cli
+
+    roots = {cli.DATA: tmp_path / "data", cli.WEB_DATA: tmp_path / "site"}
+
+    def away(value):
+        if isinstance(value, tuple):
+            return tuple(away(v) for v in value)
+        if isinstance(value, Path):
+            for root, instead in roots.items():
+                if value.is_relative_to(root):
+                    return instead / value.relative_to(root)
+        return value
+
+    for name, value in list(vars(cli).items()):
+        if isinstance(value, Path | tuple) and (moved := away(value)) != value:
+            monkeypatch.setattr(cli, name, moved)
+
+
 @pytest.fixture
 def load_fixture():
     return lambda name: json.loads((FIXTURES / name).read_text())

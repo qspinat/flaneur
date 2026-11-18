@@ -91,6 +91,7 @@ body.three { background: var(--mount-deep); }
 #card-when { margin: 0; font-family: var(--plate); font-size: 34px; font-weight: 500; line-height: 1; }
 #card-title { margin: 8px 0; font-size: 16px; font-weight: 500; line-height: 1.4; }
 #card-credit { margin: 0 0 8px; font-size: 13px; color: var(--sepia); }
+#card-status { margin: 0 0 8px; font-size: 13px; font-style: italic; line-height: 1.4; color: var(--sepia); }
 #card-links { margin: 0; font-size: 15px; }
 #card-links a { color: var(--albumen); }
 

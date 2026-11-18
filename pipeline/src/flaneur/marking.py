@@ -28,6 +28,16 @@ def checked(rows: list[dict]) -> bool:
     return all(row.get("checked") for row in rows)
 
 
+def states(path: Path) -> dict[str, tuple[str, str]]:
+    """Each photo marked with landmarks: whether the user checked its marks ("checked") or they
+    are only proposed ("proposed"), and the image they were marked on (its hash)."""
+    return {
+        k: ("checked" if checked(rows) else "proposed", rows[0]["image"])
+        for k, rows in by_photo(path).items()
+        if any("landmarks" in row for row in rows)
+    }
+
+
 def _write(path: Path, rows: list[dict]) -> None:
     write_text(path, "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rows))
 

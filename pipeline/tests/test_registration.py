@@ -594,3 +594,14 @@ def test_where_the_photo_has_nothing_to_show_the_view_is_hatched():
     hatched = registration._hatched(view)
 
     assert set(np.unique(hatched)) == {90, 170}  # darkened in stripes, still seen through
+
+
+def test_a_turned_camera_that_misses_the_agreeing_pairs_is_refused():
+    oblique = np.array([[0.3, 0.2, 50.0], [0.0, 0.5, 80.0], [3e-4, 0.0, 1.0]])  # no turn makes it
+    photo = np.array([[x, y] for x in np.linspace(50, 950, 10) for y in np.linspace(50, 750, 6)])
+    view = cv2.perspectiveTransform(photo[None], oblique)[0]
+
+    with pytest.raises(registration.NotFitted):
+        registration.turned_through(
+            photo, view, (800, 1000), 640, "p", registration.ViewOf(0.0), np.eye(3)
+        )

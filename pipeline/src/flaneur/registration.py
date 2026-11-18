@@ -8,7 +8,8 @@ facade) or a photographer standing at the panorama; a street in depth lines up o
 Points are in pixels with a pixel's corners at whole numbers (as a browser's clicks are), and
 normalised to [0, 1] by the picture's width and height, x right, y down."""
 
-from collections.abc import Callable
+import functools
+from collections.abc import Callable, Iterable
 from dataclasses import asdict, dataclass
 
 import cv2
@@ -151,13 +152,7 @@ def fit(
         raise NotFitted("des points tombent hors de la photo ou de la vue")
     kept = np.ones(len(photo), bool)
     if robust:
-        h = None
-        if len(photo) >= 4:  # fitted in pixels: MAGSAC's threshold is in pixels
-            h, mask = cv2.findHomography(photo_px, view_px, cv2.USAC_MAGSAC, MATCHED_PX)
-            if mask is not None:
-                kept = mask.ravel().astype(bool)
-        if kept.sum() < MIN_MATCHED:
-            raise NotFitted(f"il faut au moins {MIN_MATCHED} points qui s'accordent")
+        h, kept = _agreeing(photo_px, view_px)
         if cv2.contourArea(cv2.convexHull(photo[kept].astype(np.float32))) < MIN_COVER:
             raise NotFitted("points trop groupés : les répartir sur toute la photo")
         if h is None:
@@ -173,6 +168,66 @@ def fit(
     if not frame_ok(in_unit):
         raise NotFitted("la photo se replie, se retourne ou sort presque de la vue")
     return of(panorama, _to_camera(view, axes) @ in_unit, view, axes), kept
+
+
+def _agreeing(photo_px: np.ndarray, view_px: np.ndarray) -> tuple[np.ndarray | None, np.ndarray]:
+    """The flat warp most matched pairs agree on (MAGSAC, in pixels: its threshold is), and
+    which pairs; refused below MIN_MATCHED."""
+    h, kept = None, np.zeros(len(photo_px), bool)
+    if len(photo_px) >= 4:
+        h, mask = cv2.findHomography(photo_px, view_px, cv2.USAC_MAGSAC, MATCHED_PX)
+        if mask is not None:
+            kept = mask.ravel().astype(bool)
+    if kept.sum() < MIN_MATCHED:
+        raise NotFitted(f"il faut au moins {MIN_MATCHED} points qui s'accordent")
+    return h, kept
+
+
+def turned_through(
+    photo_px: np.ndarray,
+    view_px: np.ndarray,
+    photo_size: tuple[int, int],
+    side: int,
+    panorama: str,
+    view: ViewOf,
+    axes: np.ndarray,
+) -> tuple[Registration, np.ndarray]:
+    """Matched pairs registered as the photo's camera turned and zoomed (as clicked, see fit)
+    through those that agree on one flat warp (MAGSAC), and the pairs that camera puts within
+    a clicked pair's tolerance (CLICKED_OFF). Refused unless it holds half of those that agree
+    (a facade seen askew, which no turn makes: measured 17/11, 85 % and more on match's
+    placements). Whatever little of the photo they cover (match's points, bunched on the
+    facades it found), it never folds the photo."""
+    photo_px, view_px = np.asarray(photo_px, float), np.asarray(view_px, float)
+    _, agree = _agreeing(photo_px, view_px)
+    r, _ = fit(photo_px[agree], view_px[agree], photo_size, side, panorama, view, axes)
+    unit = np.column_stack([photo_px / [photo_size[1], photo_size[0]], np.ones(len(photo_px))])
+    at = unit @ in_view(r, view, axes).T
+    with np.errstate(divide="ignore", invalid="ignore"):
+        off = np.hypot(*(at[:, :2] / at[:, 2:] - view_px / side).T)
+    kept = off <= CLICKED_OFF  # NaN (behind the view): not kept
+    if kept[agree].sum() < max(MIN_MATCHED, agree.sum() / 2):
+        raise NotFitted("la caméra ne tient pas les points qui s'accordent")
+    return r, kept
+
+
+ROBUST = functools.partial(fit, robust=True)  # matched pairs: those that agree, the others left
+
+
+def most_agreeing(
+    tries: Iterable[tuple], way: Callable[..., tuple[Registration, np.ndarray]] = ROBUST
+) -> Registration | None:
+    """Of fits made `way` (each try: its arguments to fit, but `robust`), the one where most
+    pairs agree; the first of equals; none if none fits."""
+    found, most = None, 0
+    for args in tries:
+        try:
+            r, kept = way(*args)
+        except (NotFitted, cv2.error):  # OpenCV's estimators assert on some degenerate sets
+            continue
+        if kept.sum() > most:
+            found, most = r, int(kept.sum())
+    return found
 
 
 @dataclass(frozen=True)

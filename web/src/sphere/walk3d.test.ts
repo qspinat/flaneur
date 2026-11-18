@@ -6,6 +6,7 @@ import {
   nearestTo,
   pointers,
   shownHere,
+  statusLabel,
   stepTarget,
   toward,
   turn,
@@ -30,6 +31,9 @@ function photo(id: string, years: [number, number], shown: [string, number][]): 
     image: `photos/${id}.webp`,
     flipped: false,
     shown: shown.map(([p, strength]) => ({ panorama: p, registration: { ...REG, panorama: p }, strength })),
+    status: 'checked',
+    unchecked_area: false,
+    proposed_marks: false,
   };
 }
 
@@ -105,5 +109,21 @@ describe('turning', () => {
     expect(turn(0, 180)).toBe(180);
     expect(turn(350, 10)).toBe(20);
     expect(turn(10, 350)).toBe(-20);
+  });
+});
+
+describe('statusLabel', () => {
+  const base = photo('a', [1900, 1900], []);
+
+  it('says a placement checked, near, or automatic', () => {
+    expect(statusLabel({ ...base, status: 'checked' })).toBe('Placement vérifié.');
+    expect(statusLabel({ ...base, status: 'near' })).toBe('Placement approché : le bon lieu, le cadrage à reprendre.');
+    expect(statusLabel({ ...base, status: 'automatic' })).toBe('Placement automatique, pas encore vérifié.');
+  });
+
+  it('adds what an automatic one is not sure of yet', () => {
+    expect(statusLabel({ ...base, status: 'automatic', unchecked_area: true, proposed_marks: true })).toBe(
+      'Placement automatique, pas encore vérifié. La méthode n\'est pas encore contrôlée dans ce quartier. Ses repères sont proposés, pas encore vérifiés.',
+    );
   });
 });

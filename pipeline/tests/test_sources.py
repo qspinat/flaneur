@@ -3,7 +3,7 @@ import re
 import httpx
 import pytest
 
-from flaneur.sources import albert_kahn, paris_musees
+from flaneur.sources import albert_kahn, paris_musees, write_atomic
 
 
 def test_paris_musees_record_becomes_a_cc0_photo(load_fixture):
@@ -182,3 +182,37 @@ def test_a_pinned_file_is_downloaded_once_and_kept_only_if_its_hash_matches(tmp_
 
     with pytest.raises(RuntimeError, match="SHA-256"):
         pinned_file(path, "0" * 64, download)  # kept, then changed: refused
+
+
+def test_two_writers_of_one_file_never_share_a_draft(tmp_path):
+    path = tmp_path / "f.json"
+
+    def first(out):
+        out.write(b"first")
+        write_atomic(path, lambda other: other.write(b"second"))  # another process, meanwhile
+        out.write(b" whole")
+
+    write_atomic(path, first)
+
+    assert path.read_bytes() == b"first whole"  # the last named, whole
+    assert path.stat().st_mode & 0o777 == 0o644 and list(tmp_path.iterdir()) == [path]
+
+
+def test_a_draft_left_by_a_writer_stopped_dead_is_cleared(tmp_path):
+    path = tmp_path / "f.json"
+    left = tmp_path / "f.json.999999-1.tmp"  # no process 999999: killed mid-write
+    left.write_bytes(b"half")
+
+    write_atomic(path, lambda out: out.write(b"whole"))
+
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["f.json"]
+
+
+def test_a_file_named_like_a_draft_but_not_one_is_left_alone(tmp_path):
+    path = tmp_path / "f.json"
+    other = tmp_path / "f.json.notes-1.tmp"
+    other.write_bytes(b"someone's")
+
+    write_atomic(path, lambda out: out.write(b"whole"))
+
+    assert path.read_bytes() == b"whole" and other.exists()
