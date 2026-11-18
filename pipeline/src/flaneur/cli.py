@@ -72,6 +72,7 @@ from flaneur import (
     scene,
     segment,
     stats,
+    survey,
 )
 from flaneur.addresses import Addresses
 from flaneur.blocks import Blocks
@@ -91,6 +92,7 @@ SEEDED = DATA / "pilot" / "seeded"
 REVIEWS = DATA / "overrides" / "reviews.jsonl"
 SIGHTS = DATA / "overrides" / "sights.jsonl"  # the landmarks marked in photos, by hand
 CORRECTIONS = DATA / "pilot" / "panorama_corrections.json"  # on the buildings (register): unused
+SURVEYED = DATA / "pilot" / "panorama_survey.json"  # volunteers' panoramas set right on the survey
 POSES = DATA / "pilot" / "panorama_poses.json"  # panoramas set right on two surveys (see poses)
 VIEW_STRUCTURE = (  # each panorama's views' pixel classes (see segment), as views are cut now
     DATA / "raw" / "view_structure" / f"{match.VIEW_SIDE}_{match.VIEW_FOV}_{match.VIEW_PITCH}"
@@ -426,11 +428,39 @@ def _placed(pictures: list[Picture], corrected: bool = True) -> list[Picture]:
     fixes = register.load(FIXES)
     found = {i: tuple(fixes[i]["fix"]) for i in _fixed_by_colmap(pictures, fixes)}
     placed = register.applied(pictures, reconstruct.borrowed(found, pictures))
-    if not corrected or poses.APPLIED == "none":
+    if not corrected:
+        return placed
+    placed = register.applied(placed, _survey_fixes(placed))  # BD TOPO's no longer stand there
+    if poses.APPLIED == "none":
         return placed
     verdicts = poses.load(POSES)
     where = _standing([p for p in placed if p.id in verdicts])
     return register.applied(placed, poses.to_apply(verdicts, where, poses.APPLIED))
+
+
+def _survey_fixes(pictures: list[Picture]) -> dict[str, tuple[float, float, float]]:
+    """The volunteers' panoramas set right on the survey (`flaneur releve`) still standing where
+    they were, as register.applied takes them; none until survey.APPLIED."""
+    if not survey.APPLIED:
+        return {}
+    rows = register.load(SURVEYED)
+    where = _standing([p for p in pictures if p.id in rows])
+    return survey.fixes(
+        {
+            i: survey.SetRight(
+                r["turn"], r["shift"] and tuple(r["shift"]), r["hops"], r["references"]
+            )
+            for i, r in rows.items()
+            if poses.stands(r["placed"], where.get(i))
+        }
+    )
+
+
+def _save_surveyed(
+    found: dict[str, survey.SetRight], where: dict[str, tuple[float, float, float]]
+) -> None:
+    """The panoramas set right on the survey, each with where it stood (see poses.at)."""
+    write_json(SURVEYED, {i: {**asdict(f), "placed": where[i]} for i, f in sorted(found.items())})
 
 
 class _NotRead(Exception):
@@ -3750,6 +3780,64 @@ def _within(answers: Path, reach: float, corrected: bool = True) -> list[match.P
     return [spheres[i] for i in np.argsort(nearest) if nearest[i] <= reach]
 
 
+def _in_street(x: float, y: float, client: httpx.Client) -> bool:
+    """Whether a place is in the street, not in a building: LiDAR's surface there within
+    poses.ABOVE_STREET_M of the street's (its lowest tenth around)."""
+    heights, x0, y1 = poses.surface(x, y, LIDAR_MNS, client)
+    grid = np.linspace(-poses.STREET_RING_M, poses.STREET_RING_M, 13)
+    ring = np.array([x, y]) + np.stack(np.meshgrid(grid, grid), -1).reshape(-1, 2)
+    street = float(np.nanpercentile(poses.outline_heights(heights, x0, y1, ring), 10))
+    there = float(poses.outline_heights(heights, x0, y1, np.array([[x, y]]))[0])
+    return there - street < poses.ABOVE_STREET_M
+
+
+@app.command("releve")
+def set_on_survey() -> None:
+    """Remet d'aplomb les panoramas des bénévoles sur ceux du relevé (Immergis pour la Ville de
+    Paris), par les paires déjà faites (sans apparieur) : un bénévole vu par des panoramas du
+    relevé qui s'accordent prend leur cap, et sa place où leurs directions se croisent ; remis
+    sur deux références ou plus, il passe sa correction, jusqu'à quatre sauts. Un déplacement de
+    plus de 5 m n'est gardé que si le LiDAR met la nouvelle place dans la rue. Jugés tels que
+    COLMAP les a laissés ; écrit data/pilot/panorama_survey.json, lu seulement si
+    survey.APPLIED (après la mesure E du plan)."""
+    spheres, segments = _placing_world(corrected=False)
+    with closing(db.connect(DB_PATH)) as conn:
+        pictures = panoramas.load(conn)
+    producer = {p.id: p.producer for p in pictures}
+    fixed = _fixed_by_colmap(pictures, register.load(FIXES))
+    scenes = _Scenes(spheres, fixed, _no_matcher, threading.Lock(), segments, WALLS)
+    by_id = {p.id: p for p in spheres}
+
+    def seen(home: str, other: str) -> survey.Seen | None:
+        if not scenes._made(by_id[home], by_id[other]):  # pairs on disk only
+            return None
+        if (pair := scenes.pair_of(home, other)) is None:
+            return None
+        turn, at = np.asarray(pair.turn), np.asarray(pair.at)
+        return survey.Seen(math.degrees(math.atan2(turn[1, 0], turn[0, 0])), (at[0], at[1]))
+
+    refs = {p.id: (p.x, p.y) for p in spheres if producer.get(p.id) == survey.PRODUCER}
+    others = {p.id: (p.x, p.y) for p in spheres if p.id not in refs}
+    with httpx.Client() as client:
+        found = survey.set_right(
+            refs,
+            others,
+            lambda i: [p.id for p in depth.candidates(by_id[i], spheres, fixed)],
+            seen,
+            lambda x, y: _in_street(x, y, client),
+        )
+    _save_surveyed(found, {p.id: poses.at(p.x, p.y, p.azimuth) for p in spheres})
+    turned = survey.fixes(found)
+    hops = Counter(f.hops for f in found.values())
+    typer.echo(
+        f"{len(found)} panoramas de bénévoles remis sur le relevé "
+        f"({', '.join(f'{n} à {h} saut(s)' for h, n in sorted(hops.items()))}) ; "
+        f"tournés de plus de {survey.LEAST_TURN_DEG:g}° : {len(turned)}, dont déplacés "
+        f"{sum(1 for f in turned.values() if f[:2] != (0.0, 0.0))} ; "
+        + ("appliqués" if survey.APPLIED else "pas encore appliqués (survey.APPLIED)")
+    )
+
+
 @app.command("segmenter")
 def segment_panoramas(answers: Path = PLACINGS, page: int = 8772) -> None:
     """Segmente d'avance (bâti, végétation, ciel...) les panoramas que la page pour placer peut
@@ -4307,7 +4395,7 @@ ANSWER_FILES = (ANCHORS, PLACINGS, SIGHTS, REVIEWS)  # the answers the light upd
 WATCH_S, QUIET_S = 5, 10  # answers looked at every WATCH_S; the update once QUIET_S calm
 REFRESH_LOCK = DATA / "pilot" / ".mise-a-jour.lock"  # one light update at a time
 NIGHT_STEPS = (  # each in its own process (one model in memory at a time), in this order
-    ("segmenter",),
+    ("releve",),  # first: views, pairs and walls follow where the panoramas stand
     ("murs", "--masques"),
     ("murs",),
     ("reperes-proposer", "--write"),

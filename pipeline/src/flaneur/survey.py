@@ -17,6 +17,8 @@ from typing import NamedTuple
 import numpy as np
 
 PRODUCER = "Immergis pour la Ville de Paris"  # the survey
+APPLIED = False  # whether what reads panoramas' poses takes these corrections (cli._placed):
+# once a sandbox night shows match gains from them (plan panoramas-sur-le-releve, measure E)
 AGREE_DEG = 2.0  # the turns a panorama's references give agree this well, or it is left
 MOST_HOPS = 4  # from the survey (5: 76 % within 2°)
 SPREAD_DEG = 20.0  # bearings this far apart at least cross well enough to place it
