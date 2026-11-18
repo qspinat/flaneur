@@ -3410,7 +3410,7 @@ def confirm_placed(port: int = 8768, open_browser: bool = True) -> None:
         pairs, seen_from, counted = None, _toward(f.camera, f.panorama), {}
         if points is not None:
             at = _kept_store(m, kept.get(photo_id))
-            observed = _observed_of(*at, kept.get(photo_id)) if at else None
+            observed = _observed_of(at[0], photo_id, at[1], kept.get(photo_id)) if at else None
             matched = observed and _matched_in(points, observed, f.panorama, seen_from, size)
             pairs = _pairs_shown(points, f.photo.shape, size, seen_from, matched)
             counted = {
