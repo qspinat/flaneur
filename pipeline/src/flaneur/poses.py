@@ -400,9 +400,7 @@ def judge(
         plan = plan[np.random.default_rng(0).choice(len(plan), MOST_DETAILS, replace=False)]
     segments = np.asarray(facades, float).reshape(-1, 2, 2)
     heights, x0, y1 = surface(o[0], o[1], folder, client)
-    grid = np.linspace(-STREET_RING_M, STREET_RING_M, 13)
-    ring = o + np.stack(np.meshgrid(grid, grid), -1).reshape(-1, 2)
-    street = float(np.nanpercentile(outline_heights(heights, x0, y1, ring), 10))
+    street = street_level(heights, x0, y1, o)
     return judged(
         plan,
         o,
@@ -410,6 +408,22 @@ def judge(
         outline_distance(heights, x0, y1, street),
         lambda q, at: clear_of(q, at, heights, x0, y1, street),
     )
+
+
+def street_level(heights: np.ndarray, x0: float, y1: float, at) -> float:
+    """The street's height around `at` (east, north): LiDAR's lowest tenth within
+    STREET_RING_M."""
+    grid = np.linspace(-STREET_RING_M, STREET_RING_M, 13)
+    ring = np.asarray(at, float)[:2] + np.stack(np.meshgrid(grid, grid), -1).reshape(-1, 2)
+    return float(np.nanpercentile(outline_heights(heights, x0, y1, ring), 10))
+
+
+def in_street(x: float, y: float, folder: Path, client: httpx.Client | None) -> bool:
+    """Whether a place is in the street, not in a building: LiDAR's surface there within
+    ABOVE_STREET_M of the street's (see street_level)."""
+    heights, x0, y1 = surface(x, y, folder, client)
+    there = float(outline_heights(heights, x0, y1, np.array([[x, y]]))[0])
+    return there - street_level(heights, x0, y1, (x, y)) < ABOVE_STREET_M
 
 
 def surface(

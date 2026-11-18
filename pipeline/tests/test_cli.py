@@ -2513,10 +2513,10 @@ def test_survey_corrections_are_read_once_applied_where_the_panorama_still_stand
         "moved": survey.SetRight(10.0, None, 1, 2),
     }
     judged = {**where, "moved": (0.0, 0.0, 0.0)}  # set right where it no longer stands
-    cli._save_surveyed(found, judged)
+    survey.save(cli.SURVEYED, found, judged)
 
     off = cli._placed(pictures)
-    monkeypatch.setattr(survey, "APPLIED", True)
+    monkeypatch.setattr(survey, "APPLIED", "all")
     on = {p.id: p for p in cli._placed(pictures)}
 
     assert [p.azimuth for p in off] == [90.0, 90.0, 90.0]  # until measure E passes: none
@@ -2527,5 +2527,21 @@ def test_survey_corrections_are_read_once_applied_where_the_panorama_still_stand
     assert (on["moved"].azimuth, on["s"].azimuth) == (90.0, 90.0)
 
 
-def test_the_night_sets_panoramas_right_on_the_survey_first():
-    assert cli.NIGHT_STEPS[0] == ("releve",)
+def test_the_night_sets_panoramas_right_on_the_survey_first_then_segments():
+    assert cli.NIGHT_STEPS[:2] == (("releve",), ("segmenter",))
+
+
+def test_bd_topo_corrects_nothing_the_survey_answered(monkeypatch):
+    from flaneur import survey
+
+    pictures = [_picture("v", 2.3450), _picture("bd", 2.3460)]
+    where = cli._standing(pictures)
+    survey.save(cli.SURVEYED, {"v": survey.SetRight(0.5, None, 1, 2)}, where)  # found right
+    turned = poses.Correction(0.0, 0.0, 8.0)
+    poses.save(cli.POSES, {i: poses.Verdict(turned, turned, 400, where[i]) for i in ("v", "bd")})
+    monkeypatch.setattr(survey, "APPLIED", "all")
+    monkeypatch.setattr(poses, "APPLIED", "all")
+
+    placed = {p.id: p.azimuth for p in cli._placed(pictures)}
+
+    assert placed == {"v": 90.0, "bd": pytest.approx(82.0)}

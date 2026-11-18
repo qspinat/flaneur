@@ -8,17 +8,23 @@ within 2° in 98 % of 3,276 tries, the bearing within 1 m in 97 %; through 1 to 
 85, 81, 76 % within 2° of the survey's own answer. The map (BD TOPO, LiDAR) only checks: fitted
 on its own it agreed with the survey 58 % of the time."""
 
+import json
 import math
-import statistics
 from collections.abc import Callable, Iterable
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
+from pathlib import Path
 from typing import NamedTuple
 
 import numpy as np
 
+from flaneur.poses import Applied
+from flaneur.sources import write_json
+
 PRODUCER = "Immergis pour la Ville de Paris"  # the survey
-APPLIED = False  # whether what reads panoramas' poses takes these corrections (cli._placed):
-# once a sandbox night shows match gains from them (plan panoramas-sur-le-releve, measure E)
+APPLIED: Applied = (
+    "none"  # what reads panoramas' poses takes of these (cli._placed): "all", "turns"
+)
+# (the heading only) or "none" — once a sandbox night shows match gains (plan, measure E)
 AGREE_DEG = 2.0  # the turns a panorama's references give agree this well, or it is left
 MOST_HOPS = 4  # from the survey (5: 76 % within 2°)
 SPREAD_DEG = 20.0  # bearings this far apart at least cross well enough to place it
@@ -57,53 +63,46 @@ def set_right(
     `survey` panoramas (right as they stand) first, then on volunteers set right on two
     references or more, up to MOST_HOPS; `seen(home, other)`: the pair of two panoramas
     (none: not on disk); `in_street`: whether a place is in the street."""
-    known: dict[str, tuple[float, np.ndarray, int, bool]] = {
-        i: (0.0, np.asarray(at, float), 0, True) for i, at in survey.items()
-    }  # turn, where it stands set right, hops, whether it passes its correction on
+    origin = {i: np.asarray(at, float) for i, at in {**survey, **volunteers}.items()}
+    turn_of = dict.fromkeys(survey, 0.0)  # those set right: their turn, and where they stand
+    place_of = {i: origin[i] for i in survey}
+    passing = set(survey)  # those that pass their correction on
     found: dict[str, SetRight] = {}
     for hops in range(1, MOST_HOPS + 1):
         new = {}
-        for v, at in volunteers.items():
-            if v in found:
-                continue
-            words = []
-            for w in neighbours(v):
-                if w in known and known[w][3] and (s := seen(w, v)):  # passed on so far
-                    words.append((w, s))
-            if got := _one(
-                words, known, volunteers, survey, np.asarray(at, float), in_street, hops
-            ):
-                new[v] = got
+        for v in volunteers.keys() - found.keys():
+            words = [(w, s) for w in neighbours(v) if w in passing and (s := seen(w, v))]
+            if got := _one(words, turn_of, place_of, origin, in_street, origin[v]):
+                new[v] = SetRight(*got[:2], hops, got[2])
         if not new:
             break
         for v, f in new.items():
-            found[v] = f
-            moved = np.asarray(volunteers[v], float) + (f.shift if f.shift else (0.0, 0.0))
-            known[v] = (f.turn, moved, hops, f.references >= 2)
+            found[v], turn_of[v] = f, f.turn
+            place_of[v] = origin[v] + (f.shift or (0.0, 0.0))
+            if f.references >= 2:
+                passing.add(v)
     return found
 
 
-def _one(words, known, volunteers, survey, at, in_street, hops: int) -> SetRight | None:
+def _one(words, turn_of, place_of, origin, in_street, at):
     """A panorama standing `at` set right on what its references say (`words`), if they
-    agree: its turn, and where their bearings cross (a big move only into the street)."""
+    agree: its turn, its move (where their bearings cross; a big one only into the street),
+    how many references."""
     if not words:
         return None
-    turns = [known[w][0] + s.turn for w, s in words]
+    turns = [turn_of[w] + s.turn for w, s in words]
     if max(turns) - min(turns) > AGREE_DEG:
         return None
-    origins, toward = [], []
-    for w, s in words:
-        turn, there, _, _ = known[w]
-        stood = np.asarray(volunteers.get(w, survey.get(w)), float)
-        origins.append(there)
-        toward.append(_turned(np.asarray(s.at, float) - stood, turn))
-    place = crossing(origins, toward)
+    place = crossing(
+        [place_of[w] for w, _ in words],
+        [_turned(np.asarray(s.at, float) - origin[w], turn_of[w]) for w, s in words],
+    )
     shift = None
     if place is not None:
         move = place - at
         if np.hypot(*move) <= MOST_SHIFT_M or in_street(*place):
             shift = (float(move[0]), float(move[1]))
-    return SetRight(float(statistics.median(turns)), shift, hops, len(words))
+    return float(np.median(turns)), shift, len(words)
 
 
 def _turned(v: np.ndarray, deg: float) -> np.ndarray:
@@ -127,11 +126,33 @@ def crossing(origins: list[np.ndarray], toward: list[np.ndarray]) -> np.ndarray 
     return np.linalg.solve(sum(across), sum(m @ o for m, o in zip(across, origins, strict=True)))
 
 
-def fixes(found: dict[str, SetRight]) -> dict[str, tuple[float, float, float]]:
+def fixes(found: dict[str, SetRight], applied: Applied) -> dict[str, tuple[float, float, float]]:
     """The panoramas to move and turn, as register.applied takes them (east, north, change of
-    compass heading: clockwise, the turn's opposite): those turned beyond LEAST_TURN_DEG."""
+    compass heading: clockwise, the turn's opposite): those turned beyond LEAST_TURN_DEG;
+    `applied` (see APPLIED) "turns": not moved, "none": none."""
+    if applied == "none":
+        return {}
     return {
-        i: (*(f.shift or (0.0, 0.0)), -f.turn)
+        i: (*(f.shift if f.shift and applied == "all" else (0.0, 0.0)), -f.turn)
         for i, f in found.items()
         if abs(f.turn) > LEAST_TURN_DEG
+    }
+
+
+def save(path: Path, found: dict[str, SetRight], where: dict[str, tuple]) -> None:
+    """The panoramas set right, each with where it stood (see poses.at)."""
+    write_json(path, {i: {**asdict(f), "placed": where[i]} for i, f in sorted(found.items())})
+
+
+def load(path: Path) -> dict[str, tuple[SetRight, tuple]]:
+    """What `save` kept: each panorama set right, and where it stood."""
+    if not path.exists():
+        return {}
+    rows = json.loads(path.read_text())
+    return {
+        i: (
+            SetRight(r["turn"], r["shift"] and tuple(r["shift"]), r["hops"], r["references"]),
+            tuple(r["placed"]),
+        )
+        for i, r in rows.items()
     }

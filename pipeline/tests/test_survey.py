@@ -118,4 +118,15 @@ def test_only_turns_beyond_the_survey_s_tolerance_are_applied_the_compass_the_ot
         "kept": survey.SetRight(-6.0, None, 2, 2),
     }
 
-    assert survey.fixes(found) == {"turned": (1.0, -2.0, -10.0), "kept": (0.0, 0.0, 6.0)}
+    assert survey.fixes(found, "all") == {"turned": (1.0, -2.0, -10.0), "kept": (0.0, 0.0, 6.0)}
+    assert survey.fixes(found, "turns") == {"turned": (0.0, 0.0, -10.0), "kept": (0.0, 0.0, 6.0)}
+    assert survey.fixes(found, "none") == {}
+
+
+def test_what_was_set_right_is_read_back_with_where_each_stood(tmp_path):
+    found = {"v": survey.SetRight(10.0, (1.0, -2.0), 1, 2), "w": survey.SetRight(-3.0, None, 2, 1)}
+    where = {"v": (1.0, 2.0, 30.0), "w": (3.0, 4.0, 50.0)}
+
+    survey.save(tmp_path / "s.json", found, where)
+
+    assert survey.load(tmp_path / "s.json") == {i: (found[i], where[i]) for i in found}
