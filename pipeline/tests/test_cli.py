@@ -2545,3 +2545,12 @@ def test_bd_topo_corrects_nothing_the_survey_answered(monkeypatch):
     placed = {p.id: p.azimuth for p in cli._placed(pictures)}
 
     assert placed == {"v": 90.0, "bd": pytest.approx(82.0)}
+
+
+def test_a_lidar_patch_that_cannot_be_read_keeps_the_panorama_where_it_stands(monkeypatch):
+    def broken(x, y, folder, client):
+        raise cli.httpx.ConnectError("no network")
+
+    monkeypatch.setattr(cli.poses, "in_street", broken)
+
+    assert cli._in_street_or_not(None)(1.0, 2.0) is False

@@ -3775,6 +3775,20 @@ def _within(answers: Path, reach: float, corrected: bool = True) -> list[match.P
     return [spheres[i] for i in np.argsort(nearest) if nearest[i] <= reach]
 
 
+def _in_street_or_not(client: httpx.Client | None) -> Callable[[float, float], bool]:
+    """Whether a place is in the street (see poses.in_street); a LiDAR patch that cannot be
+    read (network, an answer not understood): not, the panorama left where it stands."""
+
+    def in_street(x: float, y: float) -> bool:
+        try:
+            return poses.in_street(x, y, LIDAR_MNS, client)
+        except (httpx.HTTPError, ValueError) as error:
+            typer.echo(f"LiDAR illisible en {x:.0f}, {y:.0f} : laissé en place ({error})", err=True)
+            return False
+
+    return in_street
+
+
 @app.command("releve")
 def set_on_survey() -> None:
     """Remet d'aplomb les panoramas des bénévoles sur ceux du relevé (Immergis pour la Ville de
@@ -3815,9 +3829,7 @@ def set_on_survey() -> None:
     refs = {p.id: (p.x, p.y) for p in spheres if producer.get(p.id) == survey.PRODUCER}
     others = {p.id: (p.x, p.y) for p in spheres if p.id not in refs}
     with httpx.Client() as client:
-        found = survey.set_right(
-            refs, others, neighbours, seen, lambda x, y: poses.in_street(x, y, LIDAR_MNS, client)
-        )
+        found = survey.set_right(refs, others, neighbours, seen, _in_street_or_not(client))
     survey.save(SURVEYED, found, {p.id: poses.at(p.x, p.y, p.azimuth) for p in spheres})
     turned = survey.fixes(found, "all")
     hops = Counter(f.hops for f in found.values())
