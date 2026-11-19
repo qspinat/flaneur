@@ -1829,6 +1829,7 @@ def _match_with(matcher: str, photos: list[export.WalkPhoto], at: _Run) -> None:
         if camera is not None or matcher == at.to_try[me.id][-1]:  # done with these walls
             at.found[me.id] = {**at.found[me.id], "fitted_from": at.fitted_from[me.id]}
         write_json(MATCHES, at.found)
+        write_json(MATCH_TRACE, at.traces)  # each photo's last run: a stop loses the one in hand
 
 
 def _checked_in(near_by: list[match.Panorama]) -> dict[str, list[str]]:
@@ -1926,7 +1927,6 @@ def match_photos(
             from flaneur import lomag
 
             lomag.released()  # the views' cache holds the matcher in a cycle: only gc frees it
-    write_json(MATCH_TRACE, at.traces)  # kept for every photo: its last run
     typer.echo(f"où ces photos s'arrêtent : {_funnel(at.run.values())}")
     ids = {me.id for me in walk}
     typer.echo(

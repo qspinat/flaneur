@@ -712,6 +712,25 @@ def test_match_tries_lomag_then_disk_on_the_photos_left_and_keeps_what_each_did(
     }
 
 
+def test_a_match_stopped_midway_keeps_the_trace_of_the_photos_it_went_through(
+    tmp_path, monkeypatch
+):
+    calls = []
+
+    def places(matcher):
+        calls.append(matcher)
+        if len(calls) > 1:  # the night's hour comes during the second photo
+            raise KeyboardInterrupt
+        return None
+
+    _match_world(tmp_path, monkeypatch, {}, places)
+
+    with pytest.raises(KeyboardInterrupt):
+        cli.match_photos(photo=None, again=False)
+
+    assert list(json.loads((tmp_path / "trace.json").read_text())) == ["pm:1"]
+
+
 def test_a_redo_that_finds_nothing_keeps_the_placement_made_from_these_inputs(
     tmp_path, monkeypatch
 ):
