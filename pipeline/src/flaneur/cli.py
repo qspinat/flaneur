@@ -2794,20 +2794,30 @@ def _first_read(views: Iterable[match.Panorama]) -> match.Panorama | None:
     return next((p for p in views if p.path.exists()), None)
 
 
+SOURCE_SHARE = 0.5  # COLMAP's source first only if it saw this share of the top one's points
+
+
 def _sources_first(
     points: match.Points | None,
     by_id: dict[str, match.Panorama],
     m: match.Situated,
     fixed: Set[str],
 ) -> list[match.Panorama]:
-    """The panoramas a camera's points were seen from: COLMAP's (`fixed`) first, then those
-    that saw the most, then the nearest it."""
+    """The panoramas a camera's points were seen from: those that saw at least SOURCE_SHARE of
+    what the one that saw most did, COLMAP's (`fixed`) first among them; then those that saw the
+    most, then the nearest it (a COLMAP panorama that saw one point of 35 is no source to show)."""
     if points is None:
         return []
     counted = Counter(i for seen in points.seen for i in seen if i in by_id)
+    most = max(counted.values(), default=0)
     return sorted(
         (by_id[i] for i in counted),
-        key=lambda p: (p.id not in fixed, -counted[p.id], float(np.hypot(p.x - m.x, p.y - m.y))),
+        key=lambda p: (
+            counted[p.id] < SOURCE_SHARE * most,
+            p.id not in fixed,
+            -counted[p.id],
+            float(np.hypot(p.x - m.x, p.y - m.y)),
+        ),
     )
 
 
