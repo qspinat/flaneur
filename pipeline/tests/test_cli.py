@@ -712,6 +712,25 @@ def test_match_tries_lomag_then_disk_on_the_photos_left_and_keeps_what_each_did(
     }
 
 
+def test_a_match_stopped_midway_keeps_the_trace_of_the_photos_it_went_through(
+    tmp_path, monkeypatch
+):
+    calls = []
+
+    def places(matcher):
+        calls.append(matcher)
+        if len(calls) > 1:  # the night's hour comes during the second photo
+            raise KeyboardInterrupt
+        return None
+
+    _match_world(tmp_path, monkeypatch, {}, places)
+
+    with pytest.raises(KeyboardInterrupt):
+        cli.match_photos(photo=None, again=False)
+
+    assert list(json.loads((tmp_path / "trace.json").read_text())) == ["pm:1"]
+
+
 def test_a_redo_that_finds_nothing_keeps_the_placement_made_from_these_inputs(
     tmp_path, monkeypatch
 ):
@@ -1513,13 +1532,22 @@ def test_the_panoramas_a_camera_was_found_from_come_most_points_first_then_neare
     assert cli._sources_first(None, by_id, _situated_at_origin(), set()) == []
 
 
-def test_a_source_colmap_placed_comes_before_one_that_saw_more():
+def test_a_source_colmap_placed_comes_before_one_that_saw_more_if_it_saw_half_as_many():
     by_id = {"gps": _standing_at("gps", 2.0, 0.0), "colmap": _standing_at("colmap", 5.0, 0.0)}
-    points = _seen_by({"gps"}, {"gps"}, {"gps", "colmap"})
+    points = _seen_by({"gps"}, {"gps", "colmap"}, {"gps", "colmap"}, {"gps"})  # 4 and 2
 
     first = cli._sources_first(points, by_id, _situated_at_origin(), {"colmap"})
 
     assert [p.id for p in first] == ["colmap", "gps"]
+
+
+def test_a_source_colmap_placed_that_saw_few_points_comes_after_the_one_that_saw_them():
+    by_id = {"gps": _standing_at("gps", 2.0, 0.0), "colmap": _standing_at("colmap", 5.0, 0.0)}
+    points = _seen_by(*[{"gps"}] * 33, {"gps", "colmap"})  # 34 and 1 (paris_musees:587154)
+
+    first = cli._sources_first(points, by_id, _situated_at_origin(), {"colmap"})
+
+    assert [p.id for p in first] == ["gps", "colmap"]
 
 
 def test_today_s_view_comes_from_a_source_however_far_before_any_nearer_panorama():
