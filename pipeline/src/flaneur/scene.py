@@ -194,8 +194,9 @@ def build3d(
     its index in `credits`), and each photo placed in one (`shown`: as placed.Placed.for_scene
     gives them, on the image the photo has now), where it shows: its home, then its `copies`
     carried to the neighbours, and how sure its placement is. And the panoramas that hold a
-    photo, to copy onto the site. A photo with a standing camera (see placed.Placed) is laid on
-    its home's walls (`walls_of`), which come with that panorama; without walls, its matrix."""
+    photo, to copy onto the site. A photo with a standing camera (see placed.Placed), or a copy
+    with one, is laid on its panorama's walls (`walls_of`), which come with that panorama;
+    without walls, its matrix."""
     by_id = {me.id: me for me in walk}
     known = {p.id for p in pictures}  # a photo or a copy on a panorama gone is left out
     photos, holding, walls = [], set(), {}
@@ -212,6 +213,12 @@ def build3d(
             for c in copies.get(photo_id, [])
             if c["registration"]["panorama"] in known
         ]
+        for copy in where[1:]:  # a copy standing is laid on its own panorama's walls
+            if "standing" in copy:
+                if (around := walls_of(copy["panorama"])) is None:
+                    del copy["standing"]
+                else:
+                    walls[copy["panorama"]] = around
         holding |= {w["panorama"] for w in where}
         credit = f"{me.photographer}. {me.credit}" + ("; image retournée" if row["flipped"] else "")
         photos.append(

@@ -2914,3 +2914,22 @@ def test_photo_pixels_matched_again_are_given_at_the_placement_s_size(monkeypatc
     )
 
     assert np.allclose(found.photo_px, mine / 2)  # its features were at twice the size
+
+
+def test_a_copy_is_drawn_standing_while_its_walls_hold_and_where_it_stands_better(
+    monkeypatch, tmp_path
+):
+    stood = {("pm:1", "a"): (0.006, 0.003, 30), ("pm:1", "b"): (0.006, 0.0055, 30)}
+    walls = {"top": 40.0}
+    _copies(tmp_path, monkeypatch, walls, stood)
+    held, carried = _held_and_carried()
+    cli._copies_standing(held, carried)  # at night
+
+    drawn = cli._copies_drawn(held, carried)
+    walls["top"] = 45.0  # a wall drawn again since: back to the matrix until the next night
+    later = cli._copies_drawn(held, carried)
+
+    assert [("standing" in c) for c in drawn["pm:1"]] == [True, False]
+    assert drawn["pm:1"][0]["standing"]["position"] == [1.0, 0.5, 0.2]
+    assert not any("standing" in c for c in later["pm:1"])
+    assert drawn["pm:flat"] == carried["pm:flat"]["copies"]

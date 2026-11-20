@@ -208,3 +208,37 @@ def test_the_walk_draws_as_many_walls_as_the_scene_sends():
     photo = Path(__file__).parents[2] / "web" / "src" / "sphere" / "photo.ts"
 
     assert f"const MOST_WALLS = {scene.MOST_WALLS};" in photo.read_text()
+
+
+def test_a_copy_standing_off_its_panorama_is_laid_on_that_panorama_s_walls():
+    standing = {"position": [1.0, 0.5, 0.2], "focal": 700.0}
+    copies = {
+        "pm:1": [{"registration": {**REG, "panorama": "p2"}, "strength": 0.5, "standing": standing}]
+    }
+    wall = facades.Wall((652010.0, 6861525.0), (652019.0, 6861525.0), 47.0, "fitted")
+    around = facades.Scene("p2", (652000.0, 6861520.0, 35.0), 32.5, (wall,), (), 8)
+
+    built, _ = _build(
+        {"pm:1": _row()}, copies, lambda panorama: around if panorama == "p2" else None
+    )
+
+    _, copy = built["photos"][0]["shown"]
+    assert copy["standing"] == standing
+    p1, p2, _ = built["panoramas"]
+    assert "walls" in p2 and "walls" not in p1
+
+
+def test_a_copy_standing_where_its_panorama_has_no_walls_keeps_its_matrix():
+    copies = {
+        "pm:1": [
+            {
+                "registration": {**REG, "panorama": "p2"},
+                "strength": 0.5,
+                "standing": {"position": [0, 0, 0]},
+            }
+        ]
+    }
+
+    built, _ = _build({"pm:1": _row()}, copies)
+
+    assert "standing" not in built["photos"][0]["shown"][1]

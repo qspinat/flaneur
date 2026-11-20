@@ -3917,6 +3917,46 @@ def _copy_standing(kept: dict) -> dict | None:
     return _standing_drawn(kept, COPY_GAIN, COPY_HELD)
 
 
+def _copy_made(carried_as: str, copy: dict, placement: dict, walls: str) -> str:
+    """What a copy's standing camera is made from (see _copies_standing): the photo as carried
+    (`carried_as`: see _answered_as), the copy, the placement of match, the walls of its
+    panorama (see _walls_of), the code, and the least held-out pairs a camera is fitted on
+    (the gain is judged on reading)."""
+    return _digest(
+        [
+            carried_as,
+            copy["registration"],
+            _registered_as(placement),
+            walls,
+            _copying_code(),
+            COPY_HELD,
+        ]
+    )
+
+
+def _copies_drawn(shown: dict[str, dict], carried: dict[str, dict]) -> dict[str, list[dict]]:
+    """Each photo's copies (see porter) as the 3D walk draws them: with the camera where the
+    photographer stood (see _copies_standing) where it was made from what they and their
+    panorama's walls are now and it lays the photo better (see _copy_standing); else its
+    matrix (a wall drawn since: until the next night)."""
+    kept = register.load(CARRIED_STANDING)
+    placements = _matches() if kept else {}
+    walls = functools.cache(
+        lambda panorama: _walls_of(home) if (home := _standing_home(panorama)) else None
+    )
+
+    def drawn(photo_id: str, copy: dict) -> dict:
+        panorama = copy["registration"]["panorama"]
+        made = kept.get(photo_id, {}).get(panorama)
+        if made is None or photo_id not in placements or not shown[photo_id].get("standing"):
+            return copy
+        now = _copy_made(carried[photo_id]["made"], copy, placements[photo_id], walls(panorama))
+        camera = _copy_standing(made) if made["made"] == now else None
+        return {**copy, "standing": camera} if camera else copy
+
+    return {i: [drawn(i, copy) for copy in c["copies"]] for i, c in carried.items()}
+
+
 def _copies_standing(held: dict[str, dict], carried: dict[str, dict]) -> None:
     """Each copy (see porter) of a placement of match standing in its home panorama (`held`:
     as the 3D walk takes them; none for one placed by hand or resting on panoramas nothing
@@ -3938,16 +3978,7 @@ def _copies_standing(held: dict[str, dict], carried: dict[str, dict]) -> None:
             panorama = copy["registration"]["panorama"]
             if _standing_home(panorama) is None:
                 continue
-            made = _digest(
-                [
-                    carried[photo_id]["made"],
-                    copy["registration"],
-                    _registered_as(kept[photo_id]),
-                    walls(panorama),
-                    _copying_code(),
-                    COPY_HELD,  # under it no camera is fitted (the gain is judged on reading)
-                ]
-            )
+            made = _copy_made(carried[photo_id]["made"], copy, kept[photo_id], walls(panorama))
             if (before := was.get(photo_id, {}).get(panorama)) and before["made"] == made:
                 out.setdefault(photo_id, {})[panorama] = before
             else:
@@ -4584,7 +4615,7 @@ def _write_scene(answering: tuple) -> None:
     marked = {p["id"] for p in site["photos"] if p["in_3d"]}  # by the export, on its images
     shown = {i: r for i, r in _shown_in_3d(answering).items() if i in marked}
     now = _poised(_panoramas(pictures, lambda x, y: 0.0))
-    copies = {i: c["copies"] for i, c in _carried(shown, now).items()}
+    copies = _copies_drawn(shown, _carried(shown, now))
     built, holding = scene.build3d(
         [p for p in pictures if (PANORAMAS / f"{p.id}.jpg").exists()],
         shown,
