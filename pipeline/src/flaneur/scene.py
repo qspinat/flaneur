@@ -133,29 +133,49 @@ def _crossing(one: list[np.ndarray], other: list[np.ndarray]) -> np.ndarray | No
     return one[0] + d * (a[0] * e[1] - a[1] * e[0]) / across
 
 
+def _corners(ends: list[list[np.ndarray]]) -> list[list[tuple[int, int]]]:
+    """The ends of different walls within CORNER_M of each other, step by step, in groups (wall,
+    end): each a corner where they all meet."""
+    found = list(range(2 * len(ends)))
+
+    def root(k: int) -> int:
+        while found[k] != k:
+            found[k] = found[found[k]]
+            k = found[k]
+        return k
+
+    for i, j in combinations(range(len(ends)), 2):
+        for ei in (0, 1):
+            for ej in (0, 1):
+                if np.hypot(*(ends[i][ei] - ends[j][ej])) <= facades.CORNER_M:
+                    found[root(2 * i + ei)] = root(2 * j + ej)
+    groups: dict[int, list[tuple[int, int]]] = {}
+    for k in range(len(found)):
+        groups.setdefault(root(k), []).append((k // 2, k % 2))
+    return [g for g in groups.values() if len(g) > 1]
+
+
 def walls_shown(around: facades.Scene) -> list[list[float]]:
     """A panorama's walls as the 3D walk lays a photo on them: the MOST_WALLS nearest, ends
-    within CORNER_M of another's joined where their lines cross (else halfway: fitted apart,
-    they meet at a corner and the photo does not tear between them), their ends and top in
+    within CORNER_M of others joined where their lines cross (else at their middle: fitted
+    apart, they meet at a corner and the photo does not tear between them), their ends and top in
     metres east, north and up from the panorama (to the cm: no Lambert-93 in float32)."""
     x, y, z = around.origin
     here = Point(x, y)
     near = sorted(around.walls, key=lambda w: here.distance(LineString([w.a, w.b])))
     near = near[:MOST_WALLS]
     ends = [[np.array(w.a, float), np.array(w.b, float)] for w in near]
-    for i, j in combinations(range(len(ends)), 2):
-        for ei in (0, 1):
-            for ej in (0, 1):
-                p, q = ends[i][ei], ends[j][ej]
-                if np.hypot(*(p - q)) > facades.CORNER_M:
-                    continue
-                meet = _crossing(ends[i], ends[j])
-                if (
-                    meet is None
-                    or max(np.hypot(*(meet - p)), np.hypot(*(meet - q))) > facades.CORNER_M
-                ):
-                    meet = (p + q) / 2
-                ends[i][ei], ends[j][ej] = meet.copy(), meet.copy()
+    for group in _corners(ends):
+        lines = {i for i, _ in group}
+        meets = [
+            meet
+            for i, j in combinations(sorted(lines), 2)
+            if (meet := _crossing(ends[i], ends[j])) is not None
+            and all(np.hypot(*(meet - ends[k][e])) <= facades.CORNER_M for k, e in group)
+        ]
+        point = np.mean(meets or [ends[k][e] for k, e in group], axis=0)
+        for k, e in group:
+            ends[k][e] = point.copy()
     return [
         [round(float(v), 2) for v in (a[0] - x, a[1] - y, b[0] - x, b[1] - y, w.top - z)]
         for (a, b), w in zip(ends, near, strict=True)

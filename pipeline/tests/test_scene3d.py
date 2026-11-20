@@ -1,5 +1,7 @@
 """The 3D walk's scene: today's panoramas, and the photos placed in them."""
 
+from pathlib import Path
+
 from flaneur import facades, scene
 from flaneur.export import WalkPhoto
 from flaneur.panoramax import Picture
@@ -190,3 +192,19 @@ def test_only_the_nearest_walls_go_to_the_walk():
 
     assert len(shown) == scene.MOST_WALLS
     assert max(w[1] for w in shown) == 8 + 3 * (scene.MOST_WALLS - 1)
+
+
+def test_three_walls_ending_near_one_corner_all_meet_at_one_point():
+    corner = _scene_of(
+        ((-10.0, 5.0), (0.0, 5.0)), ((0.6, 5.4), (0.6, 20.0)), ((-0.4, 6.0), (-8.0, 14.0))
+    )
+
+    shown = scene.walls_shown(corner)
+
+    assert shown[0][2:4] == shown[1][0:2] == shown[2][0:2]
+
+
+def test_the_walk_draws_as_many_walls_as_the_scene_sends():
+    photo = Path(__file__).parents[2] / "web" / "src" / "sphere" / "photo.ts"
+
+    assert f"const MOST_WALLS = {scene.MOST_WALLS};" in photo.read_text()
