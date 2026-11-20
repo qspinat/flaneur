@@ -142,6 +142,33 @@ def test_an_automatic_one_says_whether_its_area_passes_and_its_marks_are_checked
     assert (seen.unchecked_area, seen.proposed_marks) == (False, False)  # notes: for unseen
 
 
+def test_an_automatic_one_not_seen_says_it_rests_on_panoramas_nothing_checks():
+    def note(unsure, verdict=None):
+        m = placed.Matched({"x": 0.0}, verdict, "img", True, None, unsure_sources=unsure)
+        return _build({"x": m})["x"].unsure_sources
+
+    assert note(True) and not note(False)
+    assert not note(True, "near")  # seen by the user: the note is for those not seen
+
+
+def _points_seen_by(*seen) -> match.Points:
+    n = len(seen)
+    return match.Points(np.zeros((n, 2)), np.zeros((n, 3)), np.array(seen, dtype=object))
+
+
+def test_a_placement_is_unsure_under_half_its_sightings_by_sure_panoramas():
+    known = {"sure", "gps"}
+    quarter = _points_seen_by({"sure", "gps"}, {"gps"}, {"gps", "photo:x"}, {"photo:y"})
+    half = _points_seen_by({"sure"}, {"gps"}, {"photo:x"})
+
+    assert placed.unsure(quarter, {"sure"}, known)  # 1 of 4 sightings: old photos left out
+    assert not placed.unsure(half, {"sure"}, known)
+
+
+def test_a_placement_no_panorama_saw_is_not_said_unsure():
+    assert not placed.unsure(_points_seen_by({"photo:y"}), {"sure"}, {"sure"})
+
+
 def test_points_bunched_on_one_part_of_the_photo_still_register_it_whole():
     world, pixels = _in_the_photo()
     corner = (pixels[:, 0] < 360) & (pixels[:, 1] < 300)  # a fifth of the photo, as on facades

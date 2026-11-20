@@ -48,7 +48,13 @@ def _photo(n: str) -> WalkPhoto:
 
 def _row(**kw):
     placed = {"registration": REG, "inputs": "now", "flipped": False, "status": "checked"}
-    return {**placed, "unchecked_area": False, "proposed_marks": False, **kw}
+    return {
+        **placed,
+        "unchecked_area": False,
+        "proposed_marks": False,
+        "unsure_sources": False,
+        **kw,
+    }
 
 
 def _build(shown, copies=None):
@@ -109,13 +115,14 @@ def test_a_photo_on_a_panorama_no_longer_there_is_left_out_and_a_copy_too():
 
 
 def test_a_photo_says_how_sure_its_placement_is():
-    row = _row(status="automatic", unchecked_area=True, proposed_marks=False)
+    row = _row(status="automatic", unchecked_area=True, proposed_marks=False, unsure_sources=True)
 
     built, _ = _build({"pm:1": row})
 
     photo = built["photos"][0]
-    assert (photo["status"], photo["unchecked_area"], photo["proposed_marks"]) == (
-        "automatic",
-        True,
-        False,
-    )
+    assert (
+        photo["status"],
+        photo["unchecked_area"],
+        photo["proposed_marks"],
+        photo["unsure_sources"],
+    ) == ("automatic", True, False, True)
