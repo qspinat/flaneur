@@ -26,7 +26,10 @@ await page.route('**/data/scene.json', async (route) => {
   const home = scene.panoramas.find((p) => p.id === fixture.panorama);
   home.image = `panoramas/${fixture.panorama}.jpg`;
   const shown = { panorama: fixture.panorama, registration: fixture.registration, strength: 1 };
-  if (fixture.standing) Object.assign(home, { walls: fixture.walls, ground: fixture.ground }) && (shown.standing = fixture.standing);
+  if (fixture.standing) {
+    Object.assign(home, { walls: fixture.walls, ground: fixture.ground });
+    shown.standing = fixture.standing;
+  }
   scene.photos.push({ id: 'test:board', title: 'Damier', years: [1900, 1900], credit: 'Essai', image: 'photos/test-board.png', flipped: false, shown: [shown], status: 'automatic', unchecked_area: true, proposed_marks: false });
   await route.fulfill({ json: scene });
 });

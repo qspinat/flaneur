@@ -4,7 +4,7 @@
 // A photo whose camera stood off the panorama (see standing.ts) is laid on the walls around it.
 import type { Viewer } from '@photo-sphere-viewer/core';
 import * as THREE from 'three';
-import { HIDDEN, JOINED_M, NEAREST_M, ROOFS_JOINED_M, STREET_REACH_M, lensTurn, reach, standingAt, type Standing, type WallRow } from './standing';
+import { HIDDEN, NEAREST_M, ROOFS_PAST_M, STREET_REACH_M, lensTurn, reach, standingAt, type Standing, type WallRow } from './standing';
 import { cameraAxes, yawOf, type OldPhoto, type Panorama, type Shown } from './walk3d';
 
 const DISTANCE = 5; // inside the viewer's sphere (radius 10)
@@ -33,21 +33,25 @@ void main() {
   gl_FragColor = vec4(texture2D(photo, vec2(uv.x, 1.0 - uv.y)).rgb, strength);
 }`;
 
-export const MOST_WALLS = 48; // the walls a photo is laid on, the nearest
+const MOST_WALLS = 48; // the walls a photo is laid on (the pipeline's scene.MOST_WALLS)
 const STRETCHED = 6; // a part of the photo laid this many times larger than it is: smeared
 const FAR_M = 1000; // a ray of the photo meeting nothing, framed as this far
+const FRAMED = 8; // the photo's rays framing where it is laid: this many steps across, each way
 
 // standing.ts per pixel: the direction from the panorama out to the walls (else the street, else
-// over the roofs to the wall under them, else the sky), seen by the photographer's camera
+// over the roofs to the wall under them, else the sky), seen by the photographer's camera;
+// each wall given by an end and its span (ends[i]: x0, y0, x1 - x0, y1 - y0)
 const standingShader = `
 uniform sampler2D photo;
 uniform mat3 toWorld;
 uniform mat3 lensTurn;
+uniform vec3 step;
 uniform vec3 camera;
 uniform vec2 size;
 uniform float focal;
 uniform vec4 ends[${MOST_WALLS}];
 uniform float tops[${MOST_WALLS}];
+uniform float inverse[${MOST_WALLS}]; // 1 / each wall's length
 uniform int count;
 uniform float ground;
 uniform float strength;
@@ -55,39 +59,49 @@ uniform bool flipped;
 varying vec3 here;
 const float NONE = 1e30;
 
-float toWall(vec3 from, vec3 d, bool roofless, float before) {
+// how far along d it meets a wall (see standing.toWall); first: any wall short of before will do
+float toWall(vec3 from, vec3 d, bool roofless, float before, bool first) {
   float nearest = before;
   for (int i = 0; i < ${MOST_WALLS}; i++) {
     if (i >= count) break;
     vec4 w = ends[i];
-    vec2 e = w.zw - w.xy;
-    vec2 a = w.xy - from.xy;
-    float across = d.x * e.y - d.y * e.x;
+    float across = d.x * w.w - d.y * w.z;
     if (across == 0.0) continue;
-    float t = (a.x * e.y - a.y * e.x) / across;
-    float s = (a.x * d.y - a.y * d.x) / across;
-    float past = (roofless ? ${ROOFS_JOINED_M.toFixed(2)} : ${JOINED_M.toFixed(2)}) / length(e);
+    float inv = 1.0 / across;
+    vec2 a = w.xy - from.xy;
+    float t = (a.x * w.w - a.y * w.z) * inv;
+    float s = (a.x * d.y - a.y * d.x) * inv;
+    float past = roofless ? ${ROOFS_PAST_M.toFixed(1)} * inverse[i] : 0.0;
     float height = from.z + t * d.z;
-    if (t > ${NEAREST_M.toFixed(1)} && t < nearest && s >= -past && s <= 1.0 + past && height >= ground && (roofless || height <= tops[i])) nearest = t;
+    if (t > ${NEAREST_M.toFixed(1)} && t < nearest && s >= -past && s <= 1.0 + past && height >= ground && (roofless || height <= tops[i])) {
+      nearest = t;
+      if (first) break;
+    }
   }
   return nearest;
 }
 
+float reach(vec3 d) {
+  float wall = toWall(vec3(0.0), d, false, NONE, false);
+  if (wall < NONE) return wall;
+  float street = d.z < 0.0 ? ground / d.z : NONE;
+  if (street > 0.0 && street <= ${STREET_REACH_M.toFixed(1)}) return street;
+  return d.z > 0.0 ? toWall(vec3(0.0), d, true, NONE, false) : NONE;
+}
+
 void main() {
   vec3 d = normalize(toWorld * here);
-  float metres = toWall(vec3(0.0), d, false, NONE);
-  if (metres == NONE && d.z < 0.0 && ground / d.z <= ${STREET_REACH_M.toFixed(1)}) metres = ground / d.z;
-  if (metres == NONE && d.z > 0.0) metres = toWall(vec3(0.0), d, true, NONE);
+  float metres = reach(d);
   vec3 seen = lensTurn * d;
-  if (metres < NONE) seen -= lensTurn * camera / metres;
+  if (metres < NONE) seen += step / metres;
   if (seen.z <= 0.0) discard;
   vec2 px = seen.xy / seen.z;
-  vec2 uv = px / size;
+  vec2 uv = px / size.yx;
   if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) discard;
-  if (metres < NONE) {
+  if (metres < NONE) {  // hidden from the photographer by a wall nearer to them
     vec3 away = d * metres - camera;
     float far = length(away) / ${HIDDEN.toFixed(2)};
-    if (toWall(camera, normalize(away), false, far) < far) discard;
+    if (toWall(camera, normalize(away), false, far, true) < far) discard;
   }
   // how little of the photo one pixel of the screen spans, the way it is most squeezed, against
   // the photo as a whole: where the photographer saw a wall or the street edge on, the photo
@@ -114,6 +128,8 @@ function worldToViewer(viewer: Viewer, p: Panorama): THREE.Matrix3 {
   return new THREE.Matrix3().set(east.x, north.x, up.x, east.y, north.y, up.y, east.z, north.z, up.z);
 }
 
+type Kind = 'flat' | 'standing';
+
 interface Drawn {
   photo: OldPhoto;
   mesh: THREE.Mesh;
@@ -127,8 +143,7 @@ export class PhotoLayer {
   private viewer: Viewer;
   private imageOf: (photo: OldPhoto) => string;
   private drawn: Drawn[] = [];
-  private materials: THREE.ShaderMaterial[] = []; // kept: their shader is not compiled again
-  private standingMaterials: THREE.ShaderMaterial[] = [];
+  private materials: Record<Kind, THREE.ShaderMaterial[]> = { flat: [], standing: [] }; // kept: not compiled again
   private textures = new Map<string, THREE.Texture>();
   private loader = new THREE.TextureLoader();
   private fade: number;
@@ -149,20 +164,20 @@ export class PhotoLayer {
     const toWorld = fromWorld.clone().invert();
     photos.forEach(([photo, shown], order) => {
       const { registration, strength, standing } = shown;
-      let geometry: THREE.BufferGeometry | null;
-      let uniforms: Record<string, unknown>;
-      let at: Drawn['at'];
+      let kind: Kind, geometry: THREE.BufferGeometry | null, uniforms: Record<string, unknown>, at: Drawn['at'];
       if (standing && p.walls?.length && p.ground !== undefined) {
-        const walls = nearest(p.walls);
-        const ground = p.ground;
-        geometry = quad(footprint(standing, walls, ground).map((d) => d.applyMatrix3(fromWorld))) ?? around();
-        uniforms = standingUniforms(standing, walls, ground, toWorld);
+        const { walls, ground } = p as Required<Panorama>;
+        const kr = rows(lensTurn(standing).flat());
+        kind = 'standing';
+        geometry = quad(footprint(standing, kr, walls, ground).map((d) => d.applyMatrix3(fromWorld))) ?? around();
+        uniforms = standingUniforms(standing, kr, walls, ground, toWorld);
         at = (direction) => standingAt(direction.clone().applyMatrix3(toWorld).normalize().toArray(), standing, walls, ground);
       } else {
         // from the photo's [0, 1]² to the viewer's frame, and back
         const fromPhoto = fromWorld.clone().multiply(rows(a.flat()).transpose()).multiply(rows(registration.m));
-        geometry = quadOf(fromPhoto);
         const toPhoto = fromPhoto.clone().invert();
+        kind = 'flat';
+        geometry = quad([[0, 0], [1, 0], [1, 1], [0, 1]].map(([u, v]) => new THREE.Vector3(u, v, 1).applyMatrix3(fromPhoto)));
         uniforms = { toPhoto: { value: toPhoto } };
         at = (direction) => {
           const q = direction.clone().applyMatrix3(toPhoto);
@@ -171,8 +186,7 @@ export class PhotoLayer {
         };
       }
       if (!geometry) return;
-      const kind = standing && 'lensTurn' in uniforms ? 'standing' : 'flat';
-      const kept = kind === 'standing' ? this.standingMaterials : this.materials;
+      const kept = this.materials[kind];
       const material = kept[order] ?? (kept[order] = newMaterial(kind));
       Object.assign(material.uniforms, uniforms, {
         photo: { value: this.texture(photo) },
@@ -240,7 +254,7 @@ export class PhotoLayer {
   }
 }
 
-function newMaterial(kind: 'flat' | 'standing'): THREE.ShaderMaterial {
+function newMaterial(kind: Kind): THREE.ShaderMaterial {
   const shown = { photo: { value: null }, strength: { value: 1 }, flipped: { value: false } };
   return new THREE.ShaderMaterial({
     uniforms: kind === 'flat' ? { ...shown, toPhoto: { value: new THREE.Matrix3() } } : shown,
@@ -253,43 +267,45 @@ function newMaterial(kind: 'flat' | 'standing'): THREE.ShaderMaterial {
   });
 }
 
-/** The walls a photo is laid on: the MOST_WALLS nearest the panorama. */
-function nearest(walls: WallRow[]): WallRow[] {
-  const away = ([x0, y0, x1, y1]: WallRow) => {
-    const [ex, ey] = [x1 - x0, y1 - y0];
-    const s = Math.min(1, Math.max(0, -(x0 * ex + y0 * ey) / (ex * ex + ey * ey || 1)));
-    return Math.hypot(x0 + s * ex, y0 + s * ey);
-  };
-  return walls.length <= MOST_WALLS ? walls : [...walls].sort((a, b) => away(a) - away(b)).slice(0, MOST_WALLS);
-}
-
-function standingUniforms(s: Standing, walls: WallRow[], ground: number, toWorld: THREE.Matrix3): Record<string, unknown> {
-  const ends = Array.from({ length: MOST_WALLS }, (_, i) => new THREE.Vector4(...(walls[i] ?? [0, 0, 0, 0]).slice(0, 4)));
-  const tops = Array.from({ length: MOST_WALLS }, (_, i) => walls[i]?.[4] ?? 0);
+/** What the standing shader is given: the camera (`kr`: its lens times its turn), the walls (at
+ *  most MOST_WALLS: the pipeline sends no more), the street, the viewer's frame. */
+function standingUniforms(s: Standing, kr: THREE.Matrix3, walls: WallRow[], ground: number, toWorld: THREE.Matrix3): Record<string, unknown> {
+  const ends = Array.from({ length: MOST_WALLS }, () => new THREE.Vector4());
+  const tops = new Array<number>(MOST_WALLS).fill(0);
+  const inverse = new Array<number>(MOST_WALLS).fill(0);
+  walls.slice(0, MOST_WALLS).forEach(([x0, y0, x1, y1, top], i) => {
+    ends[i].set(x0, y0, x1 - x0, y1 - y0);
+    tops[i] = top;
+    inverse[i] = 1 / (Math.hypot(x1 - x0, y1 - y0) || 1);
+  });
+  const camera = new THREE.Vector3(...s.position);
   return {
     toWorld: { value: toWorld },
-    lensTurn: { value: rows(lensTurn(s).flat()) },
-    camera: { value: new THREE.Vector3(...s.position) },
-    size: { value: new THREE.Vector2(s.size[1], s.size[0]) },
+    lensTurn: { value: kr },
+    step: { value: camera.clone().applyMatrix3(kr).negate() },
+    camera: { value: camera },
+    size: { value: new THREE.Vector2(...s.size) },
     focal: { value: s.focal },
     ends: { value: ends },
     tops: { value: tops },
-    count: { value: walls.length },
+    inverse: { value: inverse },
+    count: { value: Math.min(walls.length, MOST_WALLS) },
     ground: { value: ground },
   };
 }
 
-/** Directions from the panorama (east, north, up) the photo is laid along: where the rays of
- *  its edges, from where it was taken, meet today's walls, street or sky (see reach). */
-function footprint(s: Standing, walls: WallRow[], ground: number): THREE.Vector3[] {
+/** Directions from the panorama (east, north, up) the photo is laid along: where its rays
+ *  (`kr`: its camera's lens times turn), across the whole photo, meet today's walls, street or
+ *  sky (see reach) — not its edges alone: a ray inside it may go farther than those around. */
+function footprint(s: Standing, kr: THREE.Matrix3, walls: WallRow[], ground: number): THREE.Vector3[] {
   const [h, w] = s.size;
-  const kr = rows(lensTurn(s).flat()).invert();
+  const back = kr.clone().invert();
   const found: THREE.Vector3[] = [];
-  for (let i = 0; i <= 8; i++) {
-    for (const [x, y] of [[(w * i) / 8, 0], [(w * i) / 8, h], [0, (h * i) / 8], [w, (h * i) / 8]]) {
-      const ray = new THREE.Vector3(x, y, 1).applyMatrix3(kr).normalize();
+  for (let i = 0; i <= FRAMED; i++) {
+    for (let j = 0; j <= FRAMED; j++) {
+      const ray = new THREE.Vector3((w * i) / FRAMED, (h * j) / FRAMED, 1).applyMatrix3(back).normalize();
       const metres = Math.min(FAR_M, reach(s.position, ray.toArray(), walls, ground));
-      found.push(new THREE.Vector3(...s.position).addScaledVector(ray, metres).normalize());
+      found.push(new THREE.Vector3(...s.position).addScaledVector(ray, metres));
     }
   }
   return found;
@@ -300,34 +316,22 @@ function around(): THREE.BufferGeometry {
   return new THREE.SphereGeometry(DISTANCE, 64, 32);
 }
 
-/** The photo's frame on a plane in front of the camera, across its middle's direction; none
- *  when a corner lies behind it. */
-function quadOf(fromPhoto: THREE.Matrix3): THREE.BufferGeometry | null {
-  const direction = (u: number, v: number) => new THREE.Vector3(u, v, 1).applyMatrix3(fromPhoto).normalize();
-  return quad(
-    [
-      [0, 0],
-      [1, 0],
-      [1, 1],
-      [0, 1],
-    ].map(([u, v]) => direction(u, v)),
-  );
-}
-
-/** A plane in front of the camera holding `directions` (of the viewer's frame), across their
- *  middle; none when one lies behind it. */
+/** A rectangle on a plane in front of the camera holding `directions` (of the viewer's frame),
+ *  across their middle; none when one lies behind it. The shader leaves out what is not drawn. */
 function quad(directions: THREE.Vector3[]): THREE.BufferGeometry | null {
-  const middle = directions.reduce((sum, d) => sum.add(d.clone().normalize()), new THREE.Vector3()).normalize();
-  if (directions.some((d) => d.clone().normalize().dot(middle) <= 0.05)) return null;
-  const across = new THREE.Vector3(0, 1, 0).cross(middle).normalize();
-  if (across.lengthSq() === 0) across.set(1, 0, 0);
+  const unit = directions.map((d) => d.clone().normalize());
+  const middle = unit.reduce((sum, d) => sum.add(d), new THREE.Vector3()).normalize();
+  if (unit.some((d) => d.dot(middle) <= 0.05)) return null;
+  const across = new THREE.Vector3(0, 1, 0).cross(middle);
+  if (across.lengthSq() < 1e-9) across.set(1, 0, 0);
+  across.normalize();
   const up = middle.clone().cross(across).normalize();
-  const onPlane = directions.map((d) => d.clone().normalize().multiplyScalar(DISTANCE / d.clone().normalize().dot(middle)));
+  const onPlane = unit.map((d) => d.multiplyScalar(DISTANCE / d.dot(middle)));
   const xs = onPlane.map((c) => c.dot(across));
   const ys = onPlane.map((c) => c.dot(up));
   const [x0, x1, y0, y1] = [Math.min(...xs), Math.max(...xs), Math.min(...ys), Math.max(...ys)];
   const corner = (x: number, y: number) => middle.clone().multiplyScalar(DISTANCE).addScaledVector(across, x).addScaledVector(up, y);
-  const corners = directions.length === 4 ? onPlane : [corner(x0, y0), corner(x1, y0), corner(x1, y1), corner(x0, y1)];
+  const corners = [corner(x0, y0), corner(x1, y0), corner(x1, y1), corner(x0, y1)];
   const geometry = new THREE.BufferGeometry();
   geometry.setAttribute('position', new THREE.Float32BufferAttribute(corners.flatMap((c) => [c.x, c.y, c.z]), 3));
   geometry.setIndex([0, 1, 2, 0, 2, 3]);

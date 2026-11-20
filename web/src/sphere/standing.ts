@@ -20,12 +20,12 @@ export type WallRow = [x0: number, y0: number, x1: number, y1: number, top: numb
 export const NEAREST_M = 0.5; // a wall nearer than this along a ray is not met (pipeline: Blocks)
 export const STREET_REACH_M = 50; // the street met this far at most (facades.STREET_REACH_M)
 export const HIDDEN = 1.1; // a point this much farther than a wall in its way is hidden
-export const JOINED_M = 0.3; // walls met this far past their ends: two fitted apart still join
-export const ROOFS_JOINED_M = 2; // over the roofs, farther: the sky does not tear between them
+export const ROOFS_PAST_M = 2; // over the roofs, walls are met this far past their ends: the sky
+// does not tear between two walls (their corners are joined, not the gaps between blocks)
 
 /** How far along `d` (unit) from `from` it first meets a wall between the street and `top`
- *  (all of the wall above the street: `roofless`), short of `before`; Infinity: none. A wall is
- *  met a little past its ends (JOINED_M): through the gap between two, the photo would tear. */
+ *  (all of the wall above the street: `roofless`), short of `before`; Infinity: none (the walls
+ *  come joined at their corners: see the pipeline's scene.walls_shown). */
 function toWall(from: number[], d: number[], walls: WallRow[], ground: number, roofless = false, before = Infinity): number {
   let nearest = before;
   for (const [x0, y0, x1, y1, top] of walls) {
@@ -34,7 +34,7 @@ function toWall(from: number[], d: number[], walls: WallRow[], ground: number, r
     if (across === 0) continue; // along it
     const t = (ax * ey - ay * ex) / across;
     const s = (ax * d[1] - ay * d[0]) / across;
-    const past = (roofless ? ROOFS_JOINED_M : JOINED_M) / Math.hypot(ex, ey);
+    const past = roofless ? ROOFS_PAST_M / Math.hypot(ex, ey) : 0;
     const height = from[2] + t * d[2];
     if (t > NEAREST_M && t < nearest && s >= -past && s <= 1 + past && height >= ground && (roofless || height <= top)) nearest = t;
   }

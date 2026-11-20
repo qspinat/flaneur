@@ -4,9 +4,10 @@ CameraHeights, buildings_of): metres east and north of an origin, heights above 
 
 from collections.abc import Callable
 from dataclasses import dataclass
+from itertools import combinations
 
 import numpy as np
-from shapely.geometry import Point, shape
+from shapely.geometry import LineString, Point, shape
 from shapely.geometry.base import BaseGeometry
 
 from flaneur import buildings, facades, panoramas, placed
@@ -119,13 +120,45 @@ class CameraHeights:
         return self.ground.at_many(xs, ys) - self.origin_z
 
 
+MOST_WALLS = 48  # the walls around a panorama a photo is laid on in the walk, the nearest
+
+
+def _crossing(one: list[np.ndarray], other: list[np.ndarray]) -> np.ndarray | None:
+    """Where the lines through two walls cross (none: parallel)."""
+    d, e = one[1] - one[0], other[1] - other[0]
+    across = d[0] * e[1] - d[1] * e[0]
+    if abs(across) < 1e-9:
+        return None
+    a = other[0] - one[0]
+    return one[0] + d * (a[0] * e[1] - a[1] * e[0]) / across
+
+
 def walls_shown(around: facades.Scene) -> list[list[float]]:
-    """A panorama's walls as the 3D walk lays a photo on them: their ends and top, metres
-    east, north and up from the panorama (to the cm: no Lambert-93 in float32)."""
+    """A panorama's walls as the 3D walk lays a photo on them: the MOST_WALLS nearest, ends
+    within CORNER_M of another's joined where their lines cross (else halfway: fitted apart,
+    they meet at a corner and the photo does not tear between them), their ends and top in
+    metres east, north and up from the panorama (to the cm: no Lambert-93 in float32)."""
     x, y, z = around.origin
+    here = Point(x, y)
+    near = sorted(around.walls, key=lambda w: here.distance(LineString([w.a, w.b])))
+    near = near[:MOST_WALLS]
+    ends = [[np.array(w.a, float), np.array(w.b, float)] for w in near]
+    for i, j in combinations(range(len(ends)), 2):
+        for ei in (0, 1):
+            for ej in (0, 1):
+                p, q = ends[i][ei], ends[j][ej]
+                if np.hypot(*(p - q)) > facades.CORNER_M:
+                    continue
+                meet = _crossing(ends[i], ends[j])
+                if (
+                    meet is None
+                    or max(np.hypot(*(meet - p)), np.hypot(*(meet - q))) > facades.CORNER_M
+                ):
+                    meet = (p + q) / 2
+                ends[i][ei], ends[j][ej] = meet.copy(), meet.copy()
     return [
-        [round(v, 2) for v in (w.a[0] - x, w.a[1] - y, w.b[0] - x, w.b[1] - y, w.top - z)]
-        for w in around.walls
+        [round(float(v), 2) for v in (a[0] - x, a[1] - y, b[0] - x, b[1] - y, w.top - z)]
+        for (a, b), w in zip(ends, near, strict=True)
     ]
 
 

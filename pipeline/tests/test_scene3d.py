@@ -156,3 +156,37 @@ def test_a_photo_standing_off_a_panorama_without_walls_keeps_its_matrix():
 
     assert "standing" not in built["photos"][0]["shown"][0]
     assert "walls" not in built["panoramas"][0]
+
+
+def _scene_of(*walls):
+    return facades.Scene(
+        "p1",
+        (0.0, 0.0, 0.0),
+        -2.5,
+        tuple(facades.Wall(a, b, 10.0, "fitted") for a, b in walls),
+        (),
+        8,
+    )
+
+
+def test_walls_fitted_apart_meet_at_their_corner_in_the_walk():
+    corner = _scene_of(((-10.0, 5.0), (-1.0, 5.0)), ((0.0, 6.0), (0.0, 20.0)))  # 1 m short of it
+
+    shown = scene.walls_shown(corner)
+
+    assert shown == [[-10.0, 5.0, 0.0, 5.0, 10.0], [0.0, 5.0, 0.0, 20.0, 10.0]]
+
+
+def test_walls_with_a_street_between_stay_apart():
+    across = _scene_of(((-10.0, 5.0), (-3.0, 5.0)), ((3.0, 5.0), (10.0, 5.0)))  # a 6 m street
+
+    assert scene.walls_shown(across) == [[-10.0, 5.0, -3.0, 5.0, 10.0], [3.0, 5.0, 10.0, 5.0, 10.0]]
+
+
+def test_only_the_nearest_walls_go_to_the_walk():
+    many = _scene_of(*(((-1.0, d), (1.0, d)) for d in range(200, 5, -3)))  # 3 m apart
+
+    shown = scene.walls_shown(many)
+
+    assert len(shown) == scene.MOST_WALLS
+    assert max(w[1] for w in shown) == 8 + 3 * (scene.MOST_WALLS - 1)
