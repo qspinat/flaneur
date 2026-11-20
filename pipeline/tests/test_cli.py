@@ -2553,11 +2553,12 @@ def test_survey_corrections_are_read_once_applied_where_the_panorama_still_stand
     judged = {**where, "moved": (0.0, 0.0, 0.0)}  # set right where it no longer stands
     survey.save(cli.SURVEYED, found, judged)
 
+    monkeypatch.setattr(survey, "APPLIED", "none")
     off = cli._placed(pictures)
     monkeypatch.setattr(survey, "APPLIED", "all")
     on = {p.id: p for p in cli._placed(pictures)}
 
-    assert [p.azimuth for p in off] == [90.0, 90.0, 90.0]  # until measure E passes: none
+    assert [p.azimuth for p in off] == [90.0, 90.0, 90.0]  # switched off: none
     assert on["v"].azimuth == pytest.approx(80.0)  # turned counter-clockwise: the compass back
     assert cli._standing([on["v"]])["v"][:2] == pytest.approx(
         (where["v"][0] + 1.0, where["v"][1] - 2.0), abs=0.02

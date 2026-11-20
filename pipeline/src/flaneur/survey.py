@@ -21,10 +21,9 @@ from flaneur.poses import Applied
 from flaneur.sources import write_json
 
 PRODUCER = "Immergis pour la Ville de Paris"  # the survey
-APPLIED: Applied = (
-    "none"  # what reads panoramas' poses takes of these (cli._placed): "all", "turns"
-)
-# (the heading only) or "none" — once a sandbox night shows match gains (plan, measure E)
+APPLIED: Applied = "all"  # what reads panoramas' poses takes of these (cli._placed): "all",
+# "turns" (the heading only) or "none". "all" chosen 20/11 (measure E: 3 photos gained, 1 "oui"
+# become "près"; held out, 98.9 % within 2°)
 AGREE_DEG = 2.0  # the turns a panorama's references give agree this well, or it is left
 MOST_HOPS = 4  # from the survey (5: 76 % within 2°)
 SPREAD_DEG = 20.0  # bearings this far apart at least cross well enough to place it
