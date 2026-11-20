@@ -44,6 +44,7 @@ export interface OldPhoto {
   status: 'checked' | 'near' | 'automatic'; // said yes or placed by hand; near; not seen yet
   unchecked_area: boolean; // automatic: its matcher does not pass the check in its area yet
   proposed_marks: boolean; // automatic: it rests on landmarks only proposed
+  unsure_sources: boolean; // automatic: found mostly from volunteers' panoramas nothing checks
 }
 
 export interface Scene {
@@ -187,5 +188,6 @@ export function statusLabel(photo: OldPhoto): string {
   const notes = [STATUS[photo.status]];
   if (photo.unchecked_area) notes.push('La méthode n\'est pas encore contrôlée dans ce quartier.');
   if (photo.proposed_marks) notes.push('Ses repères sont proposés, pas encore vérifiés.');
+  if (photo.unsure_sources) notes.push('Trouvé surtout depuis des panoramas de bénévoles dont la position n\'est pas vérifiée.');
   return notes.join(' ');
 }

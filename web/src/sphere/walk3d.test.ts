@@ -34,6 +34,7 @@ function photo(id: string, years: [number, number], shown: [string, number][]): 
     status: 'checked',
     unchecked_area: false,
     proposed_marks: false,
+    unsure_sources: false,
   };
 }
 
@@ -124,6 +125,9 @@ describe('statusLabel', () => {
   it('adds what an automatic one is not sure of yet', () => {
     expect(statusLabel({ ...base, status: 'automatic', unchecked_area: true, proposed_marks: true })).toBe(
       'Placement automatique, pas encore vérifié. La méthode n\'est pas encore contrôlée dans ce quartier. Ses repères sont proposés, pas encore vérifiés.',
+    );
+    expect(statusLabel({ ...base, status: 'automatic', unsure_sources: true })).toBe(
+      'Placement automatique, pas encore vérifié. Trouvé surtout depuis des panoramas de bénévoles dont la position n\'est pas vérifiée.',
     );
   });
 });
