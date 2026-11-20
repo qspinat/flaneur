@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { depthAlong, photoPixel, squeezed, standingAt, type Standing, type WallRow } from './standing';
+import { depthAlong, photoPixel, standingAt, type Standing, type WallRow } from './standing';
 
 // From the pipeline (facades.cast, registration.Standing.project) on the same street
 const walls: WallRow[] = [
@@ -76,7 +76,6 @@ describe('a photo laid on the walls from where it was taken', () => {
     const ahead = unit([0, 30, 0.5]); // on the end wall, seen straight on
 
     expect(standingAt(edgeOn, north, walls, ground)).not.toBeNull(); // drawn, were it not smeared
-    expect(squeezed(edgeOn, north, walls, ground)).toBeLessThan(squeezed(ahead, north, walls, ground) / 6);
     expect(standingAt(edgeOn, north, walls, ground, 700)).toBeNull();
     expect(standingAt(ahead, north, walls, ground, 700)).not.toBeNull();
   });

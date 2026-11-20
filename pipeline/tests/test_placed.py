@@ -72,7 +72,7 @@ def _matched(verdict=None, area_checked=True, marks=None, unsure=False) -> place
 STANDING = {"position": [1.0, 2.0, 30.0]}
 
 
-def _build(matched, answers=None, far=frozenset(), registered=None, page_standing=None):
+def _build(matched, answers=None, far=frozenset(), registered=None, page_standing=lambda a: None):
     """The list from `matched` placements of match, the page's `answers`, those answered
     `far`; each registered in panorama "p", standing (the photos asked to register noted in
     `registered`)."""

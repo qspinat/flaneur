@@ -3396,10 +3396,7 @@ def _standing_as(stood: placing.Stood | None, home: "_Home | None") -> dict:
     measured) and how many pairs were held out (see _standing_drawn)."""
     if stood is None or stood.camera is None:
         return {"camera": None, "held": stood.held if stood else 0}
-    camera = registration.standing_to_json(stood.camera)
-    camera["position"] = [
-        round(a - b, 3) for a, b in zip(camera["position"], home.scene.origin, strict=True)
-    ]
+    camera = _from_home(registration.standing_to_json(stood.camera), home.scene)
     errors = {"flat": stood.flat, "parallax": stood.parallax}
     return {
         "camera": camera,
@@ -3425,16 +3422,23 @@ def _registered_shown(row: dict) -> placed.Registered:
     return placed.Registered(row.get("registration"), _standing_drawn(row.get("standing") or {}))
 
 
+def _from_home(camera: dict, around: facades.Scene) -> dict:
+    """A standing camera (see registration.standing_to_json) placed from its panorama: east,
+    north, up metres from the walls' origin (the frame of heights moves as the area grows)."""
+    off = [round(a - b, 3) for a, b in zip(camera["position"], around.origin, strict=True)]
+    return {**camera, "position": off}
+
+
 def _page_standing(answer: dict) -> dict | None:
     """The camera where the photographer stood of an answer fitted in parallax on the placing
     page (see placings.standing_of: moved with its panorama), placed from that panorama as the
-    3D walk takes it (see _standing_as: the page's heights are the walls'); none fitted flat or
-    on a panorama without walls."""
+    3D walk takes it (the page's heights are the walls'); none fitted flat or on a panorama
+    without walls."""
     camera = (answer.get("standing") or {}).get("camera")
-    if camera is None or (home := _standing_home(answer["registration"]["panorama"])) is None:
+    if camera is None:
         return None
-    off = [round(a - b, 3) for a, b in zip(camera["position"], home.scene.origin, strict=True)]
-    return {**camera, "position": off}
+    around = _standing_walls(answer["registration"]["panorama"])
+    return _from_home(camera, around) if around is not None else None
 
 
 def _standing_walls(panorama: str) -> facades.Scene | None:

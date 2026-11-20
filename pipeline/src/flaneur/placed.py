@@ -74,7 +74,7 @@ def build(
     far: set[str],
     matched: dict[str, Matched],
     register: Callable[[dict[str, dict]], dict[str, Registered]],
-    page_standing: Callable[[dict], dict | None] = lambda answer: None,
+    page_standing: Callable[[dict], dict | None],
 ) -> dict[str, Placed]:
     """The photos placed: by the placing page's `answers` (on the image each has now), checked;
     else by match, with the user's word, unless answered `far` (no panorama sees it) or
