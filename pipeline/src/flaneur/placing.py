@@ -296,12 +296,14 @@ def stood_against_flat(
     scene: facades.Scene,
     pin: tuple[float, float],
     against: registration.Registration | None = None,
+    least: int = 0,
 ) -> Stood:
     """Where the photographer stood, from pairs given their depth by the panorama's walls, and
     whether that camera lays the photo better than the flat fit: each band of the photo held
     out in turn, both refitted on the rest and scored on it (or, `against` given, that flat
-    fit as it is, scored on the same held-out pairs: a copy's). On the pairs the 3D walk's
-    matrix keeps (see registration.turned_through): the others are false matches."""
+    fit as it is, scored on the same held-out pairs: a copy's; fewer than `least` scored: no
+    camera fitted). On the pairs the 3D walk's matrix keeps (see registration.turned_through):
+    the others are false matches."""
     try:
         _, kept = registration.turned_through(
             photo_px, view_px, size, SHOWN, sphere.id, view, sphere.axes
@@ -355,7 +357,9 @@ def stood_against_flat(
             if camera is not None
             else [np.inf] * int(out.sum())
         )
-    camera = fitted(np.ones(len(photo_px), bool))[1] if flat_off else None
+    if not flat_off or len(flat_off) < least:
+        return Stood(None, np.inf, np.inf, len(flat_off))
+    camera = fitted(np.ones(len(photo_px), bool))[1]
     if camera is None:
         return Stood(None, np.inf, np.inf)
     return Stood(camera, float(np.median(flat_off)), float(np.median(stand_off)), len(flat_off))

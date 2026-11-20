@@ -2171,12 +2171,13 @@ def _copies(tmp_path, monkeypatch, walls: dict, stood: dict) -> list:
     )
     made = []
 
-    def stand(photo_id, kept, copy, home):
-        made.append((photo_id, copy["registration"]["panorama"]))
+    def stand(photo_id, kept, home, against, again, least):
+        made.append((photo_id, home.scene.panorama))
         return placing.Stood(camera, *stood[made[-1]])
 
     monkeypatch.setattr(cli, "_standing_home", home)
-    monkeypatch.setattr(cli, "_stand_copy", stand)
+    monkeypatch.setattr(cli, "_stand_one", stand)
+    monkeypatch.setattr(cli, "_photo_store", lambda: None)
     monkeypatch.setattr(cli, "_matches", lambda: {"pm:1": _kept(), "pm:flat": _kept()})
     return made
 
@@ -2187,7 +2188,10 @@ def _held_and_carried():
         "pm:1": {**row, "standing": {"position": [0, 0, 0]}},
         "pm:flat": {**row, "standing": None},
     }
-    copies = [{"registration": {"panorama": p, "m": [1] * 9}, "strength": 0.8} for p in "ab"]
+    copies = [
+        {"registration": {"panorama": p, "m": [1] * 9, "view": {"heading": 0.0}}, "strength": 0.8}
+        for p in "ab"
+    ]
     return held, {k: {"made": "x", "copies": copies, "at": {}} for k in held}
 
 
@@ -2200,8 +2204,8 @@ def test_a_copy_stands_where_it_beats_its_matrix_on_enough_held_out_pairs(monkey
 
     kept = json.loads((tmp_path / "carried_standing.json").read_text())
     assert set(kept) == {"pm:1"} and made == [("pm:1", "a"), ("pm:1", "b")]  # not pm:flat
-    assert kept["pm:1"]["a"]["camera"]["position"] == [1.0, 0.5, 0.2]  # from that panorama
-    assert kept["pm:1"]["b"]["camera"] is None  # 0.05 % better: within the margin
+    assert cli._copy_standing(kept["pm:1"]["a"])["position"] == [1.0, 0.5, 0.2]  # from "a"
+    assert cli._copy_standing(kept["pm:1"]["b"]) is None  # 0.05 % better: within the margin
 
 
 def test_a_copy_judged_on_too_few_held_out_pairs_keeps_its_matrix(monkeypatch, tmp_path):
@@ -2212,7 +2216,8 @@ def test_a_copy_judged_on_too_few_held_out_pairs_keeps_its_matrix(monkeypatch, t
     cli._copies_standing(held, carried)
 
     kept = json.loads((tmp_path / "carried_standing.json").read_text())
-    assert kept["pm:1"]["a"]["camera"] is None and kept["pm:1"]["b"]["camera"] is not None
+    assert cli._copy_standing(kept["pm:1"]["a"]) is None
+    assert cli._copy_standing(kept["pm:1"]["b"]) is not None
 
 
 def test_a_copy_stands_again_only_when_its_walls_change(monkeypatch, tmp_path):
@@ -2850,9 +2855,26 @@ def test_a_lidar_patch_that_cannot_be_read_keeps_the_panorama_where_it_stands(mo
 def test_a_photo_matched_again_has_its_features_extracted_when_not_kept(monkeypatch):
     matcher = object()
     monkeypatch.setattr(cli, "_carrying_views", lambda: SimpleNamespace(matcher=matcher))
-    stores = []
-    monkeypatch.setattr(cli, "_features", lambda store, photo_id: stores.append(store))
 
-    cli._matched_again("pm:1", None, SimpleNamespace(path="p.jpg"))
+    assert cli._photo_store().matcher is matcher  # not None: it could not extract them
 
-    assert stores[0].matcher is matcher  # not None: it could not extract them
+
+def test_a_photo_matched_again_keeps_the_pairs_one_flat_warp_agrees_on(monkeypatch):
+    rng = np.random.default_rng(3)
+    mine = rng.uniform(0, 600, (40, 2))
+    theirs = mine * 1.5 + [40.0, 20.0]
+    theirs[:8] = rng.uniform(0, 1280, (8, 2))  # matched wrongly
+    features = lambda points: match.Features(points, np.zeros((len(points), 8)), (600, 800))  # noqa: E731
+    matcher = SimpleNamespace(
+        features=lambda cut: features(theirs),
+        pairs=lambda a, b: np.column_stack([np.arange(40), np.arange(40)]),
+    )
+    store = SimpleNamespace(matcher=matcher)
+    monkeypatch.setattr(cli, "_features", lambda store, photo_id: features(mine))
+    monkeypatch.setattr(cli.carrying, "framed", lambda copy, axes: registration.ViewOf(0.0))
+    monkeypatch.setattr(cli.match, "perspective", lambda *a: None)
+    sphere = SimpleNamespace(id="p", path="p.jpg", axes=np.eye(3))
+
+    found = cli._matched_again("pm:1", None, sphere, store, lambda path: np.zeros(1))
+
+    assert len(found.photo_px) == 32  # the eight wrong ones left out

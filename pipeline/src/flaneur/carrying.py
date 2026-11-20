@@ -24,9 +24,7 @@ MIN_SHARED = queueing.MIN_SHARED  # an old photo is carried from another sharing
 def framed(copy: Registration, axes: np.ndarray) -> ViewOf:
     """A view of the copy's panorama (levelled with `axes`) facing the middle of the photo as
     the copy lays it, FRAMED times wider than its frame: where the photo is matched again."""
-    m = np.reshape(copy.matrix, (3, 3))
-    corners = np.array([[0, 0, 1], [1, 0, 1], [1, 1, 1], [0, 1, 1]], float) @ m.T
-    world = corners / np.linalg.norm(corners, axis=1, keepdims=True) @ axes
+    world = registration.directions(copy, registration.CORNERS) @ axes
     middle = world.mean(axis=0)
     middle /= np.linalg.norm(middle)
     heading = float(np.degrees(np.arctan2(middle[0], middle[1])) % 360)

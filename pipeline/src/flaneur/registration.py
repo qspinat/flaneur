@@ -152,7 +152,7 @@ def fit(
         raise NotFitted("des points tombent hors de la photo ou de la vue")
     kept = np.ones(len(photo), bool)
     if robust:
-        h, kept = _agreeing(photo_px, view_px)
+        h, kept = agreeing(photo_px, view_px)
         if cv2.contourArea(cv2.convexHull(photo[kept].astype(np.float32))) < MIN_COVER:
             raise NotFitted("points trop groupés : les répartir sur toute la photo")
         if h is None:
@@ -170,7 +170,7 @@ def fit(
     return of(panorama, _to_camera(view, axes) @ in_unit, view, axes), kept
 
 
-def _agreeing(photo_px: np.ndarray, view_px: np.ndarray) -> tuple[np.ndarray | None, np.ndarray]:
+def agreeing(photo_px: np.ndarray, view_px: np.ndarray) -> tuple[np.ndarray | None, np.ndarray]:
     """The flat warp most matched pairs agree on (MAGSAC, in pixels: its threshold is), and
     which pairs; refused below MIN_MATCHED."""
     h, kept = None, np.zeros(len(photo_px), bool)
@@ -199,7 +199,7 @@ def turned_through(
     placements). Whatever little of the photo they cover (match's points, bunched on the
     facades it found), it never folds the photo."""
     photo_px, view_px = np.asarray(photo_px, float), np.asarray(view_px, float)
-    _, agree = _agreeing(photo_px, view_px)
+    _, agree = agreeing(photo_px, view_px)
     r, _ = fit(photo_px[agree], view_px[agree], photo_size, side, panorama, view, axes)
     unit = np.column_stack([photo_px / [photo_size[1], photo_size[0]], np.ones(len(photo_px))])
     at = unit @ in_view(r, view, axes).T
