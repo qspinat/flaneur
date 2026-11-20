@@ -80,6 +80,59 @@ def test_a_photo_placed_again_without_any_anchor_is_its_placement_against_today(
     assert cli._placed_from("abc", []) == "abc"  # a "no" to it still holds
 
 
+def test_a_chained_photo_keeps_the_points_it_was_placed_from(monkeypatch):
+    camera = match.Camera(1.0, 2.0, 1.5, 90.0, 0.5, 60.0, agree=30, panoramas=2)
+    points = match.Points(
+        np.zeros((1, 2)), np.zeros((1, 3)), np.array([frozenset({"photo:a"})], dtype=object)
+    )
+    anchor, me, saved = SimpleNamespace(id="a", inputs="ia"), SimpleNamespace(id="b"), {}
+    work = SimpleNamespace(
+        round_zero={"a": anchor},
+        walk=[me],
+        elsewhere=set(),
+        turned_down=set(),
+        refused=set(),
+        anchors=lambda me, placed: [anchor],
+        observed=lambda me: "observed",
+        place=lambda me, observed, anchors, trace: match.Found(camera, np.zeros((0, 6)), points),
+        scenes={"b": "scene"},
+        by_id={"b": me},
+        where={"b": SimpleNamespace(around=(0.0, 0.0))},
+        heights=SimpleNamespace(street=lambda x, y: 0.0),
+        then=lambda year: SimpleNamespace(blocks=None),
+        anchor=lambda photo_id, camera, points, inputs: SimpleNamespace(id=photo_id),
+        store=SimpleNamespace(save_points=lambda k, inputs, p: saved.update({k: (inputs, p)})),
+    )
+    for name, value in {
+        "_inputs": lambda scene, photo_id: "i",
+        "_exported": lambda photo_id: "old.jpg",
+        "_grey": lambda image: image,
+        "_then_year": lambda me: 1900,
+    }.items():
+        monkeypatch.setattr(cli, name, value)
+    monkeypatch.setattr(cli.cv2, "imread", lambda path: np.zeros((8, 8, 3), np.uint8))
+    monkeypatch.setattr(cli.outlines, "contrast", lambda *args: 0.1)
+
+    results, _ = cli._rounds(work, set())
+
+    inputs, kept = saved["b"]
+    assert inputs == results["b"]["situated"]["inputs"] == cli._placed_from("i", [anchor])
+    assert kept is points
+
+
+def test_a_chained_placements_points_are_read_where_the_chaining_kept_them(tmp_path, monkeypatch):
+    disk = cli.MATCHERS[cli.DISK]._replace(photos=tmp_path)
+    monkeypatch.setattr(cli, "MATCHERS", {**cli.MATCHERS, cli.DISK: disk})
+    m = replace(_situated_at_origin(), inputs="i:from-ab12cd34")
+    points = match.Points(np.ones((1, 2)), np.ones((1, 3)), np.array([frozenset({"p"})], object))
+    cli.chain.Store(tmp_path, None).save_points("pm:1", m.inputs, points)
+
+    store, inputs = cli._held_at(m, {"matcher": cli.LOMAG}, chained=True)
+
+    assert store.points("pm:1", inputs).pixels.tolist() == [[1.0, 1.0]]
+    assert cli._unchained(inputs) == "i"  # its observation: the photo's own, as matched
+
+
 def test_the_photos_chained_from_one_are_found_through_every_round():
     results = {
         "b": {"from": ["a"]},

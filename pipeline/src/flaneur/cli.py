@@ -2158,6 +2158,12 @@ def _chain_setup() -> str:
     return f"{_setup()}:{digest}"
 
 
+def _unchained(inputs: str) -> str:
+    """A placement's inputs, a chained one's anchors left out (see _placed_from): what the photo
+    was observed from."""
+    return inputs.split(":from-", 1)[0]
+
+
 def _placed_from(inputs: str, parents: list[chain.Anchor]) -> str:
     """What a chained photo was placed from: its own inputs, and its anchors' (a verdict on
     it holds while they do); without any, what it was placed from against today."""
@@ -2366,6 +2372,7 @@ def _rounds(work: _Chaining, left_out: set[str]) -> tuple[dict[str, dict], dict[
             )
             parents = chain.provenance(found.points)
             results[photo_id] = {"situated": asdict(situated), "round": k, "from": parents}
+            work.store.save_points(photo_id, inputs, found.points)  # its pairs on the pages
             typer.echo(f"{photo_id} : situé au tour {k} ({camera.agree} points), depuis {parents}")
             placed[photo_id] = work.anchor(photo_id, camera, found.points, inputs)
         if not new:
@@ -3214,6 +3221,14 @@ def _kept_store(m: match.Situated, kept: dict | None) -> tuple[chain.Store, str]
     return chain.Store(MATCHERS[matcher].photos, None), _found_inputs(m.inputs, matcher)
 
 
+def _held_at(m: match.Situated, kept: dict | None, chained: bool) -> tuple[chain.Store, str] | None:
+    """Where a placement's points are kept, and under which inputs: a chained one's where the
+    chaining kept them (its store, DISK's; see _rounds), else as match kept them."""
+    if chained:
+        return chain.Store(MATCHERS[DISK].photos, None), m.inputs
+    return _kept_store(m, kept)
+
+
 REGISTERED = DATA / "pilot" / "registered.json"  # each placement of match registered on its own
 PLACED_PHOTOS = DATA / "pilot" / "placed.json"  # the photos placed, each with its status
 CHECKED_AREAS = DATA / "pilot" / "checked_areas.json"  # each area's matchers passing the check
@@ -3329,10 +3344,11 @@ def _registering_world() -> tuple[dict[str, match.Panorama], set[str]]:
 
 
 def _observed_of(store: chain.Store, photo_id: str, inputs: str, kept: dict | None):
-    """A placement's observation (see chain.Store.observed): as found from its `inputs`, else,
-    for one kept though a run found nothing better (see _still_shown), as that run left it: the
-    same photo and panoramas, its marks aside, the rays its points were found on."""
-    found = store.observed(photo_id, inputs)
+    """A placement's observation (see chain.Store.observed): as found from its `inputs` (a
+    chained one's: the photo's own, see _unchained), else, for one kept though a run found
+    nothing better (see _still_shown), as that run left it: the same photo and panoramas, its
+    marks aside, the rays its points were found on."""
+    found = store.observed(photo_id, _unchained(inputs))
     if found is None and (tried := (kept or {}).get("tried_from")):
         found = store.observed(photo_id, tried)
     return found
@@ -3395,10 +3411,13 @@ def confirm_placed(port: int = 8768, open_browser: bool = True) -> None:
             rounds[k] = {"round": 0, "from": [], "proposed": p["why"]}
 
     @functools.cache
-    def points_of(photo_id: str) -> match.Points | None:  # a chained one has none of its own
-        if rounds[photo_id]["round"] > 0:
-            return None
-        return _points_of(photo_id, situated[photo_id], kept.get(photo_id))
+    def held_at(photo_id: str) -> tuple[chain.Store, str] | None:
+        chained = rounds[photo_id]["round"] > 0
+        return _held_at(situated[photo_id], kept.get(photo_id), chained)
+
+    def points_of(photo_id: str) -> match.Points | None:
+        at = held_at(photo_id)
+        return at and at[0].points(photo_id, at[1])
 
     def first_of(photo_id: str) -> list[match.Panorama]:
         return _sources_first(points_of(photo_id), by_id, situated[photo_id], fixed)
@@ -3467,7 +3486,7 @@ def confirm_placed(port: int = 8768, open_browser: bool = True) -> None:
         size = f.today.shape[:2]
         pairs, seen_from, counted = None, _toward(f.camera, f.panorama), {}
         if points is not None:
-            at = _kept_store(m, kept.get(photo_id))
+            at = held_at(photo_id)
             observed = _observed_of(at[0], photo_id, at[1], kept.get(photo_id)) if at else None
             matched = observed and _matched_in(points, observed, f.panorama, seen_from, size)
             pairs = _pairs_shown(points, f.photo.shape, size, seen_from, matched)
