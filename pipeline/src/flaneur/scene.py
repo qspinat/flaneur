@@ -205,20 +205,19 @@ def build3d(
         if me is None or row["registration"]["panorama"] not in known:
             continue
         home = {"panorama": row["registration"]["panorama"], "registration": row["registration"]}
-        if row["standing"] and (around := walls_of(home["panorama"])) is not None:
+        if row["standing"]:
             home["standing"] = row["standing"]
-            walls[home["panorama"]] = around
         where = [{**home, "strength": 1.0}] + [
             {"panorama": c["registration"]["panorama"], **c}
             for c in copies.get(photo_id, [])
             if c["registration"]["panorama"] in known
         ]
-        for copy in where[1:]:  # a copy standing is laid on its own panorama's walls
-            if "standing" in copy:
-                if (around := walls_of(copy["panorama"])) is None:
-                    del copy["standing"]
+        for shown_at in where:  # standing, laid on its panorama's walls; without, its matrix
+            if "standing" in shown_at:
+                if (around := walls_of(shown_at["panorama"])) is None:
+                    del shown_at["standing"]
                 else:
-                    walls[copy["panorama"]] = around
+                    walls[shown_at["panorama"]] = around
         holding |= {w["panorama"] for w in where}
         credit = f"{me.photographer}. {me.credit}" + ("; image retournée" if row["flipped"] else "")
         photos.append(

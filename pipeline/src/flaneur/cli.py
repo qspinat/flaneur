@@ -3917,44 +3917,52 @@ def _copy_standing(kept: dict) -> dict | None:
     return _standing_drawn(kept, COPY_GAIN, COPY_HELD)
 
 
-def _copy_made(carried_as: str, copy: dict, placement: dict, walls: str) -> str:
+def _copy_made(carried: dict, copy: dict, placement: dict, walls: str) -> str:
     """What a copy's standing camera is made from (see _copies_standing): the photo as carried
-    (`carried_as`: see _answered_as), the copy, the placement of match, the walls of its
+    (`carried`: its row, see _answered_as), the copy, the placement of match, the walls of its
     panorama (see _walls_of), the code, and the least held-out pairs a camera is fitted on
     (the gain is judged on reading)."""
-    return _digest(
-        [
-            carried_as,
-            copy["registration"],
-            _registered_as(placement),
-            walls,
-            _copying_code(),
-            COPY_HELD,
-        ]
+    made = [copy["registration"], _registered_as(placement), walls, _copying_code(), COPY_HELD]
+    return _digest([carried["made"], *made])
+
+
+def _copies_to_stand(
+    held: dict[str, dict], carried: dict[str, dict], placements: dict[str, dict]
+) -> Iterator[tuple[str, str, dict, Callable[[], str]]]:
+    """The copies that may stand (see _copies_standing): those of a placement of match standing
+    in its home panorama (`held`), on a panorama with walls; each with what its camera is made
+    from (see _copy_made: worked out when asked, the walls read once a panorama)."""
+    walls = functools.cache(
+        lambda panorama: _walls_of(home) if (home := _standing_home(panorama)) else None
     )
+    for photo_id, row in held.items():
+        if not row.get("standing") or photo_id not in carried or photo_id not in placements:
+            continue
+        for copy in carried[photo_id]["copies"]:
+            panorama = copy["registration"]["panorama"]
+            if walls(panorama) is None:
+                continue
+
+            def made(photo_id=photo_id, copy=copy, panorama=panorama) -> str:
+                return _copy_made(carried[photo_id], copy, placements[photo_id], walls(panorama))
+
+            yield photo_id, panorama, copy, made
 
 
 def _copies_drawn(shown: dict[str, dict], carried: dict[str, dict]) -> dict[str, list[dict]]:
     """Each photo's copies (see porter) as the 3D walk draws them: with the camera where the
-    photographer stood (see _copies_standing) where it was made from what they and their
-    panorama's walls are now and it lays the photo better (see _copy_standing); else its
+    photographer stood (see _copies_standing) where it lays the photo better (see
+    _copy_standing) and was made from what the copy and its panorama's walls are now; else its
     matrix (a wall drawn since: until the next night)."""
-    kept = register.load(CARRIED_STANDING)
-    placements = _matches() if kept else {}
-    walls = functools.cache(
-        lambda panorama: _walls_of(home) if (home := _standing_home(panorama)) else None
-    )
-
-    def drawn(photo_id: str, copy: dict) -> dict:
-        panorama = copy["registration"]["panorama"]
-        made = kept.get(photo_id, {}).get(panorama)
-        if made is None or photo_id not in placements or not shown[photo_id].get("standing"):
-            return copy
-        now = _copy_made(carried[photo_id]["made"], copy, placements[photo_id], walls(panorama))
-        camera = _copy_standing(made) if made["made"] == now else None
-        return {**copy, "standing": camera} if camera else copy
-
-    return {i: [drawn(i, copy) for copy in c["copies"]] for i, c in carried.items()}
+    drawn = {i: list(c["copies"]) for i, c in carried.items()}
+    if not (kept := register.load(CARRIED_STANDING)):
+        return drawn
+    for photo_id, panorama, copy, made in _copies_to_stand(shown, carried, _matches()):
+        found = kept.get(photo_id, {}).get(panorama)
+        if found and (camera := _copy_standing(found)) and found["made"] == made():
+            at = carried[photo_id]["copies"].index(copy)
+            drawn[photo_id][at] = {**copy, "standing": camera}
+    return drawn
 
 
 def _copies_standing(held: dict[str, dict], carried: dict[str, dict]) -> None:
@@ -3963,26 +3971,19 @@ def _copies_standing(held: dict[str, dict], carried: dict[str, dict]) -> None:
     checks) given the camera where the photographer stood, from the photo's own pairs in the
     copy's panorama (see _stand_one: else the photo matched again there) and that panorama's
     walls, scored against the copy's matrix (drawn where _copy_standing says so). Kept in
-    CARRIED_STANDING with what each was made from (the copy, the placement, the walls, the
-    code), made again when that changes; copies never stood are done too, panorama after
-    panorama (one 360° picture at a time)."""
+    CARRIED_STANDING with what each was made from (see _copy_made), made again when that
+    changes; copies never stood are done too, panorama after panorama (one 360° picture at a
+    time)."""
     was = register.load(CARRIED_STANDING)
     kept = _matches()
-    walls = functools.cache(lambda panorama: _walls_of(_standing_home(panorama)))
     out: dict[str, dict] = {}
     todo = []
-    for photo_id, row in held.items():
-        if not row.get("standing") or photo_id not in carried or photo_id not in kept:
-            continue
-        for copy in carried[photo_id]["copies"]:
-            panorama = copy["registration"]["panorama"]
-            if _standing_home(panorama) is None:
-                continue
-            made = _copy_made(carried[photo_id]["made"], copy, kept[photo_id], walls(panorama))
-            if (before := was.get(photo_id, {}).get(panorama)) and before["made"] == made:
-                out.setdefault(photo_id, {})[panorama] = before
-            else:
-                todo.append((panorama, photo_id, copy, made))
+    for photo_id, panorama, copy, made in _copies_to_stand(held, carried, kept):
+        now = made()
+        if (before := was.get(photo_id, {}).get(panorama)) and before["made"] == now:
+            out.setdefault(photo_id, {})[panorama] = before
+        else:
+            todo.append((panorama, photo_id, copy, now))
     if todo:
         store = functools.cache(_photo_store)  # the matcher loaded only if one is matched again
         picture = functools.lru_cache(maxsize=1)(lambda path: cv2.imread(str(path)))
