@@ -299,42 +299,36 @@ def stood_against_flat(
     whether that camera lays the photo better than the flat fit: each band of the photo held
     out in turn, both refitted on the rest and scored on it."""
     rays = _rays(view_px, view, sphere)
-    metres, _ = _pairs_depth(scene, sphere, rays, [None] * len(rays), refuse=False)
+    metres, _ = _depth(scene, rays)
     has = ~np.isnan(metres)
     if has.sum() < registration.MIN_STANDING + 2:
         return Stood(None, np.inf, np.inf)
     world = np.array(scene.origin) + metres[:, None] * rays
     band = np.minimum((photo_px[:, 0] / size[1] * BANDS).astype(int), BANDS - 1)
 
-    def fitted(rest: np.ndarray) -> tuple[registration.Registration, registration.Standing | None]:
-        flat = registration.fit(
-            photo_px[rest], view_px[rest], size, SHOWN, sphere.id, view, sphere.axes
-        )[0]
+    def fitted(on: np.ndarray) -> tuple:
+        """The flat fit and the standing camera on the pairs `on` (either none: not fitted)."""
         try:
-            stood = _standing(
-                photo_px[rest],
-                view_px[rest],
-                view,
-                sphere,
-                size,
-                scene,
-                pin,
-                flat,
-                [None] * int(rest.sum()),
-                False,
+            flat = registration.fit(
+                photo_px[on], view_px[on], size, SHOWN, sphere.id, view, sphere.axes
+            )[0]
+        except registration.NotFitted:
+            return None, None
+        try:
+            standing = registration.fit_standing(
+                photo_px[on], world[on], size, flat, sphere.axes, pin, scene.ground
             )
         except registration.NotFitted:
             return flat, None
-        return flat, stood.camera
+        return flat, standing[0]
 
     flat_off, stand_off = [], []
     for b in range(BANDS):
         out, rest = (band == b) & has, band != b
         if not out.any() or rest.sum() < registration.MIN_STANDING:
             continue
-        try:
-            flat, camera = fitted(rest)
-        except registration.NotFitted:
+        flat, camera = fitted(rest)
+        if flat is None:
             continue
         flat_off += list(
             registration.errors_flat(
@@ -346,14 +340,10 @@ def stood_against_flat(
             if camera is not None
             else [np.inf] * int(out.sum())
         )
-    if not flat_off:
+    camera = fitted(np.ones(len(photo_px), bool))[1] if flat_off else None
+    if camera is None:
         return Stood(None, np.inf, np.inf)
-    try:
-        camera = fitted(np.ones(len(photo_px), bool))[1]
-    except registration.NotFitted:
-        camera = None
-    parallax = float(np.median(stand_off)) if camera is not None else np.inf
-    return Stood(camera, float(np.median(flat_off)), parallax)
+    return Stood(camera, float(np.median(flat_off)), float(np.median(stand_off)))
 
 
 def _flat_without(

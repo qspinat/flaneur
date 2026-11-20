@@ -53,6 +53,7 @@ def _row(**kw):
         "unchecked_area": False,
         "proposed_marks": False,
         "unsure_sources": False,
+        "standing": None,
         **kw,
     }
 
@@ -128,32 +129,30 @@ def test_a_photo_says_how_sure_its_placement_is():
     ) == ("automatic", True, False, True)
 
 
-def test_the_walls_around_a_photo_standing_off_its_panorama_go_with_that_panorama_alone():
-    standing = {**REG, "standing": {"position": [1.0, 0.5, 0.2]}}
+def test_a_photo_standing_off_its_panorama_is_laid_on_its_walls_which_go_with_it_alone():
+    standing = {"position": [652001.0, 6861520.5, 35.2], "focal": 700.0}
     copies = {"pm:1": [{"registration": {**REG, "panorama": "p2"}, "strength": 0.5}]}
     wall = facades.Wall((652010.123, 6861525.0), (652019.0, 6861525.0), 47.456, "fitted")
     around = facades.Scene("p1", (652000.0, 6861520.0, 35.0), 32.5, (wall,), (), 8)
     asked = []
 
     built, _ = _build(
-        {"pm:1": _row(registration=standing)},
+        {"pm:1": _row(standing=standing)},
         copies,
         lambda panorama: asked.append(panorama) or around,
     )
 
+    home, copy = built["photos"][0]["shown"]
+    assert home["standing"] == {"position": [1.0, 0.5, 0.2], "focal": 700.0}  # metres off it
+    assert "standing" not in copy  # a copy keeps its matrix
     p1, p2, _ = built["panoramas"]
     assert p1["walls"] == [[10.12, 5.0, 19.0, 5.0, 12.46]]  # east, north, top: metres off it
     assert p1["ground"] == -2.5
-    assert "walls" not in p2 and asked == ["p1"]  # a copy keeps its matrix
+    assert "walls" not in p2 and asked == ["p1"]
 
 
-def test_a_photo_resting_on_panoramas_nothing_checks_keeps_its_matrix():
-    standing = {**REG, "standing": {"position": [1.0, 0.5, 0.2]}}
-    asked = []
+def test_a_photo_standing_off_a_panorama_without_walls_keeps_its_matrix():
+    built, _ = _build({"pm:1": _row(standing={"position": [0.0, 0.0, 0.0]})})
 
-    built, _ = _build(
-        {"pm:1": _row(registration=standing, unsure_sources=True)},
-        walls_of=lambda panorama: asked.append(panorama),
-    )
-
-    assert built["photos"][0]["shown"][0]["registration"] == REG and asked == []
+    assert "standing" not in built["photos"][0]["shown"][0]
+    assert "walls" not in built["panoramas"][0]

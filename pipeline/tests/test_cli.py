@@ -10,7 +10,18 @@ import pytest
 import typer
 from typer.testing import CliRunner
 
-from flaneur import cli, confirming, depth, facades, match, placing, poses, registration, segment
+from flaneur import (
+    cli,
+    confirming,
+    depth,
+    facades,
+    match,
+    placed,
+    placing,
+    poses,
+    registration,
+    segment,
+)
 from flaneur.cli import app
 
 
@@ -282,16 +293,6 @@ def test_a_proposal_holds_while_its_panorama_stands_where_it_was_made(monkeypatc
     known = {"panorama": "p1", "inputs": "h", **({"at": known_at} if known_at else {})}
 
     assert cli._still_proposed(known, "pm:1", "p1", (1.0, 2.0, 30.0)) is holds
-
-
-def test_copies_carried_hold_when_their_photo_gains_a_standing_camera(tmp_path, monkeypatch):
-    row = {"registration": {"panorama": "a"}, "inputs": "i", "flipped": False}
-    kept = {"pm:1": {"made": cli._answered_as(row), "copies": [], "at": {"a": [0.0, 0.0, 0.0]}}}
-    (tmp_path / "carried.json").write_text(json.dumps(kept))
-    monkeypatch.setattr(cli, "CARRIED", tmp_path / "carried.json")
-    standing = {**row, "registration": {"panorama": "a", "standing": {"focal": 700.0}}}
-
-    assert set(cli._carried({"pm:1": standing}, {"a": (0.0, 0.0, 0.0)})) == {"pm:1"}
 
 
 def test_copies_carried_from_panoramas_moved_since_are_made_again(tmp_path, monkeypatch):
@@ -2134,13 +2135,13 @@ def _registered(tmp_path, monkeypatch, placements: dict, walls: dict, stood: dic
 
     def scene(panorama):
         wall = facades.Wall((0.0, 5.0), (9.0, 5.0), walls["top"], "fitted")
-        return None, facades.Scene(panorama, origin, 32.5, (wall,), (), 8)  # (its sphere, walls)
+        return cli._Home(None, facades.Scene(panorama, origin, 32.5, (wall,), (), 8))
 
     camera = registration.Standing(
         (11.0, 20.5, 35.2), (0.1, 0.2, 0.3), 700.0, (0.0, 0.05), (60, 80)
     )
     made = []
-    monkeypatch.setattr(cli, "_standing_world", lambda: scene)
+    monkeypatch.setattr(cli, "_standing_home", scene)
     monkeypatch.setattr(
         cli,
         "_stand_one",
@@ -2161,9 +2162,9 @@ def test_a_standing_camera_is_shown_only_where_it_lays_the_photo_better(monkeypa
 
     shown = cli._registrations(placements)
 
-    assert shown["pm:1"]["standing"]["position"] == [1.0, 0.5, 0.2]  # off the panorama, metres
-    assert shown["pm:1"]["standing"]["focal"] == 700.0
-    assert "standing" not in shown["pm:2"]
+    assert list(shown["pm:1"].standing["position"]) == [11.0, 20.5, 35.2]
+    assert shown["pm:1"].registration["panorama"] == "q"
+    assert shown["pm:2"].standing is None
 
 
 def test_a_standing_camera_is_made_again_only_when_its_walls_change(monkeypatch, tmp_path):
@@ -2217,7 +2218,9 @@ def test_the_placed_list_is_written_from_the_answers_verdicts_and_matches(monkey
         "_photo_part": lambda photo_id: "",  # each placed from the photo as it is (see "i")
         "_exported": lambda photo_id: exported,
         "_image": lambda photo_id: "h",
-        "_registrations": lambda standing: {k: {"panorama": "p"} for k in standing},
+        "_registrations": lambda standing: {
+            k: placed.Registered({"panorama": "p"}) for k in standing
+        },
         "_kept_store": lambda m, kept: (SimpleNamespace(points=lambda k, i: seen_by.get(k)), "i"),
         "_sure_panoramas": lambda: ({"sure"}, {"sure", "gps"}),  # sure of their pose, known
     }.items():
@@ -2257,6 +2260,7 @@ def test_only_the_photos_placed_with_a_registration_go_to_3d(monkeypatch):
             "unchecked_area": False,
             "proposed_marks": False,
             "unsure_sources": False,
+            "standing": None,
         }
     }
 
@@ -2283,6 +2287,7 @@ def test_a_match_placement_reaches_the_3d_walk_with_its_status(monkeypatch, tmp_
                 "unchecked_area": False,
                 "proposed_marks": False,
                 "unsure_sources": False,
+                "standing": None,
             }
         },
     }.items():
@@ -2629,7 +2634,9 @@ def test_proposed_marks_are_said_only_of_a_placement_made_with_them(monkeypatch,
         "_photo_part": lambda photo_id: "h:abcd1234",
         "_exported": lambda photo_id: exported,
         "_image": lambda photo_id: "h",
-        "_registrations": lambda standing: {k: {"panorama": "p"} for k in standing},
+        "_registrations": lambda standing: {
+            k: placed.Registered({"panorama": "p"}) for k in standing
+        },
     }.items():
         monkeypatch.setattr(cli, name, value)
 
@@ -2668,7 +2675,7 @@ def test_a_registration_that_fails_leaves_the_others_and_is_tried_again(monkeypa
     found = cli._registrations({"bad": _kept(), "good": _kept(x=3.0)})
 
     kept = json.loads((tmp_path / "registered.json").read_text())
-    assert found == {"bad": None, "good": None} and set(kept) == {"good"}
+    assert found == {"bad": (None, None), "good": (None, None)} and set(kept) == {"good"}
 
 
 def test_no_test_watches_or_reads_the_pipeline_s_answers(tmp_path):

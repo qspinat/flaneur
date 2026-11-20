@@ -3,6 +3,7 @@ user said of it (its status). The 3D walk shows them all, each saying how sure i
 
 from collections.abc import Callable, Sequence, Set
 from dataclasses import asdict, dataclass
+from typing import NamedTuple
 
 from flaneur import bridging, match, placing, registration
 
@@ -26,7 +27,8 @@ class Placed:
     placed on (`inputs`, its hash), shown the other way round (`flipped`); for one of match not
     seen yet, whether its matcher does not pass the check in its area yet (`unchecked_area`),
     whether it rests on landmarks only proposed (`proposed_marks`) and on panoramas nothing
-    checks (`unsure_sources`: see TRUSTED_SHARE)."""
+    checks (`unsure_sources`: see TRUSTED_SHARE); the camera where the photographer stood, where
+    the 3D walk lays it on the walls (`standing`, see registration.standing_to_json)."""
 
     photo_id: str
     status: str
@@ -37,10 +39,19 @@ class Placed:
     unchecked_area: bool = False
     proposed_marks: bool = False
     unsure_sources: bool = False
+    standing: dict | None = None
 
     def for_scene(self) -> dict:
         """As the 3D walk takes a photo placed (see scene.build3d)."""
         return {k: v for k, v in asdict(self).items() if k not in ("photo_id", "source")}
+
+
+class Registered(NamedTuple):
+    """A placement of match registered (see cli._registrations): the flat fit (none: no
+    panorama fits), and the camera where the photographer stood where that lays it better."""
+
+    registration: dict | None
+    standing: dict | None = None
 
 
 @dataclass(frozen=True)
@@ -62,11 +73,12 @@ def build(
     answers: dict[str, dict],
     far: set[str],
     matched: dict[str, Matched],
-    register: Callable[[dict[str, dict]], dict[str, dict | None]],
+    register: Callable[[dict[str, dict]], dict[str, Registered]],
 ) -> dict[str, Placed]:
     """The photos placed: by the placing page's `answers` (on the image each has now), checked;
     else by match, with the user's word, unless answered `far` (no panorama sees it) or
-    refused; those of match registered (`register`: see cli._registrations) once chosen."""
+    refused; those of match registered (`register`: see cli._registrations) once chosen, and
+    standing but on panoramas nothing checks (their poses unsure: the matrix holds better)."""
     found = {
         k: Placed(k, CHECKED, "page", a["registration"], a["inputs"], flipped=a["flipped"])
         for k, a in answers.items()
@@ -79,15 +91,17 @@ def build(
     registrations = register({k: m.placement for k, (m, _) in kept.items()})
     for k, (m, status) in kept.items():
         seen = status != AUTOMATIC  # the notes are for those not seen yet
+        unsure_sources = not seen and m.unsure_sources
         found[k] = Placed(
             k,
             status,
             "match",
-            registrations[k],
+            registrations[k].registration,
             m.image,
             unchecked_area=not (seen or m.area_checked),
             proposed_marks=not seen and m.marks == "proposed",
-            unsure_sources=not seen and m.unsure_sources,
+            unsure_sources=unsure_sources,
+            standing=None if unsure_sources else registrations[k].standing,
         )
     return found
 
