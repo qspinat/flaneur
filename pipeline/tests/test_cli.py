@@ -80,12 +80,12 @@ def test_a_photo_placed_again_without_any_anchor_is_its_placement_against_today(
     assert cli._placed_from("abc", []) == "abc"  # a "no" to it still holds
 
 
-def test_a_chained_photo_keeps_the_points_it_was_placed_from(monkeypatch):
+def test_a_chained_photo_keeps_its_points_apart_from_match_s(tmp_path, monkeypatch):
     camera = match.Camera(1.0, 2.0, 1.5, 90.0, 0.5, 60.0, agree=30, panoramas=2)
     points = match.Points(
         np.zeros((1, 2)), np.zeros((1, 3)), np.array([frozenset({"photo:a"})], dtype=object)
     )
-    anchor, me, saved = SimpleNamespace(id="a", inputs="ia"), SimpleNamespace(id="b"), {}
+    anchor, me = SimpleNamespace(id="a", inputs="ia"), SimpleNamespace(id="b")
     work = SimpleNamespace(
         round_zero={"a": anchor},
         walk=[me],
@@ -101,7 +101,7 @@ def test_a_chained_photo_keeps_the_points_it_was_placed_from(monkeypatch):
         heights=SimpleNamespace(street=lambda x, y: 0.0),
         then=lambda year: SimpleNamespace(blocks=None),
         anchor=lambda photo_id, camera, points, inputs: SimpleNamespace(id=photo_id),
-        store=SimpleNamespace(save_points=lambda k, inputs, p: saved.update({k: (inputs, p)})),
+        store=SimpleNamespace(),  # match's DISK store: never written by chaining
     )
     for name, value in {
         "_inputs": lambda scene, photo_id: "i",
@@ -112,25 +112,44 @@ def test_a_chained_photo_keeps_the_points_it_was_placed_from(monkeypatch):
         monkeypatch.setattr(cli, name, value)
     monkeypatch.setattr(cli.cv2, "imread", lambda path: np.zeros((8, 8, 3), np.uint8))
     monkeypatch.setattr(cli.outlines, "contrast", lambda *args: 0.1)
+    monkeypatch.setattr(cli, "CHAINED_POINTS", tmp_path)
 
     results, _ = cli._rounds(work, set())
 
-    inputs, kept = saved["b"]
-    assert inputs == results["b"]["situated"]["inputs"] == cli._placed_from("i", [anchor])
-    assert kept is points
+    inputs = results["b"]["situated"]["inputs"]
+    assert cli.chain.Store(tmp_path, None).points("b", inputs).pixels.tolist() == [[0.0, 0.0]]
+
+
+def test_a_photo_placed_without_anchors_keeps_nothing_of_its_own(tmp_path, monkeypatch):
+    monkeypatch.setattr(cli, "CHAINED_POINTS", tmp_path)
+    points = match.Points(np.ones((1, 2)), np.ones((1, 3)), np.array([frozenset({"p"})], object))
+
+    cli._keep_chained("b", "i", points)  # its inputs: those of a placement against today
+
+    assert not any(tmp_path.iterdir())
 
 
 def test_a_chained_placements_points_are_read_where_the_chaining_kept_them(tmp_path, monkeypatch):
-    disk = cli.MATCHERS[cli.DISK]._replace(photos=tmp_path)
-    monkeypatch.setattr(cli, "MATCHERS", {**cli.MATCHERS, cli.DISK: disk})
+    monkeypatch.setattr(cli, "CHAINED_POINTS", tmp_path)
     m = replace(_situated_at_origin(), inputs="i:from-ab12cd34")
     points = match.Points(np.ones((1, 2)), np.ones((1, 3)), np.array([frozenset({"p"})], object))
-    cli.chain.Store(tmp_path, None).save_points("pm:1", m.inputs, points)
+    cli._keep_chained("pm:1", m.inputs, points)
 
     store, inputs = cli._kept_store(m, {"matcher": cli.LOMAG})  # match's other try: aside
 
     assert store.points("pm:1", inputs).pixels.tolist() == [[1.0, 1.0]]
     assert cli._unchained(inputs) == "i"  # its observation: the photo's own, as matched
+
+
+def test_a_photo_chained_without_anchors_shows_no_points_not_match_s(tmp_path, monkeypatch):
+    disk = cli.MATCHERS[cli.DISK]._replace(photos=tmp_path)
+    monkeypatch.setattr(cli, "MATCHERS", {**cli.MATCHERS, cli.DISK: disk})
+    m = replace(_situated_at_origin(), inputs="i")  # as match's own placement, turned down
+    points = match.Points(np.ones((1, 2)), np.ones((1, 3)), np.array([frozenset({"p"})], object))
+    cli.chain.Store(tmp_path, None).save_points("pm:1", "i", points)
+
+    assert cli._placement_points("pm:1", m, None, chained=True) is None
+    assert cli._placement_points("pm:1", m, None, chained=False) is not None
 
 
 def test_the_photos_chained_from_one_are_found_through_every_round():
