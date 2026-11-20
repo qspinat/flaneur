@@ -127,7 +127,7 @@ def test_a_chained_placements_points_are_read_where_the_chaining_kept_them(tmp_p
     points = match.Points(np.ones((1, 2)), np.ones((1, 3)), np.array([frozenset({"p"})], object))
     cli.chain.Store(tmp_path, None).save_points("pm:1", m.inputs, points)
 
-    store, inputs = cli._held_at(m, {"matcher": cli.LOMAG}, chained=True)
+    store, inputs = cli._kept_store(m, {"matcher": cli.LOMAG})  # match's other try: aside
 
     assert store.points("pm:1", inputs).pixels.tolist() == [[1.0, 1.0]]
     assert cli._unchained(inputs) == "i"  # its observation: the photo's own, as matched
