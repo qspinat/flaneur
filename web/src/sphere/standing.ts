@@ -20,6 +20,8 @@ export type WallRow = [x0: number, y0: number, x1: number, y1: number, top: numb
 export const NEAREST_M = 0.5; // a wall nearer than this along a ray is not met (pipeline: Blocks)
 export const STREET_REACH_M = 50; // the street met this far at most (facades.STREET_REACH_M)
 export const HIDDEN = 1.1; // a point this much farther than a wall in its way is hidden
+export const STRETCHED = 6; // a part of the photo laid this many times larger than the photo as a whole: smeared
+const STEP_RAD = 1e-4; // how far a direction is moved to see how the photo stretches there
 export const ROOFS_PAST_M = 2; // over the roofs, walls are met this far past their ends: the sky
 // does not tear between two walls (their corners are joined, not the gaps between blocks)
 
@@ -41,9 +43,16 @@ function toWall(from: number[], d: number[], walls: WallRow[], ground: number, r
   return nearest;
 }
 
+/** Whether along `d` from `from` today's point is the sky: no wall nor street met. */
+function isSky(from: number[], d: number[], walls: WallRow[], ground: number): boolean {
+  if (toWall(from, d, walls, ground) < Infinity) return false;
+  const street = d[2] < 0 ? (ground - from[2]) / d[2] : Infinity;
+  return !(street > 0 && street <= STREET_REACH_M);
+}
+
 /** How far along `d` (unit, east-north-up) from `from` today's point stands: the nearest wall,
- *  else the street when it points down (within STREET_REACH_M), else over the roofs as far as
- *  the wall under it, else Infinity (the sky). */
+ *  else the street when it points down (within STREET_REACH_M), else (the sky) over the roofs
+ *  as far as the wall under it, else Infinity. */
 export function reach(from: number[], d: number[], walls: WallRow[], ground: number): number {
   const wall = toWall(from, d, walls, ground);
   if (wall < Infinity) return wall;
@@ -95,9 +104,31 @@ export function photoPixel(d: number[], metres: number, s: Standing): [number, n
   return seen[2] > 0 ? [seen[0] / seen[2], seen[1] / seen[2]] : [NaN, NaN];
 }
 
+/** How little of the photo a small turn of the direction `d` spans, the way it is most
+ *  squeezed: the lesser singular value of the photo's pixels per radian there (as the shader
+ *  works it out per pixel of the screen). */
+export function squeezed(d: number[], s: Standing, walls: WallRow[], ground: number): number {
+  const across = Math.abs(d[2]) < 0.9 ? [0, 0, 1] : [1, 0, 0];
+  const cross = (a: number[], b: number[]) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+  const unit = (v: number[]) => v.map((x) => x / Math.hypot(...v));
+  const e1 = unit(cross(d, across));
+  const e2 = cross(d, e1);
+  const at = (v: number[]) => photoPixel(v, depthAlong(v, walls, ground), s);
+  const here = at(d);
+  const [a, b] = [e1, e2].map((e) => {
+    const there = at(unit(d.map((x, i) => x + STEP_RAD * e[i])));
+    return [(there[0] - here[0]) / STEP_RAD, (there[1] - here[1]) / STEP_RAD];
+  });
+  const square = a[0] ** 2 + a[1] ** 2 + b[0] ** 2 + b[1] ** 2;
+  const det = a[0] * b[1] - a[1] * b[0];
+  return Math.sqrt(Math.max(square - Math.sqrt(Math.max(square ** 2 - 4 * det ** 2, 0)), 0) / 2);
+}
+
 /** Where a direction from the panorama shows in the photo ([0, 1]², y down), or null: behind
- *  the camera, off the photo, or hidden from the photographer by a wall nearer to them. */
-export function standingAt(d: number[], s: Standing, walls: WallRow[], ground: number): [number, number] | null {
+ *  the camera, off the photo, hidden from the photographer by a wall nearer to them, or (the
+ *  photo's pixels per radian as laid, `density`, given) where the photo fades out, smeared,
+ *  but in the sky (see the shader in photo.ts). */
+export function standingAt(d: number[], s: Standing, walls: WallRow[], ground: number, density?: number): [number, number] | null {
   const metres = depthAlong(d, walls, ground);
   const [x, y] = photoPixel(d, metres, s);
   const [u, v] = [x / s.size[1], y / s.size[0]];
@@ -108,5 +139,7 @@ export function standingAt(d: number[], s: Standing, walls: WallRow[], ground: n
     const toward = away.map((v) => v / length);
     if (toWall(s.position, toward, walls, ground, false, length / HIDDEN) < length / HIDDEN) return null;
   }
+  const smeared = () => (squeezed(d, s, walls, ground) * STRETCHED) / density! <= 0.5;
+  if (density !== undefined && !isSky([0, 0, 0], d, walls, ground) && smeared()) return null;
   return [u, v];
 }

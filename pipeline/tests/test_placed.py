@@ -72,7 +72,7 @@ def _matched(verdict=None, area_checked=True, marks=None, unsure=False) -> place
 STANDING = {"position": [1.0, 2.0, 30.0]}
 
 
-def _build(matched, answers=None, far=frozenset(), registered=None):
+def _build(matched, answers=None, far=frozenset(), registered=None, page_standing=None):
     """The list from `matched` placements of match, the page's `answers`, those answered
     `far`; each registered in panorama "p", standing (the photos asked to register noted in
     `registered`)."""
@@ -82,7 +82,9 @@ def _build(matched, answers=None, far=frozenset(), registered=None):
             registered.update(placements)
         return {k: placed.Registered(REG, STANDING) for k in placements}
 
-    return placed.build(answers or {}, set(far), matched, register)
+    return placed.build(
+        answers or {}, set(far), matched, register, page_standing or (lambda a: None)
+    )
 
 
 def test_a_yes_is_checked_a_near_is_near_an_unseen_one_is_automatic():
@@ -123,6 +125,14 @@ def test_an_answer_on_the_placing_page_wins_and_is_checked():
         "q",
         True,
     )
+
+
+def test_an_answer_fitted_in_parallax_on_the_placing_page_stands_in_the_walk():
+    answer = {"registration": REG, "inputs": "img", "flipped": False, "standing": {"camera": {}}}
+
+    found = _build({}, answers={"x": answer}, page_standing=lambda a: STANDING)["x"]
+
+    assert found.standing == STANDING
 
 
 def test_an_answer_far_takes_the_match_placement_out():

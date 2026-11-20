@@ -74,13 +74,23 @@ def build(
     far: set[str],
     matched: dict[str, Matched],
     register: Callable[[dict[str, dict]], dict[str, Registered]],
+    page_standing: Callable[[dict], dict | None] = lambda answer: None,
 ) -> dict[str, Placed]:
     """The photos placed: by the placing page's `answers` (on the image each has now), checked;
     else by match, with the user's word, unless answered `far` (no panorama sees it) or
     refused; those of match registered (`register`: see cli._registrations) once chosen, and
-    standing but on panoramas nothing checks (their poses unsure: the matrix holds better)."""
+    standing but on panoramas nothing checks (their poses unsure: the matrix holds better); an
+    answer fitted in parallax on the page standing as fitted (`page_standing`)."""
     found = {
-        k: Placed(k, CHECKED, "page", a["registration"], a["inputs"], flipped=a["flipped"])
+        k: Placed(
+            k,
+            CHECKED,
+            "page",
+            a["registration"],
+            a["inputs"],
+            flipped=a["flipped"],
+            standing=page_standing(a),
+        )
         for k, a in answers.items()
     }
     kept = {

@@ -2949,3 +2949,23 @@ def test_a_photo_shown_from_a_proposal_said_yes_to_has_no_copy_standing(monkeypa
     drawn = cli._copies_drawn(held, carried)
 
     assert made == [] and drawn["pm:1"] == carried["pm:1"]["copies"]
+
+
+def test_a_camera_fitted_on_the_placing_page_is_placed_from_its_panorama(monkeypatch):
+    origin = (10.0, 20.0, 35.0)
+    monkeypatch.setattr(
+        cli, "_standing_home", lambda p: cli._Home(None, facades.Scene(p, origin, 32.5, (), (), 8))
+    )
+    camera = {
+        "position": [11.0, 20.5, 35.2],
+        "turn": [0.1, 0.2, 0.3],
+        "focal": 700.0,
+        "shift": [0, 0],
+        "size": [60, 80],
+    }
+    answer = {"registration": {"panorama": "q"}, "standing": {"camera": camera, "metres": []}}
+
+    stands = cli._page_standing(answer)
+
+    assert stands == {**camera, "position": [1.0, 0.5, 0.2]}
+    assert cli._page_standing({"registration": {"panorama": "q"}}) is None  # fitted flat

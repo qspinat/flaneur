@@ -4,7 +4,7 @@
 // A photo whose camera stood off the panorama (see standing.ts) is laid on the walls around it.
 import type { Viewer } from '@photo-sphere-viewer/core';
 import * as THREE from 'three';
-import { HIDDEN, NEAREST_M, ROOFS_PAST_M, STREET_REACH_M, lensTurn, reach, standingAt, type Standing, type WallRow } from './standing';
+import { HIDDEN, NEAREST_M, ROOFS_PAST_M, STREET_REACH_M, STRETCHED, lensTurn, reach, standingAt, type Standing, type WallRow } from './standing';
 import { cameraAxes, yawOf, type OldPhoto, type Panorama, type Shown } from './walk3d';
 
 const DISTANCE = 5; // inside the viewer's sphere (radius 10)
@@ -34,7 +34,6 @@ void main() {
 }`;
 
 const MOST_WALLS = 48; // the walls a photo is laid on (the pipeline's scene.MOST_WALLS)
-const STRETCHED = 6; // a part of the photo laid this many times larger than the photo as a whole: smeared
 const FAR_M = 1000; // a ray of the photo meeting nothing, framed as this far
 const FRAMED = 8; // the photo's rays framing where it is laid: this many steps across, each way
 const MARGIN = 0.15; // and that frame widened by this share each way: a ray between them may go farther
@@ -82,17 +81,21 @@ float toWall(vec3 from, vec3 d, bool roofless, float before, bool first) {
   return nearest;
 }
 
-float reach(vec3 d) {
+// sky: met over the roofs (a backdrop at the wall's distance), or not at all
+float reach(vec3 d, out bool sky) {
+  sky = false;
   float wall = toWall(vec3(0.0), d, false, NONE, false);
   if (wall < NONE) return wall;
   float street = d.z < 0.0 ? ground / d.z : NONE;
   if (street > 0.0 && street <= ${STREET_REACH_M.toFixed(1)}) return street;
+  sky = true;
   return d.z > 0.0 ? toWall(vec3(0.0), d, true, NONE, false) : NONE;
 }
 
 void main() {
   vec3 d = normalize(toWorld * here);
-  float metres = reach(d);
+  bool sky;
+  float metres = reach(d, sky);
   vec3 seen = lensTurn * d;
   if (metres < NONE) seen += fromCamera / metres;
   vec2 px = seen.xy / seen.z;
@@ -104,7 +107,8 @@ void main() {
   float square = dot(dx, dx) + dot(dy, dy);
   float det = dx.x * dy.y - dx.y * dy.x;
   float least = sqrt(max(square - sqrt(max(square * square - 4.0 * det * det, 0.0)), 0.0) / 2.0);
-  float kept = smoothstep(0.5, 1.0, least * ${STRETCHED.toFixed(1)} / (density * length(dFdx(d))));
+  // (not the sky: where two walls' backdrops meet, the photo folds there, a line, not a smear)
+  float kept = sky ? 1.0 : smoothstep(0.5, 1.0, least * ${STRETCHED.toFixed(1)} / (density * length(dFdx(d))));
   if (seen.z <= 0.0 || kept <= 0.0) discard;
   vec2 uv = px / size.yx;
   if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) discard;
@@ -171,8 +175,9 @@ export class PhotoLayer {
         kind = 'standing';
         const laid = footprint(standing, kr, walls, ground);
         geometry = quad(laid.map((d) => d.clone().applyMatrix3(fromWorld)), MARGIN) ?? around();
-        uniforms = { ...standingUniforms(standing, kr, walls, ground, toWorld), density: { value: density(laid, standing) } };
-        at = (direction) => standingAt(direction.clone().applyMatrix3(toWorld).normalize().toArray(), standing, walls, ground);
+        const across = density(laid, standing);
+        uniforms = { ...standingUniforms(standing, kr, walls, ground, toWorld), density: { value: across } };
+        at = (direction) => standingAt(direction.clone().applyMatrix3(toWorld).normalize().toArray(), standing, walls, ground, across);
       } else {
         // from the photo's [0, 1]² to the viewer's frame, and back
         const fromPhoto = fromWorld.clone().multiply(rows(a.flat()).transpose()).multiply(rows(registration.m));

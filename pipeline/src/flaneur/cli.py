@@ -3299,7 +3299,7 @@ def _placed_photos(write: bool = False, answering: tuple | None = None) -> dict[
     for k, p in _proposed_now(scenes, judged, marks=False).items():
         if judged.said_yes(k, p) and not (k in matched and matched[k].verdict == "yes"):
             matched[k] = weighed(k, p)  # the user's yes wins over a placement not judged
-    found = placed.build(_on_image_now(answers), far, matched, _registrations)
+    found = placed.build(_on_image_now(answers), far, matched, _registrations, _page_standing)
     rows = {k: asdict(p) for k, p in found.items()}
     if write and rows != register.load(PLACED_PHOTOS):
         write_json(PLACED_PHOTOS, rows)
@@ -3423,6 +3423,18 @@ def _registered_shown(row: dict) -> placed.Registered:
     """A placement's registration, and its standing camera where that lays the photo better
     than the flat fit (held out, see placing.stood_against_flat)."""
     return placed.Registered(row.get("registration"), _standing_drawn(row.get("standing") or {}))
+
+
+def _page_standing(answer: dict) -> dict | None:
+    """The camera where the photographer stood of an answer fitted in parallax on the placing
+    page (see placings.standing_of: moved with its panorama), placed from that panorama as the
+    3D walk takes it (see _standing_as: the page's heights are the walls'); none fitted flat or
+    on a panorama without walls."""
+    camera = (answer.get("standing") or {}).get("camera")
+    if camera is None or (home := _standing_home(answer["registration"]["panorama"])) is None:
+        return None
+    off = [round(a - b, 3) for a, b in zip(camera["position"], home.scene.origin, strict=True)]
+    return {**camera, "position": off}
 
 
 def _standing_walls(panorama: str) -> facades.Scene | None:
