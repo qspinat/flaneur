@@ -2159,6 +2159,10 @@ def _copies(tmp_path, monkeypatch, walls: dict, stood: dict) -> list:
     home); the walls around every panorama (`walls`: their top); the copies' standing cameras
     made by `stood` ((photo, panorama): (flat, parallax, held)); what was stood, in order."""
     monkeypatch.setattr(cli, "CARRIED_STANDING", tmp_path / "carried_standing.json")
+    monkeypatch.setattr(cli, "REGISTERED", tmp_path / "registered.json")
+    cli.write_json(
+        cli.REGISTERED, {k: {"made": cli._registered_as(_kept())} for k in ("pm:1", "pm:flat")}
+    )
     origin = (10.0, 20.0, 35.0)
 
     def home(panorama):
@@ -2933,3 +2937,15 @@ def test_a_copy_is_drawn_standing_while_its_walls_hold_and_where_it_stands_bette
     assert drawn["pm:1"][0]["standing"]["position"] == [1.0, 0.5, 0.2]
     assert not any("standing" in c for c in later["pm:1"])
     assert drawn["pm:flat"] == carried["pm:flat"]["copies"]
+
+
+def test_a_photo_shown_from_a_proposal_said_yes_to_has_no_copy_standing(monkeypatch, tmp_path):
+    stood = {("pm:1", p): (0.006, 0.003, 30) for p in "ab"}
+    made = _copies(tmp_path, monkeypatch, {"top": 40.0}, stood)
+    held, carried = _held_and_carried()
+    monkeypatch.setattr(cli, "_matches", lambda: {"pm:1": {"inputs": "i", "tried": 3}})  # unplaced
+
+    cli._copies_standing(held, carried)
+    drawn = cli._copies_drawn(held, carried)
+
+    assert made == [] and drawn["pm:1"] == carried["pm:1"]["copies"]

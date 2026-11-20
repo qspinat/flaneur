@@ -3907,8 +3907,9 @@ def _photo_store() -> chain.Store:
 
 @functools.cache
 def _copying_code() -> str:
-    """The code a copy's own pairs are found by, hashed."""
-    made = (_stand_one, _matched_again, _copies_standing)
+    """The code a copy's own pairs and standing camera are found by, hashed (not the code
+    that only chooses which copies or writes them: changing it refits nothing)."""
+    made = (_stand_one, _matched_again)
     return _digest([inspect.getsource(f) for f in made] + [_hash_of(carrying, bridging)])
 
 
@@ -3917,36 +3918,42 @@ def _copy_standing(kept: dict) -> dict | None:
     return _standing_drawn(kept, COPY_GAIN, COPY_HELD)
 
 
-def _copy_made(carried: dict, copy: dict, placement: dict, walls: str) -> str:
+def _copy_made(carried: dict, copy: dict, registered_as: str, walls: str) -> str:
     """What a copy's standing camera is made from (see _copies_standing): the photo as carried
-    (`carried`: its row, see _answered_as), the copy, the placement of match, the walls of its
-    panorama (see _walls_of), the code, and the least held-out pairs a camera is fitted on
-    (the gain is judged on reading)."""
-    made = [copy["registration"], _registered_as(placement), walls, _copying_code(), COPY_HELD]
+    (`carried`: its row, see _answered_as), the copy, the placement of match (as registered:
+    see _registered_as), the walls of its panorama (see _walls_of), the code, and the least
+    held-out pairs a camera is fitted on (the gain is judged on reading)."""
+    made = [copy["registration"], registered_as, walls, _copying_code(), COPY_HELD]
     return _digest([carried["made"], *made])
 
 
 def _copies_to_stand(
     held: dict[str, dict], carried: dict[str, dict], placements: dict[str, dict]
-) -> Iterator[tuple[str, str, dict, Callable[[], str]]]:
-    """The copies that may stand (see _copies_standing): those of a placement of match standing
-    in its home panorama (`held`), on a panorama with walls; each with what its camera is made
-    from (see _copy_made: worked out when asked, the walls read once a panorama)."""
+) -> Iterator[tuple[str, int, str, dict, Callable[[], str | None]]]:
+    """The copies that may stand (see _copies_standing): those of a photo standing in its home
+    panorama (`held`) as match placed it (`placements`, as registered: not a camera proposed
+    and said yes to); each with its place among the photo's copies and what its camera is made
+    from (see _copy_made: worked out when asked, the walls read once a panorama; none for a
+    panorama without walls)."""
+    registered = register.load(REGISTERED)
     walls = functools.cache(
         lambda panorama: _walls_of(home) if (home := _standing_home(panorama)) else None
     )
     for photo_id, row in held.items():
-        if not row.get("standing") or photo_id not in carried or photo_id not in placements:
+        placement = placements.get(photo_id) or {}
+        if not row.get("standing") or photo_id not in carried or "x" not in placement:
             continue
-        for copy in carried[photo_id]["copies"]:
+        registered_as = _registered_as(placement)
+        if registered.get(photo_id, {}).get("made") != registered_as:  # shown otherwise
+            continue
+        for at, copy in enumerate(carried[photo_id]["copies"]):
             panorama = copy["registration"]["panorama"]
-            if walls(panorama) is None:
-                continue
 
-            def made(photo_id=photo_id, copy=copy, panorama=panorama) -> str:
-                return _copy_made(carried[photo_id], copy, placements[photo_id], walls(panorama))
+            def made(photo_id=photo_id, copy=copy, panorama=panorama, registered_as=registered_as):
+                around = walls(panorama)
+                return around and _copy_made(carried[photo_id], copy, registered_as, around)
 
-            yield photo_id, panorama, copy, made
+            yield photo_id, at, panorama, copy, made
 
 
 def _copies_drawn(shown: dict[str, dict], carried: dict[str, dict]) -> dict[str, list[dict]]:
@@ -3955,12 +3962,11 @@ def _copies_drawn(shown: dict[str, dict], carried: dict[str, dict]) -> dict[str,
     _copy_standing) and was made from what the copy and its panorama's walls are now; else its
     matrix (a wall drawn since: until the next night)."""
     drawn = {i: list(c["copies"]) for i, c in carried.items()}
-    if not (kept := register.load(CARRIED_STANDING)):
+    if not (stood := register.load(CARRIED_STANDING)):
         return drawn
-    for photo_id, panorama, copy, made in _copies_to_stand(shown, carried, _matches()):
-        found = kept.get(photo_id, {}).get(panorama)
+    for photo_id, at, panorama, copy, made in _copies_to_stand(shown, carried, _matches()):
+        found = stood.get(photo_id, {}).get(panorama)
         if found and (camera := _copy_standing(found)) and found["made"] == made():
-            at = carried[photo_id]["copies"].index(copy)
             drawn[photo_id][at] = {**copy, "standing": camera}
     return drawn
 
@@ -3978,8 +3984,9 @@ def _copies_standing(held: dict[str, dict], carried: dict[str, dict]) -> None:
     kept = _matches()
     out: dict[str, dict] = {}
     todo = []
-    for photo_id, panorama, copy, made in _copies_to_stand(held, carried, kept):
-        now = made()
+    for photo_id, _, panorama, copy, made in _copies_to_stand(held, carried, kept):
+        if (now := made()) is None:  # no walls there
+            continue
         if (before := was.get(photo_id, {}).get(panorama)) and before["made"] == now:
             out.setdefault(photo_id, {})[panorama] = before
         else:
