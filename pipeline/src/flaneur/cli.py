@@ -3954,7 +3954,7 @@ def _matched_again(
     """The photo (its features as matching reads them) matched against a view of `sphere`
     framed on its copy there (see carrying.framed), shown at placing.SHOWN: the pairs that agree
     on one flat warp, the view, the photo's size; none from fewer than MIN_MATCHED."""
-    mine = _features(chain.Store(MATCHERS[DISK].photos, None), photo_id)
+    mine = _features(chain.Store(MATCHERS[DISK].photos, _carrying_views().matcher), photo_id)
     picture = _picture(sphere.path)
     if mine is None or picture is None:
         return None

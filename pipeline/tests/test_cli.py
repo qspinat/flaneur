@@ -2845,3 +2845,14 @@ def test_a_lidar_patch_that_cannot_be_read_keeps_the_panorama_where_it_stands(mo
     monkeypatch.setattr(cli.poses, "in_street", broken)
 
     assert cli._in_street_or_not(None)(1.0, 2.0) is False
+
+
+def test_a_photo_matched_again_has_its_features_extracted_when_not_kept(monkeypatch):
+    matcher = object()
+    monkeypatch.setattr(cli, "_carrying_views", lambda: SimpleNamespace(matcher=matcher))
+    stores = []
+    monkeypatch.setattr(cli, "_features", lambda store, photo_id: stores.append(store))
+
+    cli._matched_again("pm:1", None, SimpleNamespace(path="p.jpg"))
+
+    assert stores[0].matcher is matcher  # not None: it could not extract them
