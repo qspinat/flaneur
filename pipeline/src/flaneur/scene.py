@@ -8,7 +8,7 @@ import numpy as np
 from shapely.geometry import Point, shape
 from shapely.geometry.base import BaseGeometry
 
-from flaneur import buildings, panoramas
+from flaneur import buildings, panoramas, placed
 from flaneur.blocks import MOST_PAIRS
 from flaneur.export import WalkPhoto, image_name, panoramax_credit
 from flaneur.panoramas import PANORAMA_HEIGHT_M
@@ -154,10 +154,7 @@ def build3d(
                 "image": image_name(me.id),
                 "flipped": row["flipped"],
                 "shown": where,
-                **{
-                    k: row[k]
-                    for k in ("status", "unchecked_area", "proposed_marks", "unsure_sources")
-                },
+                **{k: row[k] for k in ("status", *placed.NOTES)},
             }
         )
     ways = panoramas.links(pictures)

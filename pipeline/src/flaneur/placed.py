@@ -7,8 +7,8 @@ from dataclasses import asdict, dataclass
 from flaneur import bridging, match, placing, registration
 
 CHECKED, NEAR, AUTOMATIC = "checked", "near", "automatic"  # said yes or placed by hand; near
-TRUSTED_SHARE = 0.5  # of a placement's sightings by sure panoramas: less, it says so (plan
-# sources-de-confiance, 20/11: under it, "no" 32 % of 25 judged; over, 13 % of 31)
+TRUSTED_SHARE = 0.5  # of a placement's sightings by sure panoramas: under it, it says so
+NOTES = ("unchecked_area", "proposed_marks", "unsure_sources")  # what one not seen yet may say
 
 
 def status_of(verdict: str | None) -> str | None:
@@ -48,14 +48,14 @@ class Matched:
     """A placement of match as the photo is now, as the list weighs it: as kept (`placement`),
     the user's word on it (`verdict`, none yet), the photo's image now (its hash), whether its
     matcher passes the check in its area, its landmarks' marks ("checked", "proposed", none),
-    the share of its points' sightings by sure panoramas (see trusted_share; none: not known)."""
+    whether it rests mostly on panoramas nothing checks (see unsure)."""
 
     placement: dict
     verdict: str | None
     image: str
     area_checked: bool
     marks: str | None = None
-    trusted_share: float | None = None
+    unsure_sources: bool = False
 
 
 def build(
@@ -87,19 +87,16 @@ def build(
             m.image,
             unchecked_area=not (seen or m.area_checked),
             proposed_marks=not seen and m.marks == "proposed",
-            unsure_sources=not seen
-            and m.trusted_share is not None
-            and m.trusted_share < TRUSTED_SHARE,
+            unsure_sources=not seen and m.unsure_sources,
         )
     return found
 
 
-def trusted_share(points: match.Points, trusted: Set[str], panoramas: Set[str]) -> float | None:
-    """The share of a placement's sightings (a point seen by a panorama: one) by `trusted`
-    panoramas (the survey's, COLMAP's), among those by `panoramas` (old photos left out); none
-    when no panorama saw any."""
+def unsure(points: match.Points, sure: Set[str], panoramas: Set[str]) -> bool:
+    """Whether under TRUSTED_SHARE of a placement's sightings (a point seen by one of
+    `panoramas`: one; old photos left out) are by `sure` panoramas; not when none saw any."""
     seen = [i for s in points.seen for i in s if i in panoramas]
-    return sum(i in trusted for i in seen) / len(seen) if seen else None
+    return bool(seen) and sum(i in sure for i in seen) < TRUSTED_SHARE * len(seen)
 
 
 def registered(

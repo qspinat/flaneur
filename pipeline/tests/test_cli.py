@@ -2078,7 +2078,7 @@ def test_the_placed_list_is_written_from_the_answers_verdicts_and_matches(monkey
         "_image": lambda photo_id: "h",
         "_registrations": lambda standing: {k: {"panorama": "p"} for k in standing},
         "_kept_store": lambda m, kept: (SimpleNamespace(points=lambda k, i: seen_by.get(k)), "i"),
-        "_sure_panoramas": lambda: ({"sure", "gps"}, {"sure"}),  # known, sure of their pose
+        "_sure_panoramas": lambda: ({"sure"}, {"sure", "gps"}),  # sure of their pose, known
     }.items():
         monkeypatch.setattr(cli, name, value)
     seen_by = {"pm:3": _seen_by({"sure"}, {"gps"}), "pm:4": _seen_by({"gps"}, {"gps", "photo:x"})}

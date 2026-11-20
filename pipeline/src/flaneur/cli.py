@@ -1744,10 +1744,17 @@ class _Run(NamedTuple):
     judged: "_Judged"
 
 
+def _pictures_fixed() -> tuple[list[panoramas.Picture], set[str]]:
+    """The panoramas known, and those COLMAP placed itself, as recorded now (see
+    _fixed_by_colmap)."""
+    with closing(db.connect(DB_PATH)) as conn:
+        pictures = panoramas.load(conn)
+    return pictures, _fixed_by_colmap(pictures, register.load(FIXES))
+
+
 def _colmap_fixed() -> set[str]:
     """The panoramas COLMAP placed itself, as recorded now (see _fixed_by_colmap)."""
-    with closing(db.connect(DB_PATH)) as conn:
-        return _fixed_by_colmap(panoramas.load(conn), register.load(FIXES))
+    return _pictures_fixed()[1]
 
 
 def _match_with(matcher: str, photos: list[export.WalkPhoto], at: _Run) -> None:
@@ -3191,13 +3198,10 @@ SURVEY_PRODUCER = "Immergis pour la Ville de Paris"  # the survey: panoramas sur
 
 
 def _sure_panoramas() -> tuple[set[str], set[str]]:
-    """The panoramas known, and those sure of their pose: the survey's and those COLMAP placed
-    (see placed.trusted_share)."""
-    with closing(db.connect(DB_PATH)) as conn:
-        pictures = panoramas.load(conn)
-    fixed = _fixed_by_colmap(pictures, register.load(FIXES))
+    """The panoramas sure of their pose (the survey's, COLMAP's), and all those known."""
+    pictures, fixed = _pictures_fixed()
     survey = {p.id for p in pictures if p.producer == SURVEY_PRODUCER}
-    return {p.id for p in pictures}, survey | fixed
+    return survey | fixed, {p.id for p in pictures}
 
 
 def _placed_photos(write: bool = False, answering: tuple | None = None) -> dict[str, placed.Placed]:
@@ -3212,14 +3216,9 @@ def _placed_photos(write: bool = False, answering: tuple | None = None) -> dict[
     marks = marking.states(SIGHTS)
     sure = functools.cache(_sure_panoramas)  # read once, if a placement has its points
 
-    def share(k: str, m: dict) -> float | None:
-        if _is_proposal(m["inputs"]):  # a camera proposed: no points kept
-            return None
-        at = _kept_store(_situation(m), m)
-        if at is None or (points := at[0].points(k, at[1])) is None:
-            return None
-        known, trusted = sure()
-        return placed.trusted_share(points, trusted, known)
+    def unsure(k: str, m: dict) -> bool:
+        points = _points_of(k, _situation(m), m)
+        return points is not None and placed.unsure(points, *sure())
 
     def weighed(k: str, m: dict) -> placed.Matched:
         said, image = judged.on(k, m), _image(k)
@@ -3233,7 +3232,7 @@ def _placed_photos(write: bool = False, answering: tuple | None = None) -> dict[
             image,
             (m.get("matcher") or DISK) in area,
             mark if marked_on == image else None,
-            share(k, m),
+            unsure(k, m),
         )
 
     matched = {

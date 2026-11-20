@@ -142,15 +142,13 @@ def test_an_automatic_one_says_whether_its_area_passes_and_its_marks_are_checked
     assert (seen.unchecked_area, seen.proposed_marks) == (False, False)  # notes: for unseen
 
 
-def test_an_automatic_one_says_whether_it_rests_on_panoramas_nothing_checks():
-    def unsure(share, verdict=None):
-        m = placed.Matched({"x": 0.0}, verdict, "img", True, None, trusted_share=share)
+def test_an_automatic_one_not_seen_says_it_rests_on_panoramas_nothing_checks():
+    def note(unsure, verdict=None):
+        m = placed.Matched({"x": 0.0}, verdict, "img", True, None, unsure_sources=unsure)
         return _build({"x": m})["x"].unsure_sources
 
-    assert unsure(0.0) and unsure(0.49)
-    assert not unsure(0.5)  # half of its points seen by sure panoramas: enough
-    assert not unsure(0.0, "near")  # seen by the user: the note is for those not seen
-    assert not unsure(None)  # its points not known (a camera proposed): nothing said
+    assert note(True) and not note(False)
+    assert not note(True, "near")  # seen by the user: the note is for those not seen
 
 
 def _points_seen_by(*seen) -> match.Points:
@@ -158,11 +156,17 @@ def _points_seen_by(*seen) -> match.Points:
     return match.Points(np.zeros((n, 2)), np.zeros((n, 3)), np.array(seen, dtype=object))
 
 
-def test_the_share_of_sightings_by_sure_panoramas_leaves_old_photos_out():
-    points = _points_seen_by({"sure", "gps"}, {"gps"}, {"gps", "photo:x"}, {"photo:y"})
+def test_a_placement_is_unsure_under_half_its_sightings_by_sure_panoramas():
+    known = {"sure", "gps"}
+    quarter = _points_seen_by({"sure", "gps"}, {"gps"}, {"gps", "photo:x"}, {"photo:y"})
+    half = _points_seen_by({"sure"}, {"gps"}, {"photo:x"})
 
-    assert placed.trusted_share(points, {"sure"}, {"sure", "gps"}) == pytest.approx(1 / 4)
-    assert placed.trusted_share(_points_seen_by({"photo:y"}), {"sure"}, {"sure"}) is None
+    assert placed.unsure(quarter, {"sure"}, known)  # 1 of 4 sightings: old photos left out
+    assert not placed.unsure(half, {"sure"}, known)
+
+
+def test_a_placement_no_panorama_saw_is_not_said_unsure():
+    assert not placed.unsure(_points_seen_by({"photo:y"}), {"sure"}, {"sure"})
 
 
 def test_points_bunched_on_one_part_of_the_photo_still_register_it_whole():
