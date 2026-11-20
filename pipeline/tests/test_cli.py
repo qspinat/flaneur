@@ -2533,3 +2533,63 @@ def test_a_registration_that_fails_leaves_the_others_and_is_tried_again(monkeypa
 def test_no_test_watches_or_reads_the_pipeline_s_answers(tmp_path):
     assert all(path.is_relative_to(tmp_path) for path in cli.ANSWER_FILES)
     assert cli._placing_answers.__defaults__[0] is None  # PLACINGS, read when called
+
+
+def _picture(i: str, lon: float, azimuth: float = 90.0):
+    from flaneur.panoramax import Picture
+
+    return Picture(i, lon, 48.853, azimuth, True, "2025-07-10", "", "")
+
+
+def test_survey_corrections_are_read_once_applied_where_the_panorama_still_stands(monkeypatch):
+    from flaneur import survey
+
+    pictures = [_picture("v", 2.3450), _picture("moved", 2.3460), _picture("s", 2.3470)]
+    where = cli._standing(pictures)
+    found = {
+        "v": survey.SetRight(10.0, (1.0, -2.0), 1, 2),
+        "moved": survey.SetRight(10.0, None, 1, 2),
+    }
+    judged = {**where, "moved": (0.0, 0.0, 0.0)}  # set right where it no longer stands
+    survey.save(cli.SURVEYED, found, judged)
+
+    monkeypatch.setattr(survey, "APPLIED", "none")
+    off = cli._placed(pictures)
+    monkeypatch.setattr(survey, "APPLIED", "all")
+    on = {p.id: p for p in cli._placed(pictures)}
+
+    assert [p.azimuth for p in off] == [90.0, 90.0, 90.0]  # switched off: none
+    assert on["v"].azimuth == pytest.approx(80.0)  # turned counter-clockwise: the compass back
+    assert cli._standing([on["v"]])["v"][:2] == pytest.approx(
+        (where["v"][0] + 1.0, where["v"][1] - 2.0), abs=0.02
+    )
+    assert (on["moved"].azimuth, on["s"].azimuth) == (90.0, 90.0)
+
+
+def test_the_night_sets_panoramas_right_on_the_survey_first_then_segments():
+    assert cli.NIGHT_STEPS[:2] == (("releve",), ("segmenter",))
+
+
+def test_bd_topo_corrects_nothing_the_survey_answered(monkeypatch):
+    from flaneur import survey
+
+    pictures = [_picture("v", 2.3450), _picture("bd", 2.3460)]
+    where = cli._standing(pictures)
+    survey.save(cli.SURVEYED, {"v": survey.SetRight(0.5, None, 1, 2)}, where)  # found right
+    turned = poses.Correction(0.0, 0.0, 8.0)
+    poses.save(cli.POSES, {i: poses.Verdict(turned, turned, 400, where[i]) for i in ("v", "bd")})
+    monkeypatch.setattr(survey, "APPLIED", "all")
+    monkeypatch.setattr(poses, "APPLIED", "all")
+
+    placed = {p.id: p.azimuth for p in cli._placed(pictures)}
+
+    assert placed == {"v": 90.0, "bd": pytest.approx(82.0)}
+
+
+def test_a_lidar_patch_that_cannot_be_read_keeps_the_panorama_where_it_stands(monkeypatch):
+    def broken(x, y, folder, client):
+        raise cli.httpx.ConnectError("no network")
+
+    monkeypatch.setattr(cli.poses, "in_street", broken)
+
+    assert cli._in_street_or_not(None)(1.0, 2.0) is False

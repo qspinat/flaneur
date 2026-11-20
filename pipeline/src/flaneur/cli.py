@@ -72,6 +72,7 @@ from flaneur import (
     scene,
     segment,
     stats,
+    survey,
 )
 from flaneur.addresses import Addresses
 from flaneur.blocks import Blocks
@@ -91,6 +92,7 @@ SEEDED = DATA / "pilot" / "seeded"
 REVIEWS = DATA / "overrides" / "reviews.jsonl"
 SIGHTS = DATA / "overrides" / "sights.jsonl"  # the landmarks marked in photos, by hand
 CORRECTIONS = DATA / "pilot" / "panorama_corrections.json"  # on the buildings (register): unused
+SURVEYED = DATA / "pilot" / "panorama_survey.json"  # volunteers' panoramas set right on the survey
 POSES = DATA / "pilot" / "panorama_poses.json"  # panoramas set right on two surveys (see poses)
 VIEW_STRUCTURE = (  # each panorama's views' pixel classes (see segment), as views are cut now
     DATA / "raw" / "view_structure" / f"{match.VIEW_SIDE}_{match.VIEW_FOV}_{match.VIEW_PITCH}"
@@ -426,11 +428,34 @@ def _placed(pictures: list[Picture], corrected: bool = True) -> list[Picture]:
     fixes = register.load(FIXES)
     found = {i: tuple(fixes[i]["fix"]) for i in _fixed_by_colmap(pictures, fixes)}
     placed = register.applied(pictures, reconstruct.borrowed(found, pictures))
-    if not corrected or poses.APPLIED == "none":
+    if not corrected:
         return placed
-    verdicts = poses.load(POSES)
+    placed = register.applied(placed, _survey_fixes(placed))
+    if poses.APPLIED == "none":
+        return placed
+    answered = _answered_by_survey(placed)
+    verdicts = {i: v for i, v in poses.load(POSES).items() if i not in answered}
     where = _standing([p for p in placed if p.id in verdicts])
     return register.applied(placed, poses.to_apply(verdicts, where, poses.APPLIED))
+
+
+def _survey_fixes(pictures: list[Picture]) -> dict[str, tuple[float, float, float]]:
+    """The volunteers' panoramas set right on the survey (`flaneur releve`) still standing where
+    they were, as register.applied takes them (survey.APPLIED of it)."""
+    if survey.APPLIED == "none":
+        return {}
+    rows = survey.load(SURVEYED)
+    where = _standing([p for p in pictures if p.id in rows])
+    standing = {i: f for i, (f, placed) in rows.items() if poses.stands(placed, where.get(i))}
+    return survey.fixes(standing, survey.APPLIED)
+
+
+def _answered_by_survey(pictures: list[Picture]) -> set[str]:
+    """The panoramas the survey speaks for (applied): its own, and those it set right or found
+    right — BD TOPO's corrections are not theirs."""
+    if survey.APPLIED == "none":
+        return set()
+    return set(survey.load(SURVEYED)) | {p.id for p in pictures if p.producer == survey.PRODUCER}
 
 
 class _NotRead(Exception):
@@ -3783,6 +3808,71 @@ def _within(answers: Path, reach: float, corrected: bool = True) -> list[match.P
     return [spheres[i] for i in np.argsort(nearest) if nearest[i] <= reach]
 
 
+def _in_street_or_not(client: httpx.Client | None) -> Callable[[float, float], bool]:
+    """Whether a place is in the street (see poses.in_street); a LiDAR patch that cannot be
+    read (network, an answer not understood): not, the panorama left where it stands."""
+
+    def in_street(x: float, y: float) -> bool:
+        try:
+            return poses.in_street(x, y, LIDAR_MNS, client)
+        except (httpx.HTTPError, ValueError) as error:
+            typer.echo(f"LiDAR illisible en {x:.0f}, {y:.0f} : laissé en place ({error})", err=True)
+            return False
+
+    return in_street
+
+
+@app.command("releve")
+def set_on_survey() -> None:
+    """Remet d'aplomb les panoramas des bénévoles sur ceux du relevé (Immergis pour la Ville de
+    Paris), par les paires déjà faites (sans apparieur) : un bénévole vu par des panoramas du
+    relevé qui s'accordent prend leur cap, et sa place où leurs directions se croisent ; remis
+    sur deux références ou plus, il passe sa correction, jusqu'à quatre sauts. Un déplacement de
+    plus de 5 m n'est gardé que si le LiDAR met la nouvelle place dans la rue. Jugés tels que
+    COLMAP les a laissés (une fois appliquées, les paires d'un panorama tourné sont rangées sous
+    son nom tourné : un bénévole arrivé depuis ne passe plus par lui) ; écrit
+    data/pilot/panorama_survey.json, lu selon survey.APPLIED (après la mesure E du plan)."""
+    spheres, segments = _placing_world(corrected=False)
+    with closing(db.connect(DB_PATH)) as conn:
+        pictures = panoramas.load(conn)
+    producer = {p.id: p.producer for p in pictures}
+    fixed = _fixed_by_colmap(pictures, register.load(FIXES))
+    scenes = _Scenes(spheres, fixed, _no_matcher, threading.Lock(), segments, WALLS)
+    by_id = {p.id: p for p in spheres}
+
+    @functools.cache  # each pair fitted once a run, though asked each round
+    def seen(home: str, other: str) -> survey.Seen | None:
+        h, o = by_id[home], by_id[other]
+        if not scenes._made(h, o):  # pairs on disk only
+            return None
+        rays_h, rays_o = scenes._rays(h, o)
+        pair = (
+            depth.set_right(placing._at(h), placing._at(o), rays_h, rays_o) if len(rays_h) else None
+        )
+        if pair is None:
+            return None
+        turn = np.asarray(pair.turn)
+        at = np.asarray(pair.at)
+        return survey.Seen(math.degrees(math.atan2(turn[1, 0], turn[0, 0])), (at[0], at[1]))
+
+    @functools.cache
+    def neighbours(i: str) -> list[str]:
+        return [p.id for p in depth.candidates(by_id[i], spheres, fixed)]
+
+    refs = {p.id: (p.x, p.y) for p in spheres if producer.get(p.id) == survey.PRODUCER}
+    others = {p.id: (p.x, p.y) for p in spheres if p.id not in refs}
+    with httpx.Client() as client:
+        found = survey.set_right(refs, others, neighbours, seen, _in_street_or_not(client))
+    survey.save(SURVEYED, found, {p.id: poses.at(p.x, p.y, p.azimuth) for p in spheres})
+    turned = survey.fixes(found, "all")
+    hops = Counter(f.hops for f in found.values())
+    moved = sum(1 for f in turned.values() if f[:2] != (0.0, 0.0))
+    typer.echo(f"{len(found)} panoramas de bénévoles remis sur le relevé")
+    typer.echo("  " + ", ".join(f"{n} à {h} saut(s)" for h, n in sorted(hops.items())))
+    typer.echo(f"  tournés de plus de {survey.LEAST_TURN_DEG:g}° : {len(turned)}, déplacés {moved}")
+    typer.echo(f"  appliqués : {survey.APPLIED} (survey.APPLIED)")
+
+
 @app.command("segmenter")
 def segment_panoramas(answers: Path = PLACINGS, page: int = 8772) -> None:
     """Segmente d'avance (bâti, végétation, ciel...) les panoramas que la page pour placer peut
@@ -4340,6 +4430,7 @@ ANSWER_FILES = (ANCHORS, PLACINGS, SIGHTS, REVIEWS)  # the answers the light upd
 WATCH_S, QUIET_S = 5, 10  # answers looked at every WATCH_S; the update once QUIET_S calm
 REFRESH_LOCK = DATA / "pilot" / ".mise-a-jour.lock"  # one light update at a time
 NIGHT_STEPS = (  # each in its own process (one model in memory at a time), in this order
+    ("releve",),  # first: views, pairs and walls follow where the panoramas stand
     ("segmenter",),
     ("murs", "--masques"),
     ("murs",),
