@@ -2949,3 +2949,81 @@ def test_a_photo_shown_from_a_proposal_said_yes_to_has_no_copy_standing(monkeypa
     drawn = cli._copies_drawn(held, carried)
 
     assert made == [] and drawn["pm:1"] == carried["pm:1"]["copies"]
+
+
+def _rays(n: int) -> match.Rays:
+    return match.Rays(
+        np.arange(n),
+        np.full(n, "p", dtype=object),
+        np.zeros((n, 3)),
+        np.tile([0.0, 1.0, 0.0], (n, 1)),
+        np.full((n, 3), np.nan),
+        np.full((n, 6), np.nan),
+    )
+
+
+def test_a_photo_checked_keeps_only_rays_too_few_for_match_alone(monkeypatch):
+    camera = match.Camera(1.0, 2.0, 1.5, 90.0, 0.5, 60.0, agree=30, panoramas=2)
+    placed = lambda observed, where, trace, *more: match.Found(  # noqa: E731
+        camera if len(observed.rays.keys) >= 100 else None, np.zeros((0, 6)), None
+    )
+    monkeypatch.setattr(cli.match, "place", placed)
+    observed = match.Observed(np.zeros((800, 2)), (60, 80), _rays(800), 1)
+
+    cut = cli._degraded(observed, None, np.random.default_rng(0))
+
+    assert 50 <= len(cut.rays.keys) < 100  # halved until match alone no longer places it
+    assert set(cut.rays.keys) <= set(range(800))
+
+
+def test_a_photo_match_still_places_from_a_few_rays_is_left_out_of_the_check(monkeypatch):
+    camera = match.Camera(1.0, 2.0, 1.5, 90.0, 0.5, 60.0, agree=30, panoramas=2)
+    monkeypatch.setattr(
+        cli.match, "place", lambda observed, where, trace, *more: match.Found(camera, None, None)
+    )
+    observed = match.Observed(np.zeros((40, 2)), (60, 80), _rays(40), 1)
+
+    assert cli._degraded(observed, None, np.random.default_rng(0)) is None
+
+
+def test_photos_checked_together_stand_in_the_same_block():
+    assert cli._check_fold(652060.0, 6861010.0) == cli._check_fold(652190.0, 6861140.0)
+    folds = {cli._check_fold(652000.0 + 150 * i, 6861000.0) for i in range(40)}
+    assert folds == set(range(cli.CHECK_FOLDS))
+
+
+def test_the_check_hides_its_photos_and_sets_each_decoy_where_another_stands():
+    view = lambda x: match.View(x, 0.0, 30.0, 0.0, 0.5, 60.0)  # noqa: E731
+    anchor = lambda i, x: SimpleNamespace(id=i, view=view(x))  # noqa: E731
+
+    class Work(SimpleNamespace):
+        def observed(self, me):
+            return "as matched"
+
+    work = Work(
+        round_zero={"h": anchor("h", 0.0), "d": anchor("d", 100.0), "a": anchor("a", 10.0)},
+        where={i: match.Where(None, around=(x, 0.0)) for i, x in (("h", 0), ("d", 100), ("a", 10))},
+        negatives={},
+    )
+    me = lambda i: SimpleNamespace(id=i)  # noqa: E731
+
+    replay = cli._Replay(work, {"h": "cut h"}, {"d": ("cut d", "h")})
+
+    assert set(replay.round_zero) == {"a"}
+    assert replay.observed(me("h")) == "cut h" and replay.observed(me("a")) == "as matched"
+    assert replay.where["d"].around == (0, 0.0)  # the decoy is said to be where h stands
+    assert [a.id for a in replay.anchors(me("d"), replay.round_zero)] == ["a"]
+
+
+@pytest.mark.parametrize(
+    ("answered", "wrong", "fooled", "passed"),
+    [(9, 0, 0, False), (10, 1, 0, True), (10, 2, 0, False), (20, 0, 1, False)],
+)
+def test_the_check_passes_on_enough_answers_few_wrong_and_no_decoy_taken(
+    answered, wrong, fooled, passed
+):
+    rows = [{"kind": "vérité", "off": [0.2, 0.1], "wrong": i < wrong} for i in range(answered)]
+    rows += [{"kind": "vérité", "why": "sans réponse"}] * 30  # no answer: no evidence either way
+    rows += [{"kind": "leurre", "fooled": i < fooled} for i in range(3)]
+
+    assert cli._check_passed(rows)[0] is passed

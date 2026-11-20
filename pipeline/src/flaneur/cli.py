@@ -2273,11 +2273,6 @@ class _Chaining:
         return match.place(observed, where, trace, rays, known)
 
 
-def _bare(observed: match.Observed) -> match.Observed:
-    """An observation with its rays in today's panoramas left out."""
-    return replace(observed, rays=match.Rays.of([]))
-
-
 EYE_CHECKS = DATA / "pilot" / "eye_checks.jsonl"  # placements looked at while the user was away
 CHAIN_PASSES = 5  # rounds run again without the chained photo most in doubt, at most this often
 
@@ -2312,19 +2307,7 @@ def chain_photos(
             "d'abord (ou --force)"
         )
     typer.echo(f"tour 0 : {len(work.round_zero)} photos situées contre les panoramas")
-    set_aside: dict[str, str] = {}
-    for _ in range(CHAIN_PASSES):
-        results, placed = _rounds(work, set(set_aside))
-        doubts = _inconsistent(work, placed, results)
-        chained = {k: why for k, why in doubts.items() if k in results}
-        if not chained:
-            break
-        worst = max(chained, key=lambda k: doubts[k].moved)
-        typer.echo(f"{worst} : en désaccord ({chained[worst]}), écartée ; tours refaits sans elle")
-        set_aside[worst] = str(chained[worst])
-    else:  # still in doubt after the last pass: none of them is kept
-        set_aside |= {k: str(why) for k, why in chained.items()}
-        results, placed = _rounds(work, set(set_aside))
+    results, _, doubts, set_aside = _chained(work)
     for photo_id, why in doubts.items():
         if photo_id in work.round_zero:
             typer.echo(f"{photo_id} : en désaccord avec les autres ({why})")
@@ -2343,10 +2326,34 @@ def chain_photos(
     )
 
 
-def _rounds(work: _Chaining, left_out: set[str]) -> tuple[dict[str, dict], dict[str, chain.Anchor]]:
+def _chained(
+    work: _Chaining, keep: bool = True
+) -> tuple[dict[str, dict], dict[str, chain.Anchor], dict[str, "_Doubt"], dict[str, str]]:
+    """Chaining whole (see chain_photos): its rounds run again without the chained photo most
+    in doubt, at most CHAIN_PASSES times. The photos chained, all those placed, the doubts
+    left and the photos set aside, with why; `keep`: their points kept for the pages."""
+    set_aside: dict[str, str] = {}
+    for _ in range(CHAIN_PASSES):
+        results, placed = _rounds(work, set(set_aside), keep)
+        doubts = _inconsistent(work, placed, results)
+        chained = {k: why for k, why in doubts.items() if k in results}
+        if not chained:
+            break
+        worst = max(chained, key=lambda k: doubts[k].moved)
+        typer.echo(f"{worst} : en désaccord ({chained[worst]}), écartée ; tours refaits sans elle")
+        set_aside[worst] = str(chained[worst])
+    else:  # still in doubt after the last pass: none of them is kept
+        set_aside |= {k: str(why) for k, why in chained.items()}
+        results, placed = _rounds(work, set(set_aside), keep)
+    return results, placed, doubts, set_aside
+
+
+def _rounds(
+    work: _Chaining, left_out: set[str], keep: bool = True
+) -> tuple[dict[str, dict], dict[str, chain.Anchor]]:
     """The rounds of chaining from the photos placed against today (round 0), photos
     `left_out` never placed: each photo chained (a Situated's fields, its round and
-    anchors), and all those placed."""
+    anchors), and all those placed; `keep`: the points of each kept for the pages."""
     placed, results = dict(work.round_zero), {}
     tried: dict[str, set[str]] = {}  # the anchors each photo was last tried with
     for k in range(1, chain.MOST_ROUNDS + 1):
@@ -2391,7 +2398,8 @@ def _rounds(work: _Chaining, left_out: set[str]) -> tuple[dict[str, dict], dict[
             )
             parents = chain.provenance(found.points)
             results[photo_id] = {"situated": asdict(situated), "round": k, "from": parents}
-            _keep_chained(photo_id, inputs, found.points)
+            if keep:
+                _keep_chained(photo_id, inputs, found.points)
             typer.echo(f"{photo_id} : situé au tour {k} ({camera.agree} points), depuis {parents}")
             placed[photo_id] = work.anchor(photo_id, camera, found.points, inputs)
         if not new:
@@ -2447,57 +2455,159 @@ def _chained_from(results: dict[str, dict], photo_id: str) -> set[str]:
     return found - {photo_id}
 
 
+CHECK_BLOCK_M = 150  # the chaining's check: photos in a block this wide held out together
+CHECK_FOLDS = 5  # the blocks, in this many sets: one held out at a time
+CHECK_HALVINGS = 12  # a photo held out: its rays halved at most this often
+CHECK_FEWEST_RAYS = 8  # one matching still places from this few: left out of the check
+DECOY_M = (30, 150)  # a decoy: a photo confirmed this far from the one it is given for
+CHAIN_CHECK_LEAST = 10  # photos held out and placed again, for the check to tell anything
+CHAIN_CHECK_WRONG = 0.1  # of them, at most this share off by more than CHECK_M or CHECK_DEG
+
+
+def _check_fold(x: float, y: float) -> int:
+    """The set a camera's block falls in (see CHECK_BLOCK_M, CHECK_FOLDS)."""
+    return hash((int(x // CHECK_BLOCK_M), int(y // CHECK_BLOCK_M))) % CHECK_FOLDS
+
+
+def _degraded(
+    observed: match.Observed, where: match.Where, rng: np.random.Generator
+) -> match.Observed | None:
+    """A photo placed against today made like those chaining has to place: its rays drawn at
+    random and halved until matching alone no longer places it (at most CHECK_HALVINGS
+    times); none if it still does from CHECK_FEWEST_RAYS rays or fewer."""
+    rays = observed.rays
+    for _ in range(CHECK_HALVINGS + 1):
+        cut = replace(observed, rays=rays)
+        if match.place(cut, where, match.Trace()).camera is None:
+            return cut
+        if len(rays.keys) <= CHECK_FEWEST_RAYS:
+            return None
+        kept = np.sort(rng.permutation(len(rays.keys))[: len(rays.keys) // 2])
+        rays = match.Rays(*(getattr(rays, f.name)[kept] for f in fields(match.Rays)))
+    return None
+
+
+class _Replay(_Chaining):
+    """Chaining with confirmed photos held out of round 0: each `held` observed as cut (see
+    _degraded), each decoy as cut and given for being where another held photo stands
+    (`decoys`: its cut observation and that photo)."""
+
+    def __init__(
+        self,
+        work: _Chaining,
+        held: dict[str, match.Observed],
+        decoys: dict[str, tuple[match.Observed, str]],
+    ) -> None:
+        self.__dict__.update(work.__dict__)
+        self.work = work
+        self.cut = held | {d: seen for d, (seen, _) in decoys.items()}
+        self.round_zero = {k: a for k, a in work.round_zero.items() if k not in self.cut}
+        self.where = work.where | {
+            d: replace(work.where[as_], sights=()) for d, (_, as_) in decoys.items()
+        }
+
+    def observed(self, me: export.WalkPhoto) -> match.Observed | None:
+        return self.cut[me.id] if me.id in self.cut else self.work.observed(me)
+
+
+def _check_passed(rows: list[dict]) -> tuple[bool, list[str]]:
+    """Whether the chaining's check passes, and what it lacks: enough photos held out placed
+    again (fewer tell nothing), few of them off, no decoy taken."""
+    back = [r for r in rows if r["kind"] == "vérité" and "off" in r]
+    wrong = sum(1 for r in back if r["wrong"])
+    fooled = sum(1 for r in rows if r["kind"] == "leurre" and r["fooled"])
+    wanting = [
+        need
+        for met, need in [
+            (len(back) >= CHAIN_CHECK_LEAST, f"au moins {CHAIN_CHECK_LEAST} photos revenues"),
+            (wrong <= CHAIN_CHECK_WRONG * len(back), f"au plus {CHAIN_CHECK_WRONG:.0%} fausses"),
+            (fooled == 0, "aucun leurre pris"),
+        ]
+        if not met
+    ]
+    return not wanting, wanting
+
+
 @app.command("chain-check")
 def chain_check(seed: int = 0) -> None:
-    """Contrôle à réponse connue de l'enchaînement. Chaque photo du tour 0 est re-située à
-    partir des seules autres vieilles photos (sans ses propres appariements aux panoramas) et
-    comparée à sa caméra ; puis une photo prise à plus de FAR_M, donnée pour être là, ne doit
-    pas être située. La porte (aucune fausse, à CHECK_M et CHECK_DEG : plus stricte que pour
-    une photo seule, une erreur se propageant) est gardée : `chain` ne part que si elle passe."""
+    """Contrôle à réponse connue de l'enchaînement. Les photos du tour 0 dites justes par
+    l'utilisateur sont ôtées du tour 0 par blocs (CHECK_BLOCK_M, CHECK_FOLDS ensembles), rendues
+    semblables aux photos à enchaîner (leurs rayons réduits jusqu'à ce que les panoramas seuls
+    ne les situent plus), puis l'enchaînement entier tourne sans elles : chacune revenue est
+    comparée à sa place (juste à CHECK_M et CHECK_DEG). Un leurre par photo : une autre photo
+    confirmée à DECOY_M de là, donnée pour être à sa place, ne doit pas y être située. La porte
+    (assez de photos revenues, peu de fausses, aucun leurre pris) est gardée : `chain` ne part
+    que si elle passe."""
     work = _Chaining()
     rng = np.random.default_rng(seed)
-    places = {me.id: np.array(work.where[me.id].around) for me in work.walk}
-    rows = []
-    for photo_id, truth in sorted(work.round_zero.items()):
-        me = work.by_id[photo_id]
-        others = work.anchors(me, work.round_zero)
-        if not others or (observed := work.observed(me)) is None:
-            continue
-        trace = match.Trace()
-        found = work.place(me, _bare(observed), others, trace)
-        row = {"photo": photo_id, "kind": "seule", "anchors": len(others), "verdict": trace.verdict}
-        if found.camera is not None:
-            metres, degrees = _moved(found.camera, truth.view)
-            row["off"] = [round(metres, 2), round(degrees, 1)]
-            row["wrong"] = metres > CHECK_M or degrees > CHECK_DEG
-        rows.append(row)
-        far = [o for o, at in places.items() if np.hypot(*(at - places[photo_id])) >= FAR_M]
-        decoy = work.by_id[far[rng.integers(len(far))]] if far else None
-        if decoy is not None and (seen := work.observed(decoy)) is not None:
-            trace = match.Trace()
-            where = replace(work.where[photo_id], sights=())
-            fooled = work.place(decoy, _bare(seen), others, trace, where).camera is not None
-            rows.append(
-                {
-                    "photo": decoy.id,
-                    "kind": "leurre",
-                    "as": photo_id,
-                    "wrong": fooled,
-                    "verdict": trace.verdict,
-                }
-            )
-    wrong = sum(1 for r in rows if r.get("wrong"))
-    alone = [r for r in rows if r["kind"] == "seule"]
-    placed_ = [r for r in alone if "off" in r]
-    passed = wrong == 0
-    write_json(CHAIN_CHECK, {"setup": work.key, "passed": passed, "rows": rows})
-    typer.echo(
-        f"re-situées par les seules autres : {len(placed_)} sur {len(alone)} "
-        f"(dont fausses : {sum(1 for r in placed_ if r['wrong'])}) ; "
-        f"leurres situés : {sum(1 for r in rows if r['kind'] == 'leurre' and r['wrong'])} "
-        f"sur {len(rows) - len(alone)} ; porte {'passée' if passed else 'NON passée'}"
+    judged, situated = _Judged(), _situated()
+    truths = sorted(
+        k for k in work.round_zero if k in situated and judged.holds(k, asdict(situated[k]))
     )
-    for r in placed_:
+    at = {k: np.array([work.round_zero[k].view.x, work.round_zero[k].view.y]) for k in truths}
+    rows: list[dict] = []
+    for fold in range(CHECK_FOLDS):
+        held: dict[str, match.Observed] = {}
+        for k in (k for k in truths if _check_fold(*at[k]) == fold):
+            observed = work.observed(work.by_id[k])
+            cut = observed and _degraded(observed, work.where[k], rng)
+            if cut is None:
+                rows.append({"photo": k, "kind": "vérité", "fold": fold, "why": "hors test"})
+            else:
+                held[k] = cut
+        decoys: dict[str, tuple[match.Observed, str]] = {}
+        for k in held:
+            near = [
+                o
+                for o in truths
+                if o not in held
+                and o not in decoys
+                and DECOY_M[0] <= np.hypot(*(at[o] - at[k])) <= DECOY_M[1]
+            ]
+            if not near:
+                continue
+            d = near[rng.integers(len(near))]
+            seen = work.observed(work.by_id[d])
+            if (cut := seen and _degraded(seen, work.where[d], rng)) is not None:
+                decoys[d] = (cut, k)
+        typer.echo(f"pli {fold} : {len(held)} photos ôtées, {len(decoys)} leurres")
+        if not held:
+            continue
+        results, placed, _, set_aside = _chained(_Replay(work, held, decoys), keep=False)
+        for k, cut in held.items():
+            row = {"photo": k, "kind": "vérité", "fold": fold, "rays": len(cut.rays.keys)}
+            if k in results:
+                metres, degrees = _moved(placed[k].view, work.round_zero[k].view)
+                row |= {
+                    "off": [round(metres, 2), round(degrees, 1)],
+                    "wrong": metres > CHECK_M or degrees > CHECK_DEG,
+                    "anchors": len(results[k]["from"]),
+                    "agree": results[k]["situated"]["agree"],
+                }
+            else:
+                row["why"] = set_aside.get(k, "pas revenue")
+            rows.append(row)
+        for d, (_, k) in decoys.items():
+            row = {"photo": d, "kind": "leurre", "as": k, "fold": fold, "fooled": False}
+            if d in results:
+                metres, degrees = _moved(placed[d].view, work.round_zero[d].view)
+                row |= {
+                    "off": [round(metres, 2), round(degrees, 1)],
+                    "fooled": metres > CHECK_M or degrees > CHECK_DEG,
+                }
+            rows.append(row)
+    passed, wanting = _check_passed(rows)
+    write_json(CHAIN_CHECK, {"setup": work.key, "passed": passed, "wanting": wanting, "rows": rows})
+    back = [r for r in rows if r["kind"] == "vérité" and "off" in r]
+    tried = sum(1 for r in rows if r["kind"] == "vérité" and "rays" in r)
+    decoys_ = [r for r in rows if r["kind"] == "leurre"]
+    typer.echo(
+        f"{len(truths)} photos confirmées, {tried} testées : {len(back)} revenues "
+        f"(dont fausses : {sum(1 for r in back if r['wrong'])}) ; leurres pris : "
+        f"{sum(1 for r in decoys_ if r['fooled'])} sur {len(decoys_)} ; porte "
+        + ("passée" if passed else f"NON passée ({', '.join(wanting)})")
+    )
+    for r in back:
         typer.echo(f"  {r['photo']} : {r['off'][0]} m, {r['off'][1]}° ({r['anchors']} ancres)")
 
 
