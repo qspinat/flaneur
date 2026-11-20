@@ -1,6 +1,6 @@
 """The 3D walk's scene: today's panoramas, and the photos placed in them."""
 
-from flaneur import scene
+from flaneur import facades, scene
 from flaneur.export import WalkPhoto
 from flaneur.panoramax import Picture
 
@@ -57,10 +57,10 @@ def _row(**kw):
     }
 
 
-def _build(shown, copies=None):
+def _build(shown, copies=None, walls_of=lambda panorama: None):
     pictures = [_picture("p1", 2.3466), _picture("p2", 2.3467), _picture("p3", 2.3500)]
     walk = [_photo("pm:1"), _photo("pm:2")]
-    return scene.build3d(pictures, shown, copies or {}, walk)
+    return scene.build3d(pictures, shown, copies or {}, walk, walls_of)
 
 
 def test_the_photos_placed_are_shown_on_their_home_then_their_copies():
@@ -126,3 +126,34 @@ def test_a_photo_says_how_sure_its_placement_is():
         photo["proposed_marks"],
         photo["unsure_sources"],
     ) == ("automatic", True, False, True)
+
+
+def test_the_walls_around_a_photo_standing_off_its_panorama_go_with_that_panorama_alone():
+    standing = {**REG, "standing": {"position": [1.0, 0.5, 0.2]}}
+    copies = {"pm:1": [{"registration": {**REG, "panorama": "p2"}, "strength": 0.5}]}
+    wall = facades.Wall((652010.123, 6861525.0), (652019.0, 6861525.0), 47.456, "fitted")
+    around = facades.Scene("p1", (652000.0, 6861520.0, 35.0), 32.5, (wall,), (), 8)
+    asked = []
+
+    built, _ = _build(
+        {"pm:1": _row(registration=standing)},
+        copies,
+        lambda panorama: asked.append(panorama) or around,
+    )
+
+    p1, p2, _ = built["panoramas"]
+    assert p1["walls"] == [[10.12, 5.0, 19.0, 5.0, 12.46]]  # east, north, top: metres off it
+    assert p1["ground"] == -2.5
+    assert "walls" not in p2 and asked == ["p1"]  # a copy keeps its matrix
+
+
+def test_a_photo_resting_on_panoramas_nothing_checks_keeps_its_matrix():
+    standing = {**REG, "standing": {"position": [1.0, 0.5, 0.2]}}
+    asked = []
+
+    built, _ = _build(
+        {"pm:1": _row(registration=standing, unsure_sources=True)},
+        walls_of=lambda panorama: asked.append(panorama),
+    )
+
+    assert built["photos"][0]["shown"][0]["registration"] == REG and asked == []

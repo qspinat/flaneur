@@ -3341,9 +3341,97 @@ def _registrations(standing: dict[str, dict]) -> dict[str, dict | None]:
                 typer.echo(f"{k} : pas recalée ({error})", err=True)
                 continue
             kept[k] = {"made": made[k], "registration": found and registration.to_json(found)}
+    if any(r["registration"] for r in kept.values()):
+        kept = _stood(standing, kept)
     if kept != was:  # made, or left (no longer placed)
         write_json(REGISTERED, kept)
-    return {k: (kept.get(k) or {}).get("registration") for k in standing}
+    return {k: _shown_registration(kept.get(k)) for k in standing}
+
+
+def _stood(standing: dict[str, dict], kept: dict[str, dict]) -> dict[str, dict]:
+    """Registered placements (`kept`, see _registrations) given their standing camera (see
+    placing.stood_against_flat) in the panorama registered in: kept with the walls it stood
+    against (see _walls_of), made again when they change (drawn by hand, fitted again)."""
+    home_of, out = _standing_world(), dict(kept)
+    for k, row in kept.items():
+        if row["registration"] is None:
+            continue
+        home = home_of(row["registration"]["panorama"])
+        walls = home and _walls_of(home[1])
+        if (row.get("standing") or {}).get("walls") == walls:
+            continue
+        stood = _stand_one(k, standing[k], home) if home else None
+        out[k] = {**row, "standing": {"walls": walls, **_standing_as(stood, home)}}
+    return out
+
+
+def _walls_of(scene: facades.Scene) -> str:
+    """The walls a camera stood against, hashed (to the cm), and the code it stood by."""
+    walls = [[round(v, 2) for v in (*w.a, *w.b, w.top)] + [w.made] for w in scene.walls]
+    return _digest([walls, round(scene.ground, 2), list(scene.origin), _standing_code()])
+
+
+@functools.cache
+def _standing_code() -> str:
+    return _hash_of(placing, registration, bridging)
+
+
+def _standing_as(stood: placing.Stood | None, home: tuple | None) -> dict:
+    """A standing camera as kept: its position from its panorama's (east, north, up metres,
+    see placing._at), and its errors held out against the flat fit's (none: not measured)."""
+    if stood is None or stood.camera is None:
+        return {"camera": None, "flat": None, "parallax": None}
+    camera = registration.standing_to_json(stood.camera)
+    off = np.subtract(stood.camera.position, home[1].origin)
+    camera["position"] = [round(float(v), 3) for v in off]
+    finite = [
+        None if not np.isfinite(e) else round(float(e), 5) for e in (stood.flat, stood.parallax)
+    ]
+    return {"camera": camera, "flat": finite[0], "parallax": finite[1]}
+
+
+def _shown_registration(row: dict | None) -> dict | None:
+    """A placement's registration as the 3D walk draws it: with its standing camera where that
+    lays the photo better than the flat fit (held out, see placing.stood_against_flat)."""
+    found = (row or {}).get("registration")
+    stood = (row or {}).get("standing") or {}
+    if found is None or stood.get("parallax") is None or stood.get("flat") is None:
+        return found
+    return {**found, "standing": stood["camera"]} if stood["parallax"] < stood["flat"] else found
+
+
+def _standing_world() -> Callable[[str], tuple[match.Panorama, facades.Scene] | None]:
+    """Each panorama (by id) as matched against, with its walls (see _wall_scenes): where a
+    registered photo's standing camera is fitted."""
+    _, near_by, _ = _matching()
+    walls = _wall_scenes(near_by, _colmap_fixed())
+    by_id = {p.id: p for p in near_by}
+
+    def home(panorama: str) -> tuple[match.Panorama, facades.Scene] | None:
+        scene = walls.scene(panorama, None, made_only=True) if panorama in by_id else None
+        return (by_id[panorama], scene) if scene is not None else None
+
+    return home
+
+
+def _stand_one(
+    photo_id: str, kept: dict, home: tuple[match.Panorama, facades.Scene]
+) -> placing.Stood | None:
+    """A registered placement's standing camera in its panorama (`home`: with its walls), from
+    the pairs it matched there (see bridging.paired); none without points or pairs."""
+    sphere, scene = home
+    m = _situation(kept)
+    if (at := _kept_store(m, kept)) is None:
+        return None
+    store, inputs = at
+    points, observed = store.points(photo_id, inputs), _observed_of(store, photo_id, inputs, kept)
+    if points is None or observed is None:
+        return None
+    if (paired := bridging.paired(points, observed, sphere, observed.size)) is None:
+        return None
+    return placing.stood_against_flat(
+        paired.photo_px, paired.view_px, paired.view, sphere, observed.size, scene, (m.x, m.y)
+    )
 
 
 def _registering_world() -> tuple[dict[str, match.Panorama], set[str]]:
@@ -3652,8 +3740,10 @@ def _still_proposed(
 
 def _answered_as(row: dict) -> str:
     """What a copy or a proposal was made from: a placed photo's registration (the placing
-    page's or match's: see placed.Placed.for_scene) on its image, the way round it was shown."""
-    made = json.dumps([row["registration"], row["inputs"], row["flipped"]], sort_keys=True)
+    page's or match's: see placed.Placed.for_scene) on its image, the way round it was shown.
+    Its standing camera aside: copies keep the matrix (see _shown_registration)."""
+    flat = {k: v for k, v in row["registration"].items() if k != "standing"}
+    made = json.dumps([flat, row["inputs"], row["flipped"]], sort_keys=True)
     return hashlib.sha1(made.encode()).hexdigest()[:16]
 
 
@@ -4312,8 +4402,13 @@ def _write_scene(answering: tuple) -> None:
     shown = {i: r for i, r in _shown_in_3d(answering).items() if i in marked}
     now = _poised(_panoramas(pictures, lambda x, y: 0.0))
     copies = {i: c["copies"] for i, c in _carried(shown, now).items()}
+    world = functools.cache(_standing_world)  # read only if a photo stands off its panorama
     built, holding = scene.build3d(
-        [p for p in pictures if (PANORAMAS / f"{p.id}.jpg").exists()], shown, copies, walk
+        [p for p in pictures if (PANORAMAS / f"{p.id}.jpg").exists()],
+        shown,
+        copies,
+        walk,
+        lambda panorama: (home := world()(panorama)) and home[1],
     )
     _copy_panoramas(holding, WEB_DATA / "panoramas")
     in_scene = {p["id"] for p in built["photos"]}

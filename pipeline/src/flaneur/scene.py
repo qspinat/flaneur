@@ -2,13 +2,14 @@
 in them. And the ground and buildings of today that matching stands panoramas on (Ground,
 CameraHeights, buildings_of): metres east and north of an origin, heights above its ground."""
 
+from collections.abc import Callable
 from dataclasses import dataclass
 
 import numpy as np
 from shapely.geometry import Point, shape
 from shapely.geometry.base import BaseGeometry
 
-from flaneur import buildings, panoramas, placed
+from flaneur import buildings, facades, panoramas, placed
 from flaneur.blocks import MOST_PAIRS
 from flaneur.export import WalkPhoto, image_name, panoramax_credit
 from flaneur.panoramas import PANORAMA_HEIGHT_M
@@ -118,18 +119,39 @@ class CameraHeights:
         return self.ground.at_many(xs, ys) - self.origin_z
 
 
+def _walls_shown(around: facades.Scene) -> dict:
+    """A panorama's walls as the 3D walk lays a photo on them: their ends and top, and the
+    ground, metres east, north and up from the panorama (to the cm: no Lambert-93 in float32)."""
+    x, y, z = around.origin
+    walls = [
+        [round(v, 2) for v in (w.a[0] - x, w.a[1] - y, w.b[0] - x, w.b[1] - y, w.top - z)]
+        for w in around.walls
+    ]
+    return {"walls": walls, "ground": round(around.ground - z, 2)}
+
+
+def _laid(row: dict) -> dict:
+    """A photo's registration as drawn on its home: with its standing camera, but for one
+    resting on panoramas nothing checks (their poses unsure: its matrix holds better)."""
+    if not row["unsure_sources"]:
+        return row["registration"]
+    return {k: v for k, v in row["registration"].items() if k != "standing"}
+
+
 def build3d(
     pictures: list[Picture],
     shown: dict[str, dict],
     copies: dict[str, list[dict]],
     walk: list[WalkPhoto],
+    walls_of: Callable[[str], facades.Scene | None] = lambda panorama: None,
 ) -> tuple[dict, set[str]]:
     """The 3D walk on today's panoramas: every panorama (levelled by the viewer from its
     azimuth, roll and pitch; the next ones along the street, by their index; its credit, by
     its index in `credits`), and each photo placed in one (`shown`: as placed.Placed.for_scene
     gives them, on the image the photo has now), where it shows: its home, then its `copies`
     carried to the neighbours, and how sure its placement is. And the panoramas that hold a
-    photo, to copy onto the site."""
+    photo, to copy onto the site. A panorama holding a photo with a standing camera (see
+    cli._shown_registration) comes with its walls (`walls_of`), as the photo is laid on them."""
     by_id = {me.id: me for me in walk}
     known = {p.id for p in pictures}  # a photo or a copy on a panorama gone is left out
     photos, holding = [], set()
@@ -137,7 +159,7 @@ def build3d(
         me = by_id.get(photo_id)
         if me is None or row["registration"]["panorama"] not in known:
             continue
-        home = {"panorama": row["registration"]["panorama"], "registration": row["registration"]}
+        home = {"panorama": row["registration"]["panorama"], "registration": _laid(row)}
         where = [{**home, "strength": 1.0}] + [
             {"panorama": c["registration"]["panorama"], **c}
             for c in copies.get(photo_id, [])
@@ -157,6 +179,10 @@ def build3d(
                 **{k: row[k] for k in ("status", *placed.NOTES)},
             }
         )
+    standing = {
+        p["shown"][0]["panorama"] for p in photos if "standing" in p["shown"][0]["registration"]
+    }
+    around = {i: scene for i in sorted(standing) if (scene := walls_of(i)) is not None}
     ways = panoramas.links(pictures)
     index = {p.id: n for n, p in enumerate(pictures)}
     credits: dict[str, int] = {}
@@ -172,6 +198,7 @@ def build3d(
             "credit": credits.setdefault(panoramax_credit(p), len(credits)),
             "image": f"panoramas/{p.id}.jpg" if p.id in holding else p.sd_url,
             "links": [[index[i], round(b, 1), round(d, 1)] for i, b, d in ways[p.id]],
+            **(_walls_shown(around[p.id]) if p.id in around else {}),
         }
         for p in pictures
     ]

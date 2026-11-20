@@ -272,6 +272,90 @@ def _standing(
     return _Standing(camera, used, world, metres, source, fitting)
 
 
+BANDS = 4  # the pairs held out by quarter of the photo's width (one facade's pairs are alike)
+
+
+@dataclass(frozen=True)
+class Stood:
+    """A placement's standing camera, fitted on all its pairs (None: too few pairs on a wall,
+    or not fitted), and the median errors, held out band by band, of it and of the flat fit
+    (shares of the photo's diagonal, on the held-out pairs with a depth; inf: not measured)."""
+
+    camera: registration.Standing | None
+    flat: float
+    parallax: float
+
+
+def stood_against_flat(
+    photo_px: np.ndarray,
+    view_px: np.ndarray,
+    view: ViewOf,
+    sphere: match.Panorama,
+    size: tuple,
+    scene: facades.Scene,
+    pin: tuple[float, float],
+) -> Stood:
+    """Where the photographer stood, from pairs given their depth by the panorama's walls, and
+    whether that camera lays the photo better than the flat fit: each band of the photo held
+    out in turn, both refitted on the rest and scored on it."""
+    rays = _rays(view_px, view, sphere)
+    metres, _ = _pairs_depth(scene, sphere, rays, [None] * len(rays), refuse=False)
+    has = ~np.isnan(metres)
+    if has.sum() < registration.MIN_STANDING + 2:
+        return Stood(None, np.inf, np.inf)
+    world = np.array(scene.origin) + metres[:, None] * rays
+    band = np.minimum((photo_px[:, 0] / size[1] * BANDS).astype(int), BANDS - 1)
+
+    def fitted(rest: np.ndarray) -> tuple[registration.Registration, registration.Standing | None]:
+        flat = registration.fit(
+            photo_px[rest], view_px[rest], size, SHOWN, sphere.id, view, sphere.axes
+        )[0]
+        try:
+            stood = _standing(
+                photo_px[rest],
+                view_px[rest],
+                view,
+                sphere,
+                size,
+                scene,
+                pin,
+                flat,
+                [None] * int(rest.sum()),
+                False,
+            )
+        except registration.NotFitted:
+            return flat, None
+        return flat, stood.camera
+
+    flat_off, stand_off = [], []
+    for b in range(BANDS):
+        out, rest = (band == b) & has, band != b
+        if not out.any() or rest.sum() < registration.MIN_STANDING:
+            continue
+        try:
+            flat, camera = fitted(rest)
+        except registration.NotFitted:
+            continue
+        flat_off += list(
+            registration.errors_flat(
+                flat, photo_px[out], view_px[out], size, SHOWN, view, sphere.axes
+            )
+        )
+        stand_off += (
+            list(registration.errors_standing(camera, photo_px[out], world[out]))
+            if camera is not None
+            else [np.inf] * int(out.sum())
+        )
+    if not flat_off:
+        return Stood(None, np.inf, np.inf)
+    try:
+        camera = fitted(np.ones(len(photo_px), bool))[1]
+    except registration.NotFitted:
+        camera = None
+    parallax = float(np.median(stand_off)) if camera is not None else np.inf
+    return Stood(camera, float(np.median(flat_off)), parallax)
+
+
 def _flat_without(
     photo_px: np.ndarray, view_px: np.ndarray, view: ViewOf, sphere: match.Panorama, size: tuple
 ) -> Callable[[int], registration.Registration]:

@@ -10,7 +10,7 @@ import pytest
 import typer
 from typer.testing import CliRunner
 
-from flaneur import cli, confirming, depth, facades, match, poses, segment
+from flaneur import cli, confirming, depth, facades, match, placing, poses, registration, segment
 from flaneur.cli import app
 
 
@@ -282,6 +282,16 @@ def test_a_proposal_holds_while_its_panorama_stands_where_it_was_made(monkeypatc
     known = {"panorama": "p1", "inputs": "h", **({"at": known_at} if known_at else {})}
 
     assert cli._still_proposed(known, "pm:1", "p1", (1.0, 2.0, 30.0)) is holds
+
+
+def test_copies_carried_hold_when_their_photo_gains_a_standing_camera(tmp_path, monkeypatch):
+    row = {"registration": {"panorama": "a"}, "inputs": "i", "flipped": False}
+    kept = {"pm:1": {"made": cli._answered_as(row), "copies": [], "at": {"a": [0.0, 0.0, 0.0]}}}
+    (tmp_path / "carried.json").write_text(json.dumps(kept))
+    monkeypatch.setattr(cli, "CARRIED", tmp_path / "carried.json")
+    standing = {**row, "registration": {"panorama": "a", "standing": {"focal": 700.0}}}
+
+    assert set(cli._carried({"pm:1": standing}, {"a": (0.0, 0.0, 0.0)})) == {"pm:1"}
 
 
 def test_copies_carried_from_panoramas_moved_since_are_made_again(tmp_path, monkeypatch):
@@ -2106,6 +2116,65 @@ def test_a_registration_is_made_again_only_when_its_placement_changes(monkeypatc
     cli._registrations({"pm:1": placed_at})
     cli._registrations({"pm:1": placed_at})  # the same: read back
     cli._registrations({"pm:1": {**placed_at, "heading": placed_at["heading"] + 5}})
+
+    assert made == ["pm:1", "pm:1"]
+
+
+def _registered(tmp_path, monkeypatch, placements: dict, walls: dict, stood: dict) -> list:
+    """REGISTERED holding `placements` registered in panorama "q" (made as now), the walls
+    around "q" (`walls`: one top a call, see facades.Wall), the standing cameras made by
+    `stood` (photo id: (flat, parallax)); what was stood, in order."""
+    monkeypatch.setattr(cli, "REGISTERED", tmp_path / "registered.json")
+    row = {"panorama": "q", "matrix": [[1, 0, 0], [0, 1, 0], [0, 0, 1]]}
+    cli.write_json(
+        cli.REGISTERED,
+        {k: {"made": cli._registered_as(m), "registration": row} for k, m in placements.items()},
+    )
+    origin = (10.0, 20.0, 35.0)
+
+    def scene(panorama):
+        wall = facades.Wall((0.0, 5.0), (9.0, 5.0), walls["top"], "fitted")
+        return None, facades.Scene(panorama, origin, 32.5, (wall,), (), 8)  # (its sphere, walls)
+
+    camera = registration.Standing(
+        (11.0, 20.5, 35.2), (0.1, 0.2, 0.3), 700.0, (0.0, 0.05), (60, 80)
+    )
+    made = []
+    monkeypatch.setattr(cli, "_standing_world", lambda: scene)
+    monkeypatch.setattr(
+        cli,
+        "_stand_one",
+        lambda k, m, home: made.append(k) or placing.Stood(camera, *stood[k]),
+    )
+    return made
+
+
+def test_a_standing_camera_is_shown_only_where_it_lays_the_photo_better(monkeypatch, tmp_path):
+    placements = {"pm:1": _kept(), "pm:2": _kept(inputs="j")}
+    _registered(
+        tmp_path,
+        monkeypatch,
+        placements,
+        {"top": 40.0},
+        {"pm:1": (0.02, 0.01), "pm:2": (0.01, 0.02)},
+    )
+
+    shown = cli._registrations(placements)
+
+    assert shown["pm:1"]["standing"]["position"] == [1.0, 0.5, 0.2]  # off the panorama, metres
+    assert shown["pm:1"]["standing"]["focal"] == 700.0
+    assert "standing" not in shown["pm:2"]
+
+
+def test_a_standing_camera_is_made_again_only_when_its_walls_change(monkeypatch, tmp_path):
+    placements = {"pm:1": _kept()}
+    walls = {"top": 40.0}
+    made = _registered(tmp_path, monkeypatch, placements, walls, {"pm:1": (0.02, 0.01)})
+
+    cli._registrations(placements)
+    cli._registrations(placements)  # the same walls: read back
+    walls["top"] = 45.0  # a wall drawn again
+    cli._registrations(placements)
 
     assert made == ["pm:1", "pm:1"]
 

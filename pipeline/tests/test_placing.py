@@ -1409,3 +1409,59 @@ def test_a_wall_drawn_higher_than_any_is_refused(page, one, tmp_path):
     status, _ = one(sources, "POST", "/api/walls", body)
 
     assert status == 400 and not sources.walls.exists()
+
+
+def _deep_street(sphere: match.Panorama, walls: bool = True):
+    """As _street, with details all along both facades (6 to 28 m) and on the street's end: the
+    photo's pixels (80 × 60), the view's, the scene, and the camera that took it."""
+    home = np.array([sphere.x, sphere.y, sphere.z])
+    camera = registration.Standing(
+        tuple(home + [1.5, 1.3, -1.0]),
+        tuple(cv2.Rodrigues(_facing(140.0))[0].ravel()),
+        70.0,
+        (0.0, 0.0),
+        (60, 80),
+    )
+    details = [(d, side, z) for d in range(6, 29, 2) for side in (-4, 4) for z in (-1.0, 1.5, 3.5)]
+    details += [(30, x, z) for x in (-3, -1, 1, 3) for z in (0.0, 3.0)]
+    world = np.array([home + d * AHEAD + x * RIGHT + [0.0, 0.0, z] for d, x, z in details])
+    rays = (world - home) / np.linalg.norm(world - home, axis=1, keepdims=True)
+    view_px = registration.view_pixels(
+        rays @ sphere.axes.T, ViewOf(140.0), sphere.axes, placing.SHOWN
+    )
+    photo_px = camera.project(world)
+    seen = ((photo_px >= 0) & (photo_px <= [80, 60])).all(axis=1)
+
+    def wall(d0, x0, d1, x1):
+        a, b = (home + d * AHEAD + x * RIGHT for d, x in ((d0, x0), (d1, x1)))
+        return facades.Wall(tuple(a[:2]), tuple(b[:2]), sphere.z + 12.0, "fitted")
+
+    found = [wall(0, -4, 40, -4), wall(0, 4, 40, 4), wall(30, -6, 30, 6)] if walls else []
+    scene = facades.Scene(sphere.id, tuple(home), sphere.z - 2.5, tuple(found), ("p2",), 40)
+    return camera, photo_px[seen], view_px[seen], scene
+
+
+def test_a_camera_off_the_panorama_is_drawn_better_standing_than_flat(page):
+    sources, _ = page
+    sphere = sources.spheres[0]
+    camera, photo_px, view_px, scene = _deep_street(sphere)
+    pin = (sphere.x + 2.5, sphere.y + 0.3)  # where match put it: a metre off
+
+    stood = placing.stood_against_flat(
+        photo_px, view_px, ViewOf(140.0), sphere, (60, 80), scene, pin
+    )
+
+    assert stood.parallax < stood.flat / 2  # held out band by band
+    assert np.hypot(*np.subtract(stood.camera.position[:2], camera.position[:2])) < 0.3
+
+
+def test_without_walls_no_camera_stands_and_parallax_is_the_worst(page):
+    sources, _ = page
+    sphere = sources.spheres[0]
+    _, photo_px, view_px, scene = _deep_street(sphere, walls=False)
+
+    stood = placing.stood_against_flat(
+        photo_px, view_px, ViewOf(140.0), sphere, (60, 80), scene, (sphere.x, sphere.y)
+    )
+
+    assert stood.camera is None and stood.parallax == np.inf
