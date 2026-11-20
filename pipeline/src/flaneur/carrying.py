@@ -18,6 +18,7 @@ FADE_M = (5.0, 20.0)  # full strength up to the first, none from the second
 LEAST_STRENGTH = 0.1  # a copy fainter would hardly show: not looked for (beyond 18.5 m)
 FRAMED = 1.3  # a copy matched again in a view this much wider than its frame
 WIDEST_DEG = 120.0
+NARROWEST_DEG = 30.0  # narrower, a view at placing.SHOWN only magnifies the panorama's pixels
 MIN_SHARED = queueing.MIN_SHARED  # an old photo is carried from another sharing as many
 
 
@@ -30,7 +31,8 @@ def framed(copy: Registration, axes: np.ndarray) -> ViewOf:
     heading = float(np.degrees(np.arctan2(middle[0], middle[1])) % 360)
     pitch = float(np.degrees(np.arcsin(np.clip(middle[2], -1.0, 1.0))))
     spread = float(np.degrees(np.arccos(np.clip(world @ middle, -1.0, 1.0))).max())
-    return ViewOf(heading=heading, pitch=pitch, fov=min(WIDEST_DEG, 2 * spread * FRAMED))
+    fov = float(np.clip(2 * spread * FRAMED, NARROWEST_DEG, WIDEST_DEG))
+    return ViewOf(heading=heading, pitch=pitch, fov=fov)
 
 
 def strength(metres: float) -> float:

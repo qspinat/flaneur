@@ -3415,7 +3415,8 @@ def _standing_drawn(kept: dict, gain: float = 0.0, held: int = 0) -> dict | None
     flat, parallax = kept.get("flat"), kept.get("parallax")
     if not kept.get("camera") or None in (flat, parallax) or kept.get("held", held) < held:
         return None
-    return kept["camera"] if flat - parallax > gain else None
+    better = flat - parallax >= gain - 1e-9 if gain else parallax < flat  # stored to 1e-5
+    return kept["camera"] if better else None
 
 
 def _registered_shown(row: dict) -> placed.Registered:
@@ -3459,7 +3460,7 @@ def _stand_one(
     kept: dict,
     home: _Home,
     against: registration.Registration | None = None,
-    again: Callable[[match.Panorama], bridging.Paired | None] | None = None,
+    again: Callable[[match.Panorama, tuple[int, int]], bridging.Paired | None] | None = None,
     least: int = 0,
 ) -> placing.Stood | None:
     """A placement's standing camera in a panorama (`home`, with its walls), from the pairs it
@@ -3471,7 +3472,7 @@ def _stand_one(
     m, points, observed = found
     paired = bridging.paired(points, observed, home.sphere, observed.size)
     if paired is None and again is not None:
-        paired = again(home.sphere)
+        paired = again(home.sphere, observed.size)
     if paired is None:
         return None
     return placing.stood_against_flat(
@@ -3944,6 +3945,7 @@ def _copies_standing(held: dict[str, dict], carried: dict[str, dict]) -> None:
                     _registered_as(kept[photo_id]),
                     walls(panorama),
                     _copying_code(),
+                    COPY_HELD,  # under it no camera is fitted (the gain is judged on reading)
                 ]
             )
             if (before := was.get(photo_id, {}).get(panorama)) and before["made"] == made:
@@ -3951,15 +3953,15 @@ def _copies_standing(held: dict[str, dict], carried: dict[str, dict]) -> None:
             else:
                 todo.append((panorama, photo_id, copy, made))
     if todo:
-        store = _photo_store()
+        store = functools.cache(_photo_store)  # the matcher loaded only if one is matched again
         picture = functools.lru_cache(maxsize=1)(lambda path: cv2.imread(str(path)))
         for panorama, group in itertools.groupby(sorted(todo, key=lambda t: t[:2]), lambda t: t[0]):
             home = _standing_home(panorama)
             for _, photo_id, copy, made in group:
                 against = registration.from_json(copy["registration"])
 
-                def again(sphere, photo_id=photo_id, against=against):
-                    return _matched_again(photo_id, against, sphere, store, picture)
+                def again(sphere, size, photo_id=photo_id, against=against):
+                    return _matched_again(photo_id, against, sphere, store(), picture, size)
 
                 try:
                     stood = _stand_one(photo_id, kept[photo_id], home, against, again, COPY_HELD)
@@ -3971,7 +3973,8 @@ def _copies_standing(held: dict[str, dict], carried: dict[str, dict]) -> None:
                     **_standing_as(stood, home),
                 }
             write_json(CARRIED_STANDING, out)  # panorama after panorama: a stop loses one
-    write_json(CARRIED_STANDING, out)
+    if out != was:
+        write_json(CARRIED_STANDING, out)
     standing = sum(1 for p in out.values() for c in p.values() if _copy_standing(c))
     typer.echo(f"{standing} copies posées sur les murs, sur {sum(map(len, out.values()))}")
 
@@ -3982,25 +3985,28 @@ def _matched_again(
     sphere: match.Panorama,
     store: chain.Store,
     picture: Callable[[Path], np.ndarray | None],
+    size: tuple[int, int],
 ) -> bridging.Paired | None:
     """The photo (its features as matching reads them, from `store`) matched against a view of
     `sphere` (its 360° picture: `picture`) framed on its copy there (see carrying.framed),
     shown at placing.SHOWN: the pairs that agree on one flat warp (raw matches, unlike match's
     own pairs, which its geometry kept: measured 20/11, unfiltered 26 copies standing instead
-    of 39); none from fewer than MIN_MATCHED."""
-    mine = _features(store, photo_id)
+    of 39), the photo's pixels at `size` (the placement's); none from fewer than
+    MIN_MATCHED. Its features or picture missing: an error (not judged: done next time)."""
+    mine = _features(store, photo_id) if store is not None else None
     seen = picture(sphere.path)
     if mine is None or seen is None:
-        return None
+        raise FileNotFoundError(f"{photo_id} ou {sphere.path} : pas à portée")
     view = carrying.framed(copy, sphere.axes)
     cut = match.perspective(seen, sphere.axes, view.heading, view.fov, placing.SHOWN, view.pitch)
     theirs = store.matcher.features(cut)
     pairs = store.matcher.pairs(mine, theirs)
-    photo_px = mine.keypoints[pairs[:, 0]].astype(float)
+    scale = max(size) / max(mine.size)
+    photo_px = mine.keypoints[pairs[:, 0]].astype(float) * scale
     view_px = theirs.keypoints[pairs[:, 1]].astype(float)
     try:
         _, agree = registration.agreeing(photo_px, view_px)
-    except registration.NotFitted:  # fewer than MIN_MATCHED agree
+    except (registration.NotFitted, cv2.error):  # too few agree, or a degenerate set
         return None
     return bridging.Paired(sphere.id, view, photo_px[agree], view_px[agree])
 

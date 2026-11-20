@@ -2875,6 +2875,42 @@ def test_a_photo_matched_again_keeps_the_pairs_one_flat_warp_agrees_on(monkeypat
     monkeypatch.setattr(cli.match, "perspective", lambda *a: None)
     sphere = SimpleNamespace(id="p", path="p.jpg", axes=np.eye(3))
 
-    found = cli._matched_again("pm:1", None, sphere, store, lambda path: np.zeros(1))
+    found = cli._matched_again("pm:1", None, sphere, store, lambda path: np.zeros(1), (600, 800))
 
     assert len(found.photo_px) == 32  # the eight wrong ones left out
+
+
+def test_a_copy_better_by_exactly_the_margin_stands():
+    kept = {"camera": {"position": [0, 0, 0]}, "flat": 0.006, "parallax": 0.005, "held": 10}
+
+    assert cli._copy_standing(kept) is not None  # at least 0.1 %: float noise aside
+
+
+def test_a_copy_whose_panorama_picture_is_missing_is_not_judged_but_tried_again(monkeypatch):
+    mine = match.Features(np.zeros((40, 2)), np.zeros((40, 8)), (600, 800))
+    monkeypatch.setattr(cli, "_features", lambda store, photo_id: mine)
+    sphere = SimpleNamespace(id="p", path="p.jpg", axes=np.eye(3))
+
+    with pytest.raises(FileNotFoundError):  # not "no pairs": nothing kept, done next time
+        cli._matched_again("pm:1", None, sphere, None, lambda path: None, (600, 800))
+
+
+def test_photo_pixels_matched_again_are_given_at_the_placement_s_size(monkeypatch):
+    rng = np.random.default_rng(3)
+    mine = rng.uniform(0, 600, (40, 2))
+    theirs = mine * 1.5 + [40.0, 20.0]
+    features = lambda points, size: match.Features(points, np.zeros((len(points), 8)), size)  # noqa: E731
+    matcher = SimpleNamespace(
+        features=lambda cut: features(theirs, (1280, 1280)),
+        pairs=lambda a, b: np.column_stack([np.arange(40), np.arange(40)]),
+    )
+    monkeypatch.setattr(cli, "_features", lambda store, photo_id: features(mine, (600, 800)))
+    monkeypatch.setattr(cli.carrying, "framed", lambda copy, axes: registration.ViewOf(0.0))
+    monkeypatch.setattr(cli.match, "perspective", lambda *a: None)
+    sphere = SimpleNamespace(id="p", path="p.jpg", axes=np.eye(3))
+
+    found = cli._matched_again(
+        "pm:1", None, sphere, SimpleNamespace(matcher=matcher), lambda path: np.zeros(1), (300, 400)
+    )
+
+    assert np.allclose(found.photo_px, mine / 2)  # its features were at twice the size

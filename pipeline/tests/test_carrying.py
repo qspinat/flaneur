@@ -272,3 +272,10 @@ def test_a_copy_is_matched_again_in_a_view_framed_on_where_it_lands(placed):
     assert ((seen > 0.05 * SIDE) & (seen < 0.95 * SIDE)).all()
     middle = registration.view_pixels(corners.mean(axis=0, keepdims=True), view, HOME, SIDE)[0]
     assert np.allclose(middle, SIDE / 2, atol=0.12 * SIDE)
+
+
+def test_a_copy_seen_small_is_matched_again_in_a_view_not_narrower_than_a_street():
+    small = np.array([[0.02, 0.0, -0.01], [0.0, 0.02, -0.01], [0.0, 0.0, 1.0]])  # 1° across
+    tiny = registration.Registration("home", tuple(small.ravel()), VIEW)
+
+    assert carrying.framed(tiny, HOME).fov == carrying.NARROWEST_DEG

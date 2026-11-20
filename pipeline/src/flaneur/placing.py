@@ -361,7 +361,7 @@ def stood_against_flat(
         return Stood(None, np.inf, np.inf, len(flat_off))
     camera = fitted(np.ones(len(photo_px), bool))[1]
     if camera is None:
-        return Stood(None, np.inf, np.inf)
+        return Stood(None, np.inf, np.inf, len(flat_off))
     return Stood(camera, float(np.median(flat_off)), float(np.median(stand_off)), len(flat_off))
 
 
