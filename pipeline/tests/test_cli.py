@@ -2135,18 +2135,22 @@ def _registered(tmp_path, monkeypatch, placements: dict, walls: dict, stood: dic
 
     def scene(panorama):
         wall = facades.Wall((0.0, 5.0), (9.0, 5.0), walls["top"], "fitted")
-        return cli._Home(None, facades.Scene(panorama, origin, 32.5, (wall,), (), 8))
+        sphere = SimpleNamespace(azimuth=10.0, roll=0.5, pitch=-0.5)
+        return cli._Home(sphere, facades.Scene(panorama, origin, 32.5, (wall,), (), 8))
 
     camera = registration.Standing(
         (11.0, 20.5, 35.2), (0.1, 0.2, 0.3), 700.0, (0.0, 0.05), (60, 80)
     )
     made = []
+
+    def stand(k, m, home):
+        made.append(k)
+        if isinstance(stood[k], Exception):
+            raise stood[k]
+        return placing.Stood(camera, *stood[k])
+
     monkeypatch.setattr(cli, "_standing_home", scene)
-    monkeypatch.setattr(
-        cli,
-        "_stand_one",
-        lambda k, m, home: made.append(k) or placing.Stood(camera, *stood[k]),
-    )
+    monkeypatch.setattr(cli, "_stand_one", stand)
     return made
 
 
@@ -2162,9 +2166,34 @@ def test_a_standing_camera_is_shown_only_where_it_lays_the_photo_better(monkeypa
 
     shown = cli._registrations(placements)
 
-    assert list(shown["pm:1"].standing["position"]) == [11.0, 20.5, 35.2]
+    assert shown["pm:1"].standing["position"] == [1.0, 0.5, 0.2]  # metres off the panorama
     assert shown["pm:1"].registration["panorama"] == "q"
     assert shown["pm:2"].standing is None
+
+
+def test_a_standing_camera_that_fails_leaves_the_others_and_is_tried_again(
+    monkeypatch, tmp_path, capsys
+):
+    placements = {"bad": _kept(), "good": _kept(inputs="j")}
+    stood = {"bad": np.linalg.LinAlgError("singular"), "good": (0.02, 0.01)}
+    made = _registered(tmp_path, monkeypatch, placements, {"top": 40.0}, stood)
+
+    shown = cli._registrations(placements)
+    cli._registrations(placements)
+
+    assert shown["bad"].registration and shown["bad"].standing is None
+    assert shown["good"].standing is not None
+    assert made == ["bad", "good", "bad"] and "pas debout" in capsys.readouterr().err
+
+
+def test_errors_not_measured_show_no_standing_camera_and_stay_json(monkeypatch, tmp_path):
+    placements = {"pm:1": _kept()}
+    _registered(tmp_path, monkeypatch, placements, {"top": 40.0}, {"pm:1": (np.inf, np.inf)})
+
+    shown = cli._registrations(placements)
+
+    assert shown["pm:1"].standing is None
+    assert "Infinity" not in (tmp_path / "registered.json").read_text()
 
 
 def test_a_standing_camera_is_made_again_only_when_its_walls_change(monkeypatch, tmp_path):

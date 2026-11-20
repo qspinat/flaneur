@@ -1455,6 +1455,22 @@ def test_a_camera_off_the_panorama_is_drawn_better_standing_than_flat(page):
     assert np.hypot(*np.subtract(stood.camera.position[:2], camera.position[:2])) < 0.3
 
 
+def test_pairs_no_flat_warp_agrees_with_are_left_out_as_the_walk_leaves_them(page):
+    sources, _ = page
+    sphere = sources.spheres[0]
+    camera, photo_px, view_px, scene = _deep_street(sphere)
+    wrong = np.array([[5.0, 5.0], [75.0, 8.0], [40.0, 55.0], [10.0, 50.0], [70.0, 52.0]])
+    photo_px = np.vstack([photo_px, wrong])
+    view_px = np.vstack([view_px, view_px[:5][::-1] + [300.0, -200.0]])
+
+    stood = placing.stood_against_flat(
+        photo_px, view_px, ViewOf(140.0), sphere, (60, 80), scene, (sphere.x, sphere.y)
+    )
+
+    assert stood.parallax < 0.005 and np.isfinite(stood.flat)
+    assert np.hypot(*np.subtract(stood.camera.position[:2], camera.position[:2])) < 0.3
+
+
 def test_without_walls_no_camera_stands_and_parallax_is_the_worst(page):
     sources, _ = page
     sphere = sources.spheres[0]

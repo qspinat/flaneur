@@ -3,6 +3,7 @@
 import fcntl
 import functools
 import hashlib
+import inspect
 import io
 import json
 import math
@@ -3358,34 +3359,50 @@ def _stood(standing: dict[str, dict], kept: dict[str, dict]) -> dict[str, dict]:
         if row["registration"] is None:
             continue
         home = _standing_home(row["registration"]["panorama"])
-        walls = home and _walls_of(home.scene)
-        if (row.get("standing") or {}).get("walls") != walls:
+        walls = home and _walls_of(home)
+        if (row.get("standing") or {}).get("walls") == walls:
+            continue
+        try:
             stood = _stand_one(k, standing[k], home) if home else None
-            out[k] = {**row, "standing": {"walls": walls, **_standing_as(stood)}}
+        except Exception as error:  # this one left, tried again next time: the others go on
+            typer.echo(f"{k} : pas debout ({error})", err=True)
+            continue
+        out[k] = {**row, "standing": {"walls": walls, **_standing_as(stood, home)}}
     return out
 
 
-def _walls_of(around: facades.Scene) -> str:
-    """The walls a camera stood against (see scene.walls_shown), where, and the code it stood
-    by, hashed."""
+def _walls_of(home: "_Home") -> str:
+    """What a standing camera is fitted from, beside its pairs, hashed: the walls and the
+    street around its panorama, from it (see scene.walls_shown), the panorama's levelling
+    (its rays), and the code."""
+    around, sphere = home.scene, home.sphere
     made = [w.made for w in around.walls]
-    return _digest([scene.walls_shown(around), made, list(around.origin), _standing_code()])
+    ground = round(around.ground - around.origin[2], 2)
+    levelled = [round(sphere.azimuth, 2), round(sphere.roll, 3), round(sphere.pitch, 3)]
+    return _digest([scene.walls_shown(around), made, ground, levelled, _standing_code()])
 
 
 @functools.cache
 def _standing_code() -> str:
-    return _hash_of(placing, registration, bridging)
+    """The code a standing camera is fitted and compared by, hashed (not the placing page's)."""
+    fitting = (placing.stood_against_flat, placing._depth, placing._rays)
+    return _digest([inspect.getsource(f) for f in fitting] + [_hash_of(registration, facades)])
 
 
-def _standing_as(stood: placing.Stood | None) -> dict:
-    """A standing camera as kept, and its errors held out against the flat fit's (none: not
-    measured)."""
+def _standing_as(stood: placing.Stood | None, home: "_Home | None") -> dict:
+    """A standing camera as kept: placed from its panorama (east, north, up metres: the frame
+    of heights moves as the area grows), and its errors held out against the flat fit's (none:
+    not measured)."""
     if stood is None or stood.camera is None:
         return {"camera": None}
+    camera = registration.standing_to_json(stood.camera)
+    camera["position"] = [
+        round(a - b, 3) for a, b in zip(camera["position"], home.scene.origin, strict=True)
+    ]
     errors = {"flat": stood.flat, "parallax": stood.parallax}
     return {
-        "camera": registration.standing_to_json(stood.camera),
-        **{k: round(e, 5) for k, e in errors.items()},
+        "camera": camera,
+        **{k: round(e, 5) if np.isfinite(e) else None for k, e in errors.items()},
     }
 
 
@@ -3393,7 +3410,8 @@ def _registered_shown(row: dict) -> placed.Registered:
     """A placement's registration, and its standing camera where that lays the photo better
     than the flat fit (held out, see placing.stood_against_flat)."""
     stood = row.get("standing") or {}
-    better = stood.get("camera") and stood["parallax"] < stood["flat"]
+    flat, parallax = stood.get("flat"), stood.get("parallax")
+    better = stood.get("camera") and None not in (flat, parallax) and parallax < flat
     return placed.Registered(row.get("registration"), stood["camera"] if better else None)
 
 

@@ -297,7 +297,15 @@ def stood_against_flat(
 ) -> Stood:
     """Where the photographer stood, from pairs given their depth by the panorama's walls, and
     whether that camera lays the photo better than the flat fit: each band of the photo held
-    out in turn, both refitted on the rest and scored on it."""
+    out in turn, both refitted on the rest and scored on it. On the pairs the 3D walk's matrix
+    keeps (see registration.turned_through): the others are false matches."""
+    try:
+        _, kept = registration.turned_through(
+            photo_px, view_px, size, SHOWN, sphere.id, view, sphere.axes
+        )
+    except (registration.NotFitted, cv2.error):
+        return Stood(None, np.inf, np.inf)
+    photo_px, view_px = photo_px[kept], view_px[kept]
     rays = _rays(view_px, view, sphere)
     metres, _ = _depth(scene, rays)
     has = ~np.isnan(metres)
@@ -336,7 +344,11 @@ def stood_against_flat(
             )
         )
         stand_off += (
-            list(registration.errors_standing(camera, photo_px[out], world[out]))
+            list(
+                np.nan_to_num(
+                    registration.errors_standing(camera, photo_px[out], world[out]), nan=np.inf
+                )
+            )
             if camera is not None
             else [np.inf] * int(out.sum())
         )

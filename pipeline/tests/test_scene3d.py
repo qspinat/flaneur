@@ -130,7 +130,7 @@ def test_a_photo_says_how_sure_its_placement_is():
 
 
 def test_a_photo_standing_off_its_panorama_is_laid_on_its_walls_which_go_with_it_alone():
-    standing = {"position": [652001.0, 6861520.5, 35.2], "focal": 700.0}
+    standing = {"position": [1.0, 0.5, 0.2], "focal": 700.0}  # metres off its panorama
     copies = {"pm:1": [{"registration": {**REG, "panorama": "p2"}, "strength": 0.5}]}
     wall = facades.Wall((652010.123, 6861525.0), (652019.0, 6861525.0), 47.456, "fitted")
     around = facades.Scene("p1", (652000.0, 6861520.0, 35.0), 32.5, (wall,), (), 8)
@@ -143,7 +143,7 @@ def test_a_photo_standing_off_its_panorama_is_laid_on_its_walls_which_go_with_it
     )
 
     home, copy = built["photos"][0]["shown"]
-    assert home["standing"] == {"position": [1.0, 0.5, 0.2], "focal": 700.0}  # metres off it
+    assert home["standing"] == standing
     assert "standing" not in copy  # a copy keeps its matrix
     p1, p2, _ = built["panoramas"]
     assert p1["walls"] == [[10.12, 5.0, 19.0, 5.0, 12.46]]  # east, north, top: metres off it

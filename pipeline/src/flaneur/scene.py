@@ -129,12 +129,6 @@ def walls_shown(around: facades.Scene) -> list[list[float]]:
     ]
 
 
-def _standing_shown(standing: dict, around: facades.Scene) -> dict:
-    """A standing camera as the 3D walk takes it: placed from its panorama (see walls_shown)."""
-    off = [round(a - b, 3) for a, b in zip(standing["position"], around.origin, strict=True)]
-    return {**standing, "position": off}
-
-
 def build3d(
     pictures: list[Picture],
     shown: dict[str, dict],
@@ -158,7 +152,7 @@ def build3d(
             continue
         home = {"panorama": row["registration"]["panorama"], "registration": row["registration"]}
         if row["standing"] and (around := walls_of(home["panorama"])) is not None:
-            home["standing"] = _standing_shown(row["standing"], around)
+            home["standing"] = row["standing"]
             walls[home["panorama"]] = around
         where = [{**home, "strength": 1.0}] + [
             {"panorama": c["registration"]["panorama"], **c}
