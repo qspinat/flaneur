@@ -258,3 +258,17 @@ def test_old_photos_near_each_other_are_compared_once_and_never_copies_of_one_ne
 
 def test_no_photos_have_no_pairs_to_compare():
     assert carrying.to_compare({}, 60.0, {}, lambda a, b: False) == []
+
+
+def test_a_copy_is_matched_again_in_a_view_framed_on_where_it_lands(placed):
+    view = carrying.framed(placed, HOME)
+
+    corners = (
+        np.array([[0, 0, 1], [1, 0, 1], [1, 1, 1], [0, 1, 1]], float)
+        @ np.reshape(placed.matrix, (3, 3)).T
+    )
+    seen = registration.view_pixels(corners, view, HOME, SIDE)
+    assert ((seen > 0) & (seen < SIDE)).all()  # the whole frame, a margin round it
+    assert ((seen > 0.05 * SIDE) & (seen < 0.95 * SIDE)).all()
+    middle = registration.view_pixels(corners.mean(axis=0, keepdims=True), view, HOME, SIDE)[0]
+    assert np.allclose(middle, SIDE / 2, atol=0.12 * SIDE)

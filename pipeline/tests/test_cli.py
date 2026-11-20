@@ -2154,6 +2154,81 @@ def _registered(tmp_path, monkeypatch, placements: dict, walls: dict, stood: dic
     return made
 
 
+def _copies(tmp_path, monkeypatch, walls: dict, stood: dict) -> list:
+    """Two photos placed, each carried to panoramas "a" and "b" (pm:flat not standing at its
+    home); the walls around every panorama (`walls`: their top); the copies' standing cameras
+    made by `stood` ((photo, panorama): (flat, parallax, held)); what was stood, in order."""
+    monkeypatch.setattr(cli, "CARRIED_STANDING", tmp_path / "carried_standing.json")
+    origin = (10.0, 20.0, 35.0)
+
+    def home(panorama):
+        wall = facades.Wall((0.0, 5.0), (9.0, 5.0), walls["top"], "fitted")
+        sphere = SimpleNamespace(azimuth=10.0, roll=0.5, pitch=-0.5)
+        return cli._Home(sphere, facades.Scene(panorama, origin, 32.5, (wall,), (), 8))
+
+    camera = registration.Standing(
+        (11.0, 20.5, 35.2), (0.1, 0.2, 0.3), 700.0, (0.0, 0.05), (60, 80)
+    )
+    made = []
+
+    def stand(photo_id, kept, copy, home):
+        made.append((photo_id, copy["registration"]["panorama"]))
+        return placing.Stood(camera, *stood[made[-1]])
+
+    monkeypatch.setattr(cli, "_standing_home", home)
+    monkeypatch.setattr(cli, "_stand_copy", stand)
+    monkeypatch.setattr(cli, "_matches", lambda: {"pm:1": _kept(), "pm:flat": _kept()})
+    return made
+
+
+def _held_and_carried():
+    row = {"registration": {"panorama": "q"}, "inputs": "i", "flipped": False}
+    held = {
+        "pm:1": {**row, "standing": {"position": [0, 0, 0]}},
+        "pm:flat": {**row, "standing": None},
+    }
+    copies = [{"registration": {"panorama": p, "m": [1] * 9}, "strength": 0.8} for p in "ab"]
+    return held, {k: {"made": "x", "copies": copies, "at": {}} for k in held}
+
+
+def test_a_copy_stands_where_it_beats_its_matrix_on_enough_held_out_pairs(monkeypatch, tmp_path):
+    stood = {("pm:1", "a"): (0.006, 0.003, 30), ("pm:1", "b"): (0.006, 0.0055, 30)}
+    made = _copies(tmp_path, monkeypatch, {"top": 40.0}, stood)
+    held, carried = _held_and_carried()
+
+    cli._copies_standing(held, carried)
+
+    kept = json.loads((tmp_path / "carried_standing.json").read_text())
+    assert set(kept) == {"pm:1"} and made == [("pm:1", "a"), ("pm:1", "b")]  # not pm:flat
+    assert kept["pm:1"]["a"]["camera"]["position"] == [1.0, 0.5, 0.2]  # from that panorama
+    assert kept["pm:1"]["b"]["camera"] is None  # 0.05 % better: within the margin
+
+
+def test_a_copy_judged_on_too_few_held_out_pairs_keeps_its_matrix(monkeypatch, tmp_path):
+    stood = {("pm:1", "a"): (0.006, 0.001, 9), ("pm:1", "b"): (0.006, 0.001, 10)}
+    _copies(tmp_path, monkeypatch, {"top": 40.0}, stood)
+    held, carried = _held_and_carried()
+
+    cli._copies_standing(held, carried)
+
+    kept = json.loads((tmp_path / "carried_standing.json").read_text())
+    assert kept["pm:1"]["a"]["camera"] is None and kept["pm:1"]["b"]["camera"] is not None
+
+
+def test_a_copy_stands_again_only_when_its_walls_change(monkeypatch, tmp_path):
+    stood = {("pm:1", p): (0.006, 0.003, 30) for p in "ab"}
+    walls = {"top": 40.0}
+    made = _copies(tmp_path, monkeypatch, walls, stood)
+    held, carried = _held_and_carried()
+
+    cli._copies_standing(held, carried)
+    cli._copies_standing(held, carried)  # read back
+    walls["top"] = 45.0
+    cli._copies_standing(held, carried)
+
+    assert made == [("pm:1", "a"), ("pm:1", "b")] * 2
+
+
 def test_a_standing_camera_is_shown_only_where_it_lays_the_photo_better(monkeypatch, tmp_path):
     placements = {"pm:1": _kept(), "pm:2": _kept(inputs="j")}
     _registered(

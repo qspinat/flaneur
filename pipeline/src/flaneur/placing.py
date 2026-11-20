@@ -284,6 +284,7 @@ class Stood:
     camera: registration.Standing | None
     flat: float
     parallax: float
+    held: int = 0  # the held-out pairs scored
 
 
 def stood_against_flat(
@@ -294,11 +295,13 @@ def stood_against_flat(
     size: tuple,
     scene: facades.Scene,
     pin: tuple[float, float],
+    against: registration.Registration | None = None,
 ) -> Stood:
     """Where the photographer stood, from pairs given their depth by the panorama's walls, and
     whether that camera lays the photo better than the flat fit: each band of the photo held
-    out in turn, both refitted on the rest and scored on it. On the pairs the 3D walk's matrix
-    keeps (see registration.turned_through): the others are false matches."""
+    out in turn, both refitted on the rest and scored on it (or, `against` given, that flat
+    fit as it is, scored on the same held-out pairs: a copy's). On the pairs the 3D walk's
+    matrix keeps (see registration.turned_through): the others are false matches."""
     try:
         _, kept = registration.turned_through(
             photo_px, view_px, size, SHOWN, sphere.id, view, sphere.axes
@@ -340,7 +343,7 @@ def stood_against_flat(
             continue
         flat_off += list(
             registration.errors_flat(
-                flat, photo_px[out], view_px[out], size, SHOWN, view, sphere.axes
+                against or flat, photo_px[out], view_px[out], size, SHOWN, view, sphere.axes
             )
         )
         stand_off += (
@@ -355,7 +358,7 @@ def stood_against_flat(
     camera = fitted(np.ones(len(photo_px), bool))[1] if flat_off else None
     if camera is None:
         return Stood(None, np.inf, np.inf)
-    return Stood(camera, float(np.median(flat_off)), float(np.median(stand_off)))
+    return Stood(camera, float(np.median(flat_off)), float(np.median(stand_off)), len(flat_off))
 
 
 def _flat_without(
