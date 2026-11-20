@@ -1,6 +1,7 @@
 // The 3D walk checked in a browser, on the built site with its security policy: a photo laid in
 // a panorama where the pipeline puts it (a checkerboard registered on a leaning panorama, see
-// alignment_fixture.py: the page's view against the pipeline's drawing, within 2 px), no script
+// alignment_fixture.py, or one laid on a wall by the camera that took it: standing_fixture.py;
+// the page's view against the pipeline's drawing, within 2 px), no script
 // error, nothing refused, the credits, a click on the photo opening its card (saying how sure its
 // placement is), a step forward.
 // Usage: node tests/visual/walk3d.mjs <base-url> <fixture-folder> [screenshot-folder]
@@ -24,7 +25,9 @@ await page.route('**/data/scene.json', async (route) => {
   const scene = await (await route.fetch()).json();
   const home = scene.panoramas.find((p) => p.id === fixture.panorama);
   home.image = `panoramas/${fixture.panorama}.jpg`;
-  scene.photos.push({ id: 'test:board', title: 'Damier', years: [1900, 1900], credit: 'Essai', image: 'photos/test-board.png', flipped: false, shown: [{ panorama: fixture.panorama, registration: fixture.registration, strength: 1 }], status: 'automatic', unchecked_area: true, proposed_marks: false });
+  const shown = { panorama: fixture.panorama, registration: fixture.registration, strength: 1 };
+  if (fixture.standing) Object.assign(home, { walls: fixture.walls, ground: fixture.ground }) && (shown.standing = fixture.standing);
+  scene.photos.push({ id: 'test:board', title: 'Damier', years: [1900, 1900], credit: 'Essai', image: 'photos/test-board.png', flipped: false, shown: [shown], status: 'automatic', unchecked_area: true, proposed_marks: false });
   await route.fulfill({ json: scene });
 });
 await page.route(`**/data/panoramas/${fixture.panorama}.jpg`, (route) => route.fulfill({ path: `${fixtures}/panorama.jpg` }));
