@@ -1,6 +1,8 @@
 """The 3D walk's scene: today's panoramas, and the photos placed in them."""
 
-from flaneur import scene
+from pathlib import Path
+
+from flaneur import facades, scene
 from flaneur.export import WalkPhoto
 from flaneur.panoramax import Picture
 
@@ -53,14 +55,15 @@ def _row(**kw):
         "unchecked_area": False,
         "proposed_marks": False,
         "unsure_sources": False,
+        "standing": None,
         **kw,
     }
 
 
-def _build(shown, copies=None):
+def _build(shown, copies=None, walls_of=lambda panorama: None):
     pictures = [_picture("p1", 2.3466), _picture("p2", 2.3467), _picture("p3", 2.3500)]
     walk = [_photo("pm:1"), _photo("pm:2")]
-    return scene.build3d(pictures, shown, copies or {}, walk)
+    return scene.build3d(pictures, shown, copies or {}, walk, walls_of)
 
 
 def test_the_photos_placed_are_shown_on_their_home_then_their_copies():
@@ -126,3 +129,82 @@ def test_a_photo_says_how_sure_its_placement_is():
         photo["proposed_marks"],
         photo["unsure_sources"],
     ) == ("automatic", True, False, True)
+
+
+def test_a_photo_standing_off_its_panorama_is_laid_on_its_walls_which_go_with_it_alone():
+    standing = {"position": [1.0, 0.5, 0.2], "focal": 700.0}  # metres off its panorama
+    copies = {"pm:1": [{"registration": {**REG, "panorama": "p2"}, "strength": 0.5}]}
+    wall = facades.Wall((652010.123, 6861525.0), (652019.0, 6861525.0), 47.456, "fitted")
+    around = facades.Scene("p1", (652000.0, 6861520.0, 35.0), 32.5, (wall,), (), 8)
+    asked = []
+
+    built, _ = _build(
+        {"pm:1": _row(standing=standing)},
+        copies,
+        lambda panorama: asked.append(panorama) or around,
+    )
+
+    home, copy = built["photos"][0]["shown"]
+    assert home["standing"] == standing
+    assert "standing" not in copy  # a copy keeps its matrix
+    p1, p2, _ = built["panoramas"]
+    assert p1["walls"] == [[10.12, 5.0, 19.0, 5.0, 12.46]]  # east, north, top: metres off it
+    assert p1["ground"] == -2.5
+    assert "walls" not in p2 and asked == ["p1"]
+
+
+def test_a_photo_standing_off_a_panorama_without_walls_keeps_its_matrix():
+    built, _ = _build({"pm:1": _row(standing={"position": [0.0, 0.0, 0.0]})})
+
+    assert "standing" not in built["photos"][0]["shown"][0]
+    assert "walls" not in built["panoramas"][0]
+
+
+def _scene_of(*walls):
+    return facades.Scene(
+        "p1",
+        (0.0, 0.0, 0.0),
+        -2.5,
+        tuple(facades.Wall(a, b, 10.0, "fitted") for a, b in walls),
+        (),
+        8,
+    )
+
+
+def test_walls_fitted_apart_meet_at_their_corner_in_the_walk():
+    corner = _scene_of(((-10.0, 5.0), (-1.0, 5.0)), ((0.0, 6.0), (0.0, 20.0)))  # 1 m short of it
+
+    shown = scene.walls_shown(corner)
+
+    assert shown == [[-10.0, 5.0, 0.0, 5.0, 10.0], [0.0, 5.0, 0.0, 20.0, 10.0]]
+
+
+def test_walls_with_a_street_between_stay_apart():
+    across = _scene_of(((-10.0, 5.0), (-3.0, 5.0)), ((3.0, 5.0), (10.0, 5.0)))  # a 6 m street
+
+    assert scene.walls_shown(across) == [[-10.0, 5.0, -3.0, 5.0, 10.0], [3.0, 5.0, 10.0, 5.0, 10.0]]
+
+
+def test_only_the_nearest_walls_go_to_the_walk():
+    many = _scene_of(*(((-1.0, d), (1.0, d)) for d in range(200, 5, -3)))  # 3 m apart
+
+    shown = scene.walls_shown(many)
+
+    assert len(shown) == scene.MOST_WALLS
+    assert max(w[1] for w in shown) == 8 + 3 * (scene.MOST_WALLS - 1)
+
+
+def test_three_walls_ending_near_one_corner_all_meet_at_one_point():
+    corner = _scene_of(
+        ((-10.0, 5.0), (0.0, 5.0)), ((0.6, 5.4), (0.6, 20.0)), ((-0.4, 6.0), (-8.0, 14.0))
+    )
+
+    shown = scene.walls_shown(corner)
+
+    assert shown[0][2:4] == shown[1][0:2] == shown[2][0:2]
+
+
+def test_the_walk_draws_as_many_walls_as_the_scene_sends():
+    photo = Path(__file__).parents[2] / "web" / "src" / "sphere" / "photo.ts"
+
+    assert f"const MOST_WALLS = {scene.MOST_WALLS};" in photo.read_text()

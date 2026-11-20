@@ -10,7 +10,18 @@ import pytest
 import typer
 from typer.testing import CliRunner
 
-from flaneur import cli, confirming, depth, facades, match, poses, segment
+from flaneur import (
+    cli,
+    confirming,
+    depth,
+    facades,
+    match,
+    placed,
+    placing,
+    poses,
+    registration,
+    segment,
+)
 from flaneur.cli import app
 
 
@@ -2110,6 +2121,94 @@ def test_a_registration_is_made_again_only_when_its_placement_changes(monkeypatc
     assert made == ["pm:1", "pm:1"]
 
 
+def _registered(tmp_path, monkeypatch, placements: dict, walls: dict, stood: dict) -> list:
+    """REGISTERED holding `placements` registered in panorama "q" (made as now), the walls
+    around "q" (`walls`: one top a call, see facades.Wall), the standing cameras made by
+    `stood` (photo id: (flat, parallax)); what was stood, in order."""
+    monkeypatch.setattr(cli, "REGISTERED", tmp_path / "registered.json")
+    row = {"panorama": "q", "matrix": [[1, 0, 0], [0, 1, 0], [0, 0, 1]]}
+    cli.write_json(
+        cli.REGISTERED,
+        {k: {"made": cli._registered_as(m), "registration": row} for k, m in placements.items()},
+    )
+    origin = (10.0, 20.0, 35.0)
+
+    def scene(panorama):
+        wall = facades.Wall((0.0, 5.0), (9.0, 5.0), walls["top"], "fitted")
+        sphere = SimpleNamespace(azimuth=10.0, roll=0.5, pitch=-0.5)
+        return cli._Home(sphere, facades.Scene(panorama, origin, 32.5, (wall,), (), 8))
+
+    camera = registration.Standing(
+        (11.0, 20.5, 35.2), (0.1, 0.2, 0.3), 700.0, (0.0, 0.05), (60, 80)
+    )
+    made = []
+
+    def stand(k, m, home):
+        made.append(k)
+        if isinstance(stood[k], Exception):
+            raise stood[k]
+        return placing.Stood(camera, *stood[k])
+
+    monkeypatch.setattr(cli, "_standing_home", scene)
+    monkeypatch.setattr(cli, "_stand_one", stand)
+    return made
+
+
+def test_a_standing_camera_is_shown_only_where_it_lays_the_photo_better(monkeypatch, tmp_path):
+    placements = {"pm:1": _kept(), "pm:2": _kept(inputs="j")}
+    _registered(
+        tmp_path,
+        monkeypatch,
+        placements,
+        {"top": 40.0},
+        {"pm:1": (0.02, 0.01), "pm:2": (0.01, 0.02)},
+    )
+
+    shown = cli._registrations(placements)
+
+    assert shown["pm:1"].standing["position"] == [1.0, 0.5, 0.2]  # metres off the panorama
+    assert shown["pm:1"].registration["panorama"] == "q"
+    assert shown["pm:2"].standing is None
+
+
+def test_a_standing_camera_that_fails_leaves_the_others_and_is_tried_again(
+    monkeypatch, tmp_path, capsys
+):
+    placements = {"bad": _kept(), "good": _kept(inputs="j")}
+    stood = {"bad": np.linalg.LinAlgError("singular"), "good": (0.02, 0.01)}
+    made = _registered(tmp_path, monkeypatch, placements, {"top": 40.0}, stood)
+
+    shown = cli._registrations(placements)
+    cli._registrations(placements)
+
+    assert shown["bad"].registration and shown["bad"].standing is None
+    assert shown["good"].standing is not None
+    assert made == ["bad", "good", "bad"] and "pas debout" in capsys.readouterr().err
+
+
+def test_errors_not_measured_show_no_standing_camera_and_stay_json(monkeypatch, tmp_path):
+    placements = {"pm:1": _kept()}
+    _registered(tmp_path, monkeypatch, placements, {"top": 40.0}, {"pm:1": (np.inf, np.inf)})
+
+    shown = cli._registrations(placements)
+
+    assert shown["pm:1"].standing is None
+    assert "Infinity" not in (tmp_path / "registered.json").read_text()
+
+
+def test_a_standing_camera_is_made_again_only_when_its_walls_change(monkeypatch, tmp_path):
+    placements = {"pm:1": _kept()}
+    walls = {"top": 40.0}
+    made = _registered(tmp_path, monkeypatch, placements, walls, {"pm:1": (0.02, 0.01)})
+
+    cli._registrations(placements)
+    cli._registrations(placements)  # the same walls: read back
+    walls["top"] = 45.0  # a wall drawn again
+    cli._registrations(placements)
+
+    assert made == ["pm:1", "pm:1"]
+
+
 def test_the_placed_list_is_written_from_the_answers_verdicts_and_matches(monkeypatch, tmp_path):
     exported = tmp_path / "old.jpg"
     exported.touch()
@@ -2148,7 +2247,9 @@ def test_the_placed_list_is_written_from_the_answers_verdicts_and_matches(monkey
         "_photo_part": lambda photo_id: "",  # each placed from the photo as it is (see "i")
         "_exported": lambda photo_id: exported,
         "_image": lambda photo_id: "h",
-        "_registrations": lambda standing: {k: {"panorama": "p"} for k in standing},
+        "_registrations": lambda standing: {
+            k: placed.Registered({"panorama": "p"}) for k in standing
+        },
         "_kept_store": lambda m, kept: (SimpleNamespace(points=lambda k, i: seen_by.get(k)), "i"),
         "_sure_panoramas": lambda: ({"sure"}, {"sure", "gps"}),  # sure of their pose, known
     }.items():
@@ -2188,6 +2289,7 @@ def test_only_the_photos_placed_with_a_registration_go_to_3d(monkeypatch):
             "unchecked_area": False,
             "proposed_marks": False,
             "unsure_sources": False,
+            "standing": None,
         }
     }
 
@@ -2214,6 +2316,7 @@ def test_a_match_placement_reaches_the_3d_walk_with_its_status(monkeypatch, tmp_
                 "unchecked_area": False,
                 "proposed_marks": False,
                 "unsure_sources": False,
+                "standing": None,
             }
         },
     }.items():
@@ -2560,7 +2663,9 @@ def test_proposed_marks_are_said_only_of_a_placement_made_with_them(monkeypatch,
         "_photo_part": lambda photo_id: "h:abcd1234",
         "_exported": lambda photo_id: exported,
         "_image": lambda photo_id: "h",
-        "_registrations": lambda standing: {k: {"panorama": "p"} for k in standing},
+        "_registrations": lambda standing: {
+            k: placed.Registered({"panorama": "p"}) for k in standing
+        },
     }.items():
         monkeypatch.setattr(cli, name, value)
 
@@ -2599,7 +2704,7 @@ def test_a_registration_that_fails_leaves_the_others_and_is_tried_again(monkeypa
     found = cli._registrations({"bad": _kept(), "good": _kept(x=3.0)})
 
     kept = json.loads((tmp_path / "registered.json").read_text())
-    assert found == {"bad": None, "good": None} and set(kept) == {"good"}
+    assert found == {"bad": (None, None), "good": (None, None)} and set(kept) == {"good"}
 
 
 def test_no_test_watches_or_reads_the_pipeline_s_answers(tmp_path):

@@ -65,19 +65,22 @@ def test_the_panorama_where_most_pairs_agree_wins_over_the_first():
 REG = {"panorama": "p", "m": [1.0] * 9, "view": {"heading": 0.0, "pitch": 5.0, "fov": 75.0}}
 
 
-def _matched(verdict=None, area_checked=True, marks=None) -> placed.Matched:
-    return placed.Matched({"x": 0.0}, verdict, "img", area_checked, marks)
+def _matched(verdict=None, area_checked=True, marks=None, unsure=False) -> placed.Matched:
+    return placed.Matched({"x": 0.0}, verdict, "img", area_checked, marks, unsure)
+
+
+STANDING = {"position": [1.0, 2.0, 30.0]}
 
 
 def _build(matched, answers=None, far=frozenset(), registered=None):
     """The list from `matched` placements of match, the page's `answers`, those answered
-    `far`; each registered in panorama "p" (the photos asked to register noted in
+    `far`; each registered in panorama "p", standing (the photos asked to register noted in
     `registered`)."""
 
     def register(placements: dict) -> dict:
         if registered is not None:
             registered.update(placements)
-        return {k: REG for k in placements}
+        return {k: placed.Registered(REG, STANDING) for k in placements}
 
     return placed.build(answers or {}, set(far), matched, register)
 
@@ -90,6 +93,14 @@ def test_a_yes_is_checked_a_near_is_near_an_unseen_one_is_automatic():
         "n": placed.NEAR,
         "u": placed.AUTOMATIC,
     }
+
+
+def test_one_on_panoramas_nothing_checks_keeps_its_matrix_alone():
+    unsure = _build({"x": _matched(unsure=True)})["x"]
+    seen = _build({"x": _matched("yes", unsure=True)})["x"]  # the note is for those not seen
+
+    assert (unsure.registration, unsure.standing) == (REG, None)
+    assert seen.standing == STANDING
 
 
 def test_a_no_leaves_the_list():

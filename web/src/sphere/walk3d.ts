@@ -1,6 +1,7 @@
 // The 3D walk's scene (scene.json, see pipeline scene.build3d) and what is worked out of it
 // without the viewer: where photos show, the way on, the photo of the walk one faces.
 import { shownIn, type Photo } from '../walk';
+import type { Standing, WallRow } from './standing';
 
 export type Link = [index: number, bearing: number, metres: number];
 
@@ -17,6 +18,8 @@ export interface Panorama {
   credit: number; // in Scene.credits
   image: string; // on the site (a photo in it), else on Panoramax
   links: Link[]; // the next ones along the street, by index in Scene.panoramas
+  walls?: WallRow[]; // around it, where a photo stands off it (metres from it)
+  ground?: number; // the street, metres from it (up)
 }
 
 /** An old photo in a panorama: a 3×3 matrix (row by row) from the photo's [0, 1]² to
@@ -31,6 +34,7 @@ export interface Shown {
   panorama: string;
   registration: Registration;
   strength: number; // 1 at its home, fading on the neighbours it is carried to
+  standing?: Standing; // at its home: the camera where the photographer stood, laid on the walls
 }
 
 export interface OldPhoto {

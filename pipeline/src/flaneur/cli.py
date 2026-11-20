@@ -3,6 +3,7 @@
 import fcntl
 import functools
 import hashlib
+import inspect
 import io
 import json
 import math
@@ -3325,10 +3326,11 @@ def _registered_as(kept: dict) -> str:
     return _digest([kept["inputs"], camera, _registering_code()])
 
 
-def _registrations(standing: dict[str, dict]) -> dict[str, dict | None]:
+def _registrations(standing: dict[str, dict]) -> dict[str, placed.Registered]:
     """Each placement of match (`standing`: as kept in matches.json) registered on its own in a
     panorama it was found from (see placed.registered), as the placing page writes registrations;
-    none where none fits. Kept (REGISTERED), made again only when the placement changes."""
+    none where none fits. With its standing camera where that lays the photo better (see _stood).
+    Kept (REGISTERED), made again only when the placement changes."""
     was = register.load(REGISTERED)
     made = {k: _registered_as(m) for k, m in standing.items()}
     kept = {k: was[k] for k in standing if was.get(k, {}).get("made") == made[k]}
@@ -3341,9 +3343,125 @@ def _registrations(standing: dict[str, dict]) -> dict[str, dict | None]:
                 typer.echo(f"{k} : pas recalée ({error})", err=True)
                 continue
             kept[k] = {"made": made[k], "registration": found and registration.to_json(found)}
+    if any(r["registration"] for r in kept.values()):  # the walls read only then
+        kept = _stood(standing, kept)
     if kept != was:  # made, or left (no longer placed)
         write_json(REGISTERED, kept)
-    return {k: (kept.get(k) or {}).get("registration") for k in standing}
+    return {k: _registered_shown(kept.get(k) or {}) for k in standing}
+
+
+def _stood(standing: dict[str, dict], kept: dict[str, dict]) -> dict[str, dict]:
+    """Registered placements (`kept`, see _registrations) given their standing camera (see
+    placing.stood_against_flat) in the panorama registered in: kept with the walls it stood
+    against (see _walls_of), made again when they change (drawn by hand, fitted again)."""
+    out = dict(kept)
+    for k, row in kept.items():
+        if row["registration"] is None:
+            continue
+        home = _standing_home(row["registration"]["panorama"])
+        walls = home and _walls_of(home)
+        if (row.get("standing") or {}).get("walls") == walls:
+            continue
+        try:
+            stood = _stand_one(k, standing[k], home) if home else None
+        except Exception as error:  # this one left, tried again next time: the others go on
+            typer.echo(f"{k} : pas debout ({error})", err=True)
+            continue
+        out[k] = {**row, "standing": {"walls": walls, **_standing_as(stood, home)}}
+    return out
+
+
+def _walls_of(home: "_Home") -> str:
+    """What a standing camera is fitted from, beside its pairs, hashed: the walls and the
+    street around its panorama, from it (see scene.walls_shown), the panorama's levelling
+    (its rays), and the code."""
+    around, sphere = home.scene, home.sphere
+    made = [w.made for w in around.walls]
+    ground = round(around.ground - around.origin[2], 2)
+    levelled = [round(sphere.azimuth, 2), round(sphere.roll, 3), round(sphere.pitch, 3)]
+    return _digest([scene.walls_shown(around), made, ground, levelled, _standing_code()])
+
+
+@functools.cache
+def _standing_code() -> str:
+    """The code a standing camera is fitted and compared by, hashed (not the placing page's)."""
+    fitting = (placing.stood_against_flat, placing._depth, placing._rays)
+    return _digest([inspect.getsource(f) for f in fitting] + [_hash_of(registration, facades)])
+
+
+def _standing_as(stood: placing.Stood | None, home: "_Home | None") -> dict:
+    """A standing camera as kept: placed from its panorama (east, north, up metres: the frame
+    of heights moves as the area grows), and its errors held out against the flat fit's (none:
+    not measured)."""
+    if stood is None or stood.camera is None:
+        return {"camera": None}
+    camera = registration.standing_to_json(stood.camera)
+    camera["position"] = [
+        round(a - b, 3) for a, b in zip(camera["position"], home.scene.origin, strict=True)
+    ]
+    errors = {"flat": stood.flat, "parallax": stood.parallax}
+    return {
+        "camera": camera,
+        **{k: round(e, 5) if np.isfinite(e) else None for k, e in errors.items()},
+    }
+
+
+def _registered_shown(row: dict) -> placed.Registered:
+    """A placement's registration, and its standing camera where that lays the photo better
+    than the flat fit (held out, see placing.stood_against_flat)."""
+    stood = row.get("standing") or {}
+    flat, parallax = stood.get("flat"), stood.get("parallax")
+    better = stood.get("camera") and None not in (flat, parallax) and parallax < flat
+    return placed.Registered(row.get("registration"), stood["camera"] if better else None)
+
+
+def _standing_walls(panorama: str) -> facades.Scene | None:
+    """The walls a photo standing off `panorama` is laid on in the 3D walk."""
+    return (home := _standing_home(panorama)) and home.scene
+
+
+class _Home(NamedTuple):
+    sphere: match.Panorama
+    scene: facades.Scene
+
+
+@functools.cache  # for one command: the walls read once
+def _standing_homes() -> Callable[[str], _Home | None]:
+    """Each panorama (by id) as matched against, with its walls (see _wall_scenes): where a
+    photo's standing camera is fitted, and laid in the 3D walk."""
+    _, near_by, _ = _matching()
+    walls = _wall_scenes(near_by, _colmap_fixed())
+    by_id = {p.id: p for p in near_by}
+
+    @functools.cache
+    def home(panorama: str) -> _Home | None:
+        around = walls.scene(panorama, None, made_only=True) if panorama in by_id else None
+        return _Home(by_id[panorama], around) if around is not None else None
+
+    return home
+
+
+def _standing_home(panorama: str) -> _Home | None:
+    return _standing_homes()(panorama)
+
+
+def _stand_one(photo_id: str, kept: dict, home: _Home) -> placing.Stood | None:
+    """A registered placement's standing camera in its panorama (`home`), from the pairs it
+    matched there (see bridging.paired); none without points or pairs."""
+    if (found := _found_from(photo_id, kept)) is None:
+        return None
+    m, points, observed = found
+    if (paired := bridging.paired(points, observed, home.sphere, observed.size)) is None:
+        return None
+    return placing.stood_against_flat(
+        paired.photo_px,
+        paired.view_px,
+        paired.view,
+        home.sphere,
+        observed.size,
+        home.scene,
+        (m.x, m.y),
+    )
 
 
 def _registering_world() -> tuple[dict[str, match.Panorama], set[str]]:
@@ -3368,18 +3486,25 @@ def _observed_of(store: chain.Store, photo_id: str, inputs: str, kept: dict | No
     return found
 
 
+def _found_from(photo_id: str, kept: dict) -> tuple | None:
+    """A placement of match (as kept), the points it was found from and its observation; none
+    without them (a camera proposed: no points kept)."""
+    m = _situation(kept)
+    if (at := _kept_store(m, kept)) is None:
+        return None
+    store, inputs = at
+    points, observed = store.points(photo_id, inputs), _observed_of(store, photo_id, inputs, kept)
+    return None if points is None or observed is None else (m, points, observed)
+
+
 def _register_one(
     photo_id: str, kept: dict, by_id: dict[str, match.Panorama], fixed: set[str]
 ) -> registration.Registration | None:
     """A placement of match registered on its own in a panorama it was found from (`by_id`:
     those the 3D walk can show), COLMAP's first among equals (see _sources_first)."""
-    m = _situation(kept)
-    if (at := _kept_store(m, kept)) is None:  # a camera proposed: no points kept
+    if (found := _found_from(photo_id, kept)) is None:
         return None
-    store, inputs = at
-    points, observed = store.points(photo_id, inputs), _observed_of(store, photo_id, inputs, kept)
-    if points is None or observed is None:
-        return None
+    m, points, observed = found
     return placed.registered(points, observed, _sources_first(points, by_id, m, fixed))
 
 
@@ -4313,7 +4438,11 @@ def _write_scene(answering: tuple) -> None:
     now = _poised(_panoramas(pictures, lambda x, y: 0.0))
     copies = {i: c["copies"] for i, c in _carried(shown, now).items()}
     built, holding = scene.build3d(
-        [p for p in pictures if (PANORAMAS / f"{p.id}.jpg").exists()], shown, copies, walk
+        [p for p in pictures if (PANORAMAS / f"{p.id}.jpg").exists()],
+        shown,
+        copies,
+        walk,
+        _standing_walls,
     )
     _copy_panoramas(holding, WEB_DATA / "panoramas")
     in_scene = {p["id"] for p in built["photos"]}
