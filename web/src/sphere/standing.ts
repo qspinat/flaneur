@@ -22,6 +22,7 @@ export const STREET_REACH_M = 50; // the street met this far at most (facades.ST
 export const HIDDEN = 1.1; // a point this much farther than a wall in its way is hidden
 export const STRETCHED = 6; // a part of the photo laid this many times larger than the photo as a whole: smeared
 const STEP_RAD = 1e-4; // how far a direction is moved to see how the photo stretches there
+const FAINT = 0.05; // a part of the photo faded this much catches no click (photo.ts: UNSEEN)
 export const ROOFS_PAST_M = 2; // over the roofs, walls are met this far past their ends: the sky
 // does not tear between two walls (their corners are joined, not the gaps between blocks)
 
@@ -108,8 +109,7 @@ const unit = (v: number[]) => v.map((x) => x / Math.hypot(...v));
 /** How little of the photo a small turn of the direction `d` spans (`here`: where `d` falls in
  *  it), the way it is most squeezed: the lesser singular value of the photo's pixels per radian
  *  there (as the shader in photo.ts works it out per pixel of the screen). */
-function squeezed(d: number[], here: number[], s: Standing, walls: WallRow[], ground: number): number {
-  const kr = lensTurn(s);
+function squeezed(d: number[], here: number[], s: Standing, walls: WallRow[], ground: number, kr: number[][]): number {
   const e1 = unit(cross(d, Math.abs(d[2]) < 0.9 ? [0, 0, 1] : [1, 0, 0]));
   const [a, b] = [e1, cross(d, e1)].map((e) => {
     const v = unit(d.map((x, i) => x + STEP_RAD * e[i]));
@@ -127,7 +127,8 @@ function squeezed(d: number[], here: number[], s: Standing, walls: WallRow[], gr
  *  but in the sky (see the shader in photo.ts). */
 export function standingAt(d: number[], s: Standing, walls: WallRow[], ground: number, density?: number): [number, number] | null {
   const [metres, sky] = reachOrSky([0, 0, 0], d, walls, ground);
-  const [x, y] = photoPixel(d, metres, s);
+  const kr = lensTurn(s);
+  const [x, y] = photoPixel(d, metres, s, kr);
   const [u, v] = [x / s.size[1], y / s.size[0]];
   if (!(u >= 0 && u <= 1 && v >= 0 && v <= 1)) return null;
   if (metres < Infinity) {
@@ -136,6 +137,10 @@ export function standingAt(d: number[], s: Standing, walls: WallRow[], ground: n
     const toward = away.map((v) => v / length);
     if (toWall(s.position, toward, walls, ground, false, length / HIDDEN) < length / HIDDEN) return null;
   }
-  if (density !== undefined && !sky && (squeezed(d, [x, y], s, walls, ground) * STRETCHED) / density <= 0.5) return null;
+  if (density !== undefined && !sky) {
+    const ratio = (squeezed(d, [x, y], s, walls, ground, kr) * STRETCHED) / density;
+    const t = Math.min(1, Math.max(0, (ratio - 0.5) / 0.5));
+    if (t * t * (3 - 2 * t) < FAINT) return null; // the shader's smoothstep(0.5, 1.0, ratio)
+  }
   return [u, v];
 }

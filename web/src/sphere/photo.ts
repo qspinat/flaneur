@@ -108,7 +108,8 @@ void main() {
   float det = dx.x * dy.y - dx.y * dy.x;
   float least = sqrt(max(square - sqrt(max(square * square - 4.0 * det * det, 0.0)), 0.0) / 2.0);
   // (not the sky: where two walls' backdrops meet, the photo folds there, a line, not a smear)
-  float kept = sky ? 1.0 : smoothstep(0.5, 1.0, least * ${STRETCHED.toFixed(1)} / (density * length(dFdx(d))));
+  float spread = length(dFdx(d));  // before choosing: derivatives need all four of a block
+  float kept = sky ? 1.0 : smoothstep(0.5, 1.0, least * ${STRETCHED.toFixed(1)} / (density * spread));
   if (seen.z <= 0.0 || kept <= 0.0) discard;
   vec2 uv = px / size.yx;
   if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) discard;
