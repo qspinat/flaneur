@@ -20,6 +20,9 @@ export type WallRow = [x0: number, y0: number, x1: number, y1: number, top: numb
 export const NEAREST_M = 0.5; // a wall nearer than this along a ray is not met (pipeline: Blocks)
 export const STREET_REACH_M = 50; // the street met this far at most (facades.STREET_REACH_M)
 export const HIDDEN = 1.1; // a point this much farther than a wall in its way is hidden
+export const STRETCHED = 6; // a part of the photo laid this many times larger than the photo as a whole: smeared
+const STEP_RAD = 1e-4; // how far a direction is moved to see how the photo stretches there
+const FAINT = 0.05; // a part of the photo faded this much catches no click (photo.ts: UNSEEN)
 export const ROOFS_PAST_M = 2; // over the roofs, walls are met this far past their ends: the sky
 // does not tear between two walls (their corners are joined, not the gaps between blocks)
 
@@ -41,15 +44,21 @@ function toWall(from: number[], d: number[], walls: WallRow[], ground: number, r
   return nearest;
 }
 
-/** How far along `d` (unit, east-north-up) from `from` today's point stands: the nearest wall,
- *  else the street when it points down (within STREET_REACH_M), else over the roofs as far as
- *  the wall under it, else Infinity (the sky). */
-export function reach(from: number[], d: number[], walls: WallRow[], ground: number): number {
+/** How far along `d` (unit, east-north-up) from `from` today's point stands, and whether it
+ *  is the sky: the nearest wall, else the street when it points down (within STREET_REACH_M),
+ *  else (the sky) over the roofs as far as the wall under it, else Infinity. As the shader's
+ *  reach in photo.ts. */
+export function reachOrSky(from: number[], d: number[], walls: WallRow[], ground: number): [number, boolean] {
   const wall = toWall(from, d, walls, ground);
-  if (wall < Infinity) return wall;
+  if (wall < Infinity) return [wall, false];
   const street = d[2] < 0 ? (ground - from[2]) / d[2] : Infinity;
-  if (street > 0 && street <= STREET_REACH_M) return street;
-  return d[2] > 0 ? toWall(from, d, walls, ground, true) : Infinity;
+  if (street > 0 && street <= STREET_REACH_M) return [street, false];
+  return [d[2] > 0 ? toWall(from, d, walls, ground, true) : Infinity, true];
+}
+
+/** How far along `d` from `from` today's point stands (see reachOrSky). */
+export function reach(from: number[], d: number[], walls: WallRow[], ground: number): number {
+  return reachOrSky(from, d, walls, ground)[0];
 }
 
 /** How far along a direction from the panorama today's point stands (see reach). */
@@ -87,19 +96,39 @@ const times = (m: number[][], v: number[]) => m.map((row) => row[0] * v[0] + row
 
 /** Where the point `metres` along `d` from the panorama falls in the photo (pixels; NaN behind
  *  the camera): K R d + (1 / metres) K R (panorama - camera), its depth divided out. */
-export function photoPixel(d: number[], metres: number, s: Standing): [number, number] {
-  const kr = lensTurn(s);
+export function photoPixel(d: number[], metres: number, s: Standing, kr = lensTurn(s)): [number, number] {
   const ahead = times(kr, d);
   const step = times(kr, s.position.map((v) => -v));
   const seen = ahead.map((v, i) => v + step[i] / metres);
   return seen[2] > 0 ? [seen[0] / seen[2], seen[1] / seen[2]] : [NaN, NaN];
 }
 
+const cross = (a: number[], b: number[]) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+const unit = (v: number[]) => v.map((x) => x / Math.hypot(...v));
+
+/** How little of the photo a small turn of the direction `d` spans (`here`: where `d` falls in
+ *  it), the way it is most squeezed: the lesser singular value of the photo's pixels per radian
+ *  there (as the shader in photo.ts works it out per pixel of the screen). */
+function squeezed(d: number[], here: number[], s: Standing, walls: WallRow[], ground: number, kr: number[][]): number {
+  const e1 = unit(cross(d, Math.abs(d[2]) < 0.9 ? [0, 0, 1] : [1, 0, 0]));
+  const [a, b] = [e1, cross(d, e1)].map((e) => {
+    const v = unit(d.map((x, i) => x + STEP_RAD * e[i]));
+    const there = photoPixel(v, depthAlong(v, walls, ground), s, kr);
+    return [(there[0] - here[0]) / STEP_RAD, (there[1] - here[1]) / STEP_RAD];
+  });
+  const square = a[0] ** 2 + a[1] ** 2 + b[0] ** 2 + b[1] ** 2;
+  const det = a[0] * b[1] - a[1] * b[0];
+  return Math.sqrt(Math.max(square - Math.sqrt(Math.max(square ** 2 - 4 * det ** 2, 0)), 0) / 2);
+}
+
 /** Where a direction from the panorama shows in the photo ([0, 1]², y down), or null: behind
- *  the camera, off the photo, or hidden from the photographer by a wall nearer to them. */
-export function standingAt(d: number[], s: Standing, walls: WallRow[], ground: number): [number, number] | null {
-  const metres = depthAlong(d, walls, ground);
-  const [x, y] = photoPixel(d, metres, s);
+ *  the camera, off the photo, hidden from the photographer by a wall nearer to them, or (the
+ *  photo's pixels per radian as laid, `density`, given) where the photo fades out, smeared,
+ *  but in the sky (see the shader in photo.ts). */
+export function standingAt(d: number[], s: Standing, walls: WallRow[], ground: number, density?: number): [number, number] | null {
+  const [metres, sky] = reachOrSky([0, 0, 0], d, walls, ground);
+  const kr = lensTurn(s);
+  const [x, y] = photoPixel(d, metres, s, kr);
   const [u, v] = [x / s.size[1], y / s.size[0]];
   if (!(u >= 0 && u <= 1 && v >= 0 && v <= 1)) return null;
   if (metres < Infinity) {
@@ -107,6 +136,11 @@ export function standingAt(d: number[], s: Standing, walls: WallRow[], ground: n
     const length = Math.hypot(...away);
     const toward = away.map((v) => v / length);
     if (toWall(s.position, toward, walls, ground, false, length / HIDDEN) < length / HIDDEN) return null;
+  }
+  if (density !== undefined && !sky) {
+    const ratio = (squeezed(d, [x, y], s, walls, ground, kr) * STRETCHED) / density;
+    const t = Math.min(1, Math.max(0, (ratio - 0.5) / 0.5));
+    if (t * t * (3 - 2 * t) < FAINT) return null; // the shader's smoothstep(0.5, 1.0, ratio)
   }
   return [u, v];
 }
