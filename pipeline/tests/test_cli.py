@@ -11,6 +11,7 @@ import typer
 from typer.testing import CliRunner
 
 from flaneur import (
+    chain,
     cli,
     confirming,
     depth,
@@ -3027,3 +3028,62 @@ def test_the_check_passes_on_enough_answers_few_wrong_and_no_decoy_taken(
     rows += [{"kind": "leurre", "fooled": i < fooled} for i in range(3)]
 
     assert cli._check_passed(rows)[0] is passed
+
+
+def test_a_lomag_keypoint_beside_a_disk_one_is_that_detail():
+    disk = np.array([[0.0, 0.0], [10.0, 10.0]])
+    lomag = np.array([[10.5, 10.0], [50.0, 50.0], [1.0, 1.0]])
+
+    assert cli._merged(disk, lomag, 3).tolist() == [1, 4, 0]
+    assert cli._merged(np.empty((0, 2)), lomag, 3).tolist() == [3, 4, 5]
+
+
+class _Kept:
+    """A store of features and pairs, as chain.Store answers them."""
+
+    def __init__(self, keypoints: dict[str, list], pairs: dict[str, list]):
+        self.keypoints, self.found = keypoints, pairs
+
+    def features(self, photo_id, image, read):
+        k = np.array(self.keypoints[photo_id], float).reshape(-1, 2)
+        return match.Features(k, np.zeros((len(k), 4), np.float32), (60, 80))
+
+    def pairs(self, a, b, features):
+        return np.array(self.found[b[0]], int).reshape(-1, 2)
+
+
+def _two_matchers(monkeypatch, lomag: bool) -> cli._Chaining:
+    monkeypatch.setattr(cli, "_image", lambda photo_id: "img")
+    work = object.__new__(cli._Chaining)
+    work.store = _Kept(
+        {"me": [[0, 0], [10, 10]], "L": [[0, 0]] * 4, "D": [[0, 0]] * 4}, {"D": [[0, 3]]}
+    )
+    work.lomag_store = _Kept(
+        {"me": [[10.5, 10], [50, 50], [10.2, 10]], "L": [[1, 1]] * 3},
+        {"L": [[0, 0], [1, 2], [2, 1]]},
+    )
+    work.lomag, work.by_lomag = lomag, {"L"} if lomag else set()
+    return work
+
+
+def test_a_photo_pairs_with_each_anchor_through_the_matcher_that_placed_it(monkeypatch):
+    work = _two_matchers(monkeypatch, lomag=True)
+    anchor = lambda i: chain.Anchor(i, None, None, (60, 80), None, "")  # noqa: E731
+    observed = match.Observed(np.zeros((6, 2)), (60, 80), _rays(0))  # 2 DISK, 1 band, 3 LoMa-G
+
+    pairs = work.paired(SimpleNamespace(id="me"), observed)
+
+    assert [r.tolist() for r in pairs(anchor("D"))] == [[0], [3]]
+    # LoMa-G rows: its keypoints beside DISK's are theirs (1), the others after them (4);
+    # the anchor's after its own DISK keypoints (4 + 0, 4 + 2); one detail once per anchor
+    assert [r.tolist() for r in pairs(anchor("L"))] == [[1, 4], [4, 6]]
+
+
+def test_with_lomag_anchors_a_photo_s_lomag_keypoints_follow_its_disk_ones(monkeypatch):
+    work = _two_matchers(monkeypatch, lomag=True)
+    view = match.View(0.0, 0.0, 30.0, 0.0, 0.5, 60.0)
+
+    anchor = work.anchor("me", view, None, "inputs")
+
+    assert anchor.keypoints.tolist() == [[0, 0], [10, 10], [10.5, 10], [50, 50], [10.2, 10]]
+    assert len(_two_matchers(monkeypatch, lomag=False).anchor("me", view, None, "").keypoints) == 2
