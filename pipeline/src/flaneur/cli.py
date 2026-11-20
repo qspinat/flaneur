@@ -2158,13 +2158,36 @@ def _chain_setup() -> str:
     return f"{_setup()}:{digest}"
 
 
+CHAINED = ":from-"  # a chained placement's inputs: then its anchors' (see _placed_from)
+
+
+def _is_chained(inputs: str) -> bool:
+    return CHAINED in inputs
+
+
+CHAINED_POINTS = DATA / "raw" / "chained"  # the points chained photos were placed from
+
+
+def _keep_chained(photo_id: str, inputs: str, points: match.Points) -> None:
+    """Keeps a chained photo's points apart from match's (one file a photo each: a placement
+    set aside by eye keeps its own), for the pages (see _kept_store); one placed without
+    anchors is a placement against today: nothing kept."""
+    if _is_chained(inputs):
+        chain.Store(CHAINED_POINTS, None).save_points(photo_id, inputs, points)
+
+
+def _unchained(inputs: str) -> str:
+    """What the photo of a placement was observed from: its inputs, a chained one's anchors off."""
+    return inputs.split(CHAINED, 1)[0]
+
+
 def _placed_from(inputs: str, parents: list[chain.Anchor]) -> str:
     """What a chained photo was placed from: its own inputs, and its anchors' (a verdict on
     it holds while they do); without any, what it was placed from against today."""
     if not parents:
         return inputs
     from_ = repr(sorted((a.id, a.inputs) for a in parents))
-    return f"{inputs}:from-{hashlib.sha1(from_.encode()).hexdigest()[:8]}"
+    return f"{inputs}{CHAINED}{hashlib.sha1(from_.encode()).hexdigest()[:8]}"
 
 
 class _Chaining:
@@ -2366,6 +2389,7 @@ def _rounds(work: _Chaining, left_out: set[str]) -> tuple[dict[str, dict], dict[
             )
             parents = chain.provenance(found.points)
             results[photo_id] = {"situated": asdict(situated), "round": k, "from": parents}
+            _keep_chained(photo_id, inputs, found.points)
             typer.echo(f"{photo_id} : situé au tour {k} ({camera.agree} points), depuis {parents}")
             placed[photo_id] = work.anchor(photo_id, camera, found.points, inputs)
         if not new:
@@ -3206,10 +3230,13 @@ class _ViewWalls:
 
 
 def _kept_store(m: match.Situated, kept: dict | None) -> tuple[chain.Store, str] | None:
-    """Where `match` kept what a placement against today was found from (its points, its rays),
-    and under which inputs; none for a camera proposed."""
+    """Where a placement's points and rays are kept, and under which inputs: as `match` kept
+    them, a chained one's as the chaining did (see _keep_chained); none for a camera
+    proposed."""
     if _is_proposal(m.inputs):
         return None
+    if _is_chained(m.inputs):
+        return chain.Store(CHAINED_POINTS, None), m.inputs
     matcher = (kept or {}).get("matcher") or DISK
     return chain.Store(MATCHERS[matcher].photos, None), _found_inputs(m.inputs, matcher)
 
@@ -3329,10 +3356,13 @@ def _registering_world() -> tuple[dict[str, match.Panorama], set[str]]:
 
 
 def _observed_of(store: chain.Store, photo_id: str, inputs: str, kept: dict | None):
-    """A placement's observation (see chain.Store.observed): as found from its `inputs`, else,
-    for one kept though a run found nothing better (see _still_shown), as that run left it: the
-    same photo and panoramas, its marks aside, the rays its points were found on."""
-    found = store.observed(photo_id, inputs)
+    """A placement's observation (see chain.Store.observed): as found from its `inputs` (a
+    chained one's: the photo's own, see _unchained), else, for one kept though a run found
+    nothing better (see _still_shown), as that run left it: the same photo and panoramas, its
+    marks aside, the rays its points were found on. A chained one's: in DISK's store."""
+    if _is_chained(inputs):
+        store = chain.Store(MATCHERS[DISK].photos, None)
+    found = store.observed(photo_id, _unchained(inputs))
     if found is None and (tried := (kept or {}).get("tried_from")):
         found = store.observed(photo_id, tried)
     return found
@@ -3360,6 +3390,16 @@ def _points_of(photo_id: str, m: match.Situated, kept: dict | None) -> match.Poi
         return None
     store, inputs = at
     return store.points(photo_id, inputs)
+
+
+def _placement_points(
+    photo_id: str, m: match.Situated, kept: dict | None, chained: bool
+) -> match.Points | None:
+    """The points of a placement shown (see _points_of); none for one the chaining placed
+    without anchors (its inputs a placement's against today: match's points are not its own)."""
+    if chained and not _is_chained(m.inputs):
+        return None
+    return _points_of(photo_id, m, kept)
 
 
 @app.command("confirmer")
@@ -3395,10 +3435,9 @@ def confirm_placed(port: int = 8768, open_browser: bool = True) -> None:
             rounds[k] = {"round": 0, "from": [], "proposed": p["why"]}
 
     @functools.cache
-    def points_of(photo_id: str) -> match.Points | None:  # a chained one has none of its own
-        if rounds[photo_id]["round"] > 0:
-            return None
-        return _points_of(photo_id, situated[photo_id], kept.get(photo_id))
+    def points_of(photo_id: str) -> match.Points | None:
+        chained = rounds[photo_id]["round"] > 0
+        return _placement_points(photo_id, situated[photo_id], kept.get(photo_id), chained)
 
     def first_of(photo_id: str) -> list[match.Panorama]:
         return _sources_first(points_of(photo_id), by_id, situated[photo_id], fixed)
