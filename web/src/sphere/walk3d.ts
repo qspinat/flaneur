@@ -34,7 +34,7 @@ export interface Shown {
   panorama: string;
   registration: Registration;
   strength: number; // 1 at its home, fading on the neighbours it is carried to
-  standing?: Standing; // at its home: the camera where the photographer stood, laid on the walls
+  standing?: Standing; // the camera where the photographer stood, laid on this panorama's walls (home or copy)
 }
 
 export interface OldPhoto {

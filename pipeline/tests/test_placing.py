@@ -1411,12 +1411,13 @@ def test_a_wall_drawn_higher_than_any_is_refused(page, one, tmp_path):
     assert status == 400 and not sources.walls.exists()
 
 
-def _deep_street(sphere: match.Panorama, walls: bool = True):
+def _deep_street(sphere: match.Panorama, walls: bool = True, off=(1.5, 1.3, -1.0)):
     """As _street, with details all along both facades (6 to 28 m) and on the street's end: the
-    photo's pixels (80 × 60), the view's, the scene, and the camera that took it."""
+    photo's pixels (80 × 60), the view's, the scene, and the camera that took it (`off` the
+    panorama)."""
     home = np.array([sphere.x, sphere.y, sphere.z])
     camera = registration.Standing(
-        tuple(home + [1.5, 1.3, -1.0]),
+        tuple(home + off),
         tuple(cv2.Rodrigues(_facing(140.0))[0].ravel()),
         70.0,
         (0.0, 0.0),
@@ -1453,6 +1454,24 @@ def test_a_camera_off_the_panorama_is_drawn_better_standing_than_flat(page):
 
     assert stood.parallax < stood.flat / 2  # held out band by band
     assert np.hypot(*np.subtract(stood.camera.position[:2], camera.position[:2])) < 0.3
+
+
+def test_a_standing_camera_is_scored_against_a_matrix_given_on_the_same_held_out_pairs(page):
+    sources, _ = page
+    sphere = sources.spheres[0]
+    _, photo_px, view_px, scene = _deep_street(sphere, off=(0.05, 0.05, 0.0))  # all pairs kept
+    size, view = (60, 80), ViewOf(140.0)
+    given = registration.fit(
+        photo_px[::2], view_px[::2], size, placing.SHOWN, sphere.id, view, sphere.axes
+    )[0]
+
+    stood = placing.stood_against_flat(
+        photo_px, view_px, view, sphere, size, scene, (sphere.x, sphere.y), against=given
+    )
+
+    off = registration.errors_flat(given, photo_px, view_px, size, placing.SHOWN, view, sphere.axes)
+    assert stood.held == len(photo_px)  # every pair has a depth here: each held out once
+    assert stood.flat == pytest.approx(np.median(off))
 
 
 def test_pairs_no_flat_warp_agrees_with_are_left_out_as_the_walk_leaves_them(page):

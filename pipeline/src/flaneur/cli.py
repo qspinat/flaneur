@@ -5,6 +5,7 @@ import functools
 import hashlib
 import inspect
 import io
+import itertools
 import json
 import math
 import re
@@ -3391,10 +3392,10 @@ def _standing_code() -> str:
 
 def _standing_as(stood: placing.Stood | None, home: "_Home | None") -> dict:
     """A standing camera as kept: placed from its panorama (east, north, up metres: the frame
-    of heights moves as the area grows), and its errors held out against the flat fit's (none:
-    not measured)."""
+    of heights moves as the area grows), its errors held out against the flat fit's (none: not
+    measured) and how many pairs were held out (see _standing_drawn)."""
     if stood is None or stood.camera is None:
-        return {"camera": None}
+        return {"camera": None, "held": stood.held if stood else 0}
     camera = registration.standing_to_json(stood.camera)
     camera["position"] = [
         round(a - b, 3) for a, b in zip(camera["position"], home.scene.origin, strict=True)
@@ -3403,16 +3404,25 @@ def _standing_as(stood: placing.Stood | None, home: "_Home | None") -> dict:
     return {
         "camera": camera,
         **{k: round(e, 5) if np.isfinite(e) else None for k, e in errors.items()},
+        "held": stood.held,
     }
+
+
+def _standing_drawn(kept: dict, gain: float = 0.0, held: int = 0) -> dict | None:
+    """A standing camera as kept (see _standing_as) where it lays the photo better than the flat
+    fit, by `gain` at least (shares of the photo's diagonal), on `held` held-out pairs at least;
+    else none."""
+    flat, parallax = kept.get("flat"), kept.get("parallax")
+    if not kept.get("camera") or None in (flat, parallax) or kept.get("held", held) < held:
+        return None
+    better = flat - parallax >= gain - 1e-9 if gain else parallax < flat  # stored to 1e-5
+    return kept["camera"] if better else None
 
 
 def _registered_shown(row: dict) -> placed.Registered:
     """A placement's registration, and its standing camera where that lays the photo better
     than the flat fit (held out, see placing.stood_against_flat)."""
-    stood = row.get("standing") or {}
-    flat, parallax = stood.get("flat"), stood.get("parallax")
-    better = stood.get("camera") and None not in (flat, parallax) and parallax < flat
-    return placed.Registered(row.get("registration"), stood["camera"] if better else None)
+    return placed.Registered(row.get("registration"), _standing_drawn(row.get("standing") or {}))
 
 
 def _standing_walls(panorama: str) -> facades.Scene | None:
@@ -3445,13 +3455,25 @@ def _standing_home(panorama: str) -> _Home | None:
     return _standing_homes()(panorama)
 
 
-def _stand_one(photo_id: str, kept: dict, home: _Home) -> placing.Stood | None:
-    """A registered placement's standing camera in its panorama (`home`), from the pairs it
-    matched there (see bridging.paired); none without points or pairs."""
+def _stand_one(
+    photo_id: str,
+    kept: dict,
+    home: _Home,
+    against: registration.Registration | None = None,
+    again: Callable[[match.Panorama, tuple[int, int]], bridging.Paired | None] | None = None,
+    least: int = 0,
+) -> placing.Stood | None:
+    """A placement's standing camera in a panorama (`home`, with its walls), from the pairs it
+    matched there (see bridging.paired; else `again`: the photo matched again there), scored
+    against the flat fit (see placing.stood_against_flat: `against` a copy's matrix, on
+    `least` held-out pairs at least); none without points or pairs."""
     if (found := _found_from(photo_id, kept)) is None:
         return None
     m, points, observed = found
-    if (paired := bridging.paired(points, observed, home.sphere, observed.size)) is None:
+    paired = bridging.paired(points, observed, home.sphere, observed.size)
+    if paired is None and again is not None:
+        paired = again(home.sphere, observed.size)
+    if paired is None:
         return None
     return placing.stood_against_flat(
         paired.photo_px,
@@ -3461,6 +3483,8 @@ def _stand_one(photo_id: str, kept: dict, home: _Home) -> placing.Stood | None:
         observed.size,
         home.scene,
         (m.x, m.y),
+        against=against,
+        least=least,
     )
 
 
@@ -3832,7 +3856,8 @@ def carry_placed() -> None:
     """Porte chaque photo placée dans son panorama sur les panoramas voisins qui voient les
     mêmes façades, de proche en proche le long de la rue, s'estompant au loin
     (data/pilot/carried.json) ; seules les photos répondues depuis la dernière fois sont
-    refaites."""
+    refaites. Puis, pour les photos posées sur les murs chez elles, les copies aussi
+    (data/pilot/carried_standing.json)."""
     held = _shown_in_3d()  # placed by hand or by match, on the image each has now
     with closing(db.connect(DB_PATH)) as conn:
         pictures = _lined_up(panoramas.load(conn))  # refused when tilts were measured otherwise
@@ -3842,7 +3867,7 @@ def carry_placed() -> None:
     todo = [i for i in held if i not in carried]
     if todo:
         street = panoramas.links(pictures)  # the next ones along the street, every way
-        views = _views(kept=8)
+        views = _carrying_views()
         for photo_id in todo:
             r = placings.registration_of(held[photo_id])
             home = spheres.get(r.panorama)
@@ -3861,6 +3886,168 @@ def carry_placed() -> None:
         f"{len(carried)} photos placées ({len(todo)} refaites) portées sur {sum(counts)} "
         f"panoramas voisins ({np.median(counts) if counts else 0:.0f} par photo, médiane)"
     )
+    _copies_standing(held, carried)
+
+
+CARRIED_STANDING = DATA / "pilot" / "carried_standing.json"  # the copies laid on the walls
+COPY_HELD = 10  # held-out pairs a copy's standing camera is judged on, at least
+COPY_GAIN = 0.001  # and how much better than the copy's matrix it lays them (photo diagonals)
+
+
+@functools.cache
+def _carrying_views() -> match.Views:
+    """The panoramas' views, a panorama and its neighbours in memory (the matcher loaded once)."""
+    return _views(kept=8)
+
+
+def _photo_store() -> chain.Store:
+    """The photos' features as matching reads them, extracted where not kept (the matcher)."""
+    return chain.Store(MATCHERS[DISK].photos, _carrying_views().matcher)
+
+
+@functools.cache
+def _copying_code() -> str:
+    """The code a copy's own pairs and standing camera are found by, hashed (not the code
+    that only chooses which copies or writes them: changing it refits nothing)."""
+    made = (_stand_one, _matched_again)
+    return _digest([inspect.getsource(f) for f in made] + [_hash_of(carrying, bridging)])
+
+
+def _copy_standing(kept: dict) -> dict | None:
+    """A copy's standing camera as kept (see _copies_standing) where it is to be drawn."""
+    return _standing_drawn(kept, COPY_GAIN, COPY_HELD)
+
+
+def _copy_made(carried: dict, copy: dict, registered_as: str, walls: str) -> str:
+    """What a copy's standing camera is made from (see _copies_standing): the photo as carried
+    (`carried`: its row, see _answered_as), the copy, the placement of match (as registered:
+    see _registered_as), the walls of its panorama (see _walls_of), the code, and the least
+    held-out pairs a camera is fitted on (the gain is judged on reading)."""
+    made = [copy["registration"], registered_as, walls, _copying_code(), COPY_HELD]
+    return _digest([carried["made"], *made])
+
+
+def _copies_to_stand(
+    held: dict[str, dict], carried: dict[str, dict], placements: dict[str, dict]
+) -> Iterator[tuple[str, int, str, dict, Callable[[], str | None]]]:
+    """The copies that may stand (see _copies_standing): those of a photo standing in its home
+    panorama (`held`) as match placed it (`placements`, as registered: not a camera proposed
+    and said yes to); each with its place among the photo's copies and what its camera is made
+    from (see _copy_made: worked out when asked, the walls read once a panorama; none for a
+    panorama without walls)."""
+    registered = register.load(REGISTERED)
+    walls = functools.cache(
+        lambda panorama: _walls_of(home) if (home := _standing_home(panorama)) else None
+    )
+    for photo_id, row in held.items():
+        placement = placements.get(photo_id) or {}
+        if not row.get("standing") or photo_id not in carried or "x" not in placement:
+            continue
+        registered_as = _registered_as(placement)
+        if registered.get(photo_id, {}).get("made") != registered_as:  # shown otherwise
+            continue
+        for at, copy in enumerate(carried[photo_id]["copies"]):
+            panorama = copy["registration"]["panorama"]
+
+            def made(photo_id=photo_id, copy=copy, panorama=panorama, registered_as=registered_as):
+                around = walls(panorama)
+                return around and _copy_made(carried[photo_id], copy, registered_as, around)
+
+            yield photo_id, at, panorama, copy, made
+
+
+def _copies_drawn(shown: dict[str, dict], carried: dict[str, dict]) -> dict[str, list[dict]]:
+    """Each photo's copies (see porter) as the 3D walk draws them: with the camera where the
+    photographer stood (see _copies_standing) where it lays the photo better (see
+    _copy_standing) and was made from what the copy and its panorama's walls are now; else its
+    matrix (a wall drawn since: until the next night)."""
+    drawn = {i: list(c["copies"]) for i, c in carried.items()}
+    if not (stood := register.load(CARRIED_STANDING)):
+        return drawn
+    for photo_id, at, panorama, copy, made in _copies_to_stand(shown, carried, _matches()):
+        found = stood.get(photo_id, {}).get(panorama)
+        if found and (camera := _copy_standing(found)) and found["made"] == made():
+            drawn[photo_id][at] = {**copy, "standing": camera}
+    return drawn
+
+
+def _copies_standing(held: dict[str, dict], carried: dict[str, dict]) -> None:
+    """Each copy (see porter) of a placement of match standing in its home panorama (`held`:
+    as the 3D walk takes them; none for one placed by hand or resting on panoramas nothing
+    checks) given the camera where the photographer stood, from the photo's own pairs in the
+    copy's panorama (see _stand_one: else the photo matched again there) and that panorama's
+    walls, scored against the copy's matrix (drawn where _copy_standing says so). Kept in
+    CARRIED_STANDING with what each was made from (see _copy_made), made again when that
+    changes; copies never stood are done too, panorama after panorama (one 360° picture at a
+    time)."""
+    was = register.load(CARRIED_STANDING)
+    kept = _matches()
+    out: dict[str, dict] = {}
+    todo = []
+    for photo_id, _, panorama, copy, made in _copies_to_stand(held, carried, kept):
+        if (now := made()) is None:  # no walls there
+            continue
+        if (before := was.get(photo_id, {}).get(panorama)) and before["made"] == now:
+            out.setdefault(photo_id, {})[panorama] = before
+        else:
+            todo.append((panorama, photo_id, copy, now))
+    if todo:
+        store = functools.cache(_photo_store)  # the matcher loaded only if one is matched again
+        picture = functools.lru_cache(maxsize=1)(lambda path: cv2.imread(str(path)))
+        for panorama, group in itertools.groupby(sorted(todo, key=lambda t: t[:2]), lambda t: t[0]):
+            home = _standing_home(panorama)
+            for _, photo_id, copy, made in group:
+                against = registration.from_json(copy["registration"])
+
+                def again(sphere, size, photo_id=photo_id, against=against):
+                    return _matched_again(photo_id, against, sphere, store(), picture, size)
+
+                try:
+                    stood = _stand_one(photo_id, kept[photo_id], home, against, again, COPY_HELD)
+                except Exception as error:  # this copy left, tried again next time
+                    typer.echo(f"{photo_id} sur {panorama[:8]} : pas debout ({error})", err=True)
+                    continue
+                out.setdefault(photo_id, {})[panorama] = {
+                    "made": made,
+                    **_standing_as(stood, home),
+                }
+            write_json(CARRIED_STANDING, out)  # panorama after panorama: a stop loses one
+    if out != was:
+        write_json(CARRIED_STANDING, out)
+    standing = sum(1 for p in out.values() for c in p.values() if _copy_standing(c))
+    typer.echo(f"{standing} copies posées sur les murs, sur {sum(map(len, out.values()))}")
+
+
+def _matched_again(
+    photo_id: str,
+    copy: registration.Registration,
+    sphere: match.Panorama,
+    store: chain.Store,
+    picture: Callable[[Path], np.ndarray | None],
+    size: tuple[int, int],
+) -> bridging.Paired | None:
+    """The photo (its features as matching reads them, from `store`) matched against a view of
+    `sphere` (its 360° picture: `picture`) framed on its copy there (see carrying.framed),
+    shown at placing.SHOWN: the pairs that agree on one flat warp (raw matches, unlike match's
+    own pairs, which its geometry kept: measured 20/11, unfiltered 26 copies standing instead
+    of 39), the photo's pixels at `size` (the placement's); none from fewer than
+    MIN_MATCHED. Its features or picture missing: an error (not judged: done next time)."""
+    mine = _features(store, photo_id) if store is not None else None
+    seen = picture(sphere.path)
+    if mine is None or seen is None:
+        raise FileNotFoundError(f"{photo_id} ou {sphere.path} : pas à portée")
+    view = carrying.framed(copy, sphere.axes)
+    cut = match.perspective(seen, sphere.axes, view.heading, view.fov, placing.SHOWN, view.pitch)
+    theirs = store.matcher.features(cut)
+    pairs = store.matcher.pairs(mine, theirs)
+    scale = max(size) / max(mine.size)
+    photo_px = mine.keypoints[pairs[:, 0]].astype(float) * scale
+    view_px = theirs.keypoints[pairs[:, 1]].astype(float)
+    try:
+        _, agree = registration.agreeing(photo_px, view_px)
+    except (registration.NotFitted, cv2.error):  # too few agree, or a degenerate set
+        return None
+    return bridging.Paired(sphere.id, view, photo_px[agree], view_px[agree])
 
 
 def _copy_panoramas(holding: set[str], folder: Path) -> None:
@@ -4436,7 +4623,7 @@ def _write_scene(answering: tuple) -> None:
     marked = {p["id"] for p in site["photos"] if p["in_3d"]}  # by the export, on its images
     shown = {i: r for i, r in _shown_in_3d(answering).items() if i in marked}
     now = _poised(_panoramas(pictures, lambda x, y: 0.0))
-    copies = {i: c["copies"] for i, c in _carried(shown, now).items()}
+    copies = _copies_drawn(shown, _carried(shown, now))
     built, holding = scene.build3d(
         [p for p in pictures if (PANORAMAS / f"{p.id}.jpg").exists()],
         shown,
