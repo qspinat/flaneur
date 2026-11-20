@@ -3187,6 +3187,19 @@ PLACED_PHOTOS = DATA / "pilot" / "placed.json"  # the photos placed, each with i
 CHECKED_AREAS = DATA / "pilot" / "checked_areas.json"  # each area's matchers passing the check
 
 
+SURVEY_PRODUCER = "Immergis pour la Ville de Paris"  # the survey: panoramas sure of their pose
+
+
+def _sure_panoramas() -> tuple[set[str], set[str]]:
+    """The panoramas known, and those sure of their pose: the survey's and those COLMAP placed
+    (see placed.trusted_share)."""
+    with closing(db.connect(DB_PATH)) as conn:
+        pictures = panoramas.load(conn)
+    fixed = _fixed_by_colmap(pictures, register.load(FIXES))
+    survey = {p.id for p in pictures if p.producer == SURVEY_PRODUCER}
+    return {p.id for p in pictures}, survey | fixed
+
+
 def _placed_photos(write: bool = False, answering: tuple | None = None) -> dict[str, placed.Placed]:
     """The photos placed now (see placed.build): the placing page's answers on the image each
     has now; match's placements of each photo as it is now (see _found_as_now), and the yes
@@ -3197,6 +3210,16 @@ def _placed_photos(write: bool = False, answering: tuple | None = None) -> dict[
     _, answers, far = answering or _placing_answers()
     scenes, judged, checked = _scenes_now(), _Judged(), register.load(CHECKED_AREAS)
     marks = marking.states(SIGHTS)
+    sure = functools.cache(_sure_panoramas)  # read once, if a placement has its points
+
+    def share(k: str, m: dict) -> float | None:
+        if _is_proposal(m["inputs"]):  # a camera proposed: no points kept
+            return None
+        at = _kept_store(_situation(m), m)
+        if at is None or (points := at[0].points(k, at[1])) is None:
+            return None
+        known, trusted = sure()
+        return placed.trusted_share(points, trusted, known)
 
     def weighed(k: str, m: dict) -> placed.Matched:
         said, image = judged.on(k, m), _image(k)
@@ -3210,6 +3233,7 @@ def _placed_photos(write: bool = False, answering: tuple | None = None) -> dict[
             image,
             (m.get("matcher") or DISK) in area,
             mark if marked_on == image else None,
+            share(k, m),
         )
 
     matched = {

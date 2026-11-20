@@ -1,12 +1,14 @@
 """The photos placed: in a panorama by hand, or by `match` and not refused; each with what the
 user said of it (its status). The 3D walk shows them all, each saying how sure it is."""
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Sequence, Set
 from dataclasses import asdict, dataclass
 
 from flaneur import bridging, match, placing, registration
 
 CHECKED, NEAR, AUTOMATIC = "checked", "near", "automatic"  # said yes or placed by hand; near
+TRUSTED_SHARE = 0.5  # of a placement's sightings by sure panoramas: less, it says so (plan
+# sources-de-confiance, 20/11: under it, "no" 32 % of 25 judged; over, 13 % of 31)
 
 
 def status_of(verdict: str | None) -> str | None:
@@ -22,8 +24,9 @@ class Placed:
     """A photo placed: how sure (`status`), by whom (`source`: "page", "match"), its registration
     in a panorama as the placing page writes them (none: on the map only), the image it was
     placed on (`inputs`, its hash), shown the other way round (`flipped`); for one of match not
-    seen yet, whether its matcher does not pass the check in its area yet (`unchecked_area`) and
-    whether it rests on landmarks only proposed (`proposed_marks`)."""
+    seen yet, whether its matcher does not pass the check in its area yet (`unchecked_area`),
+    whether it rests on landmarks only proposed (`proposed_marks`) and on panoramas nothing
+    checks (`unsure_sources`: see TRUSTED_SHARE)."""
 
     photo_id: str
     status: str
@@ -33,6 +36,7 @@ class Placed:
     flipped: bool = False
     unchecked_area: bool = False
     proposed_marks: bool = False
+    unsure_sources: bool = False
 
     def for_scene(self) -> dict:
         """As the 3D walk takes a photo placed (see scene.build3d)."""
@@ -43,13 +47,15 @@ class Placed:
 class Matched:
     """A placement of match as the photo is now, as the list weighs it: as kept (`placement`),
     the user's word on it (`verdict`, none yet), the photo's image now (its hash), whether its
-    matcher passes the check in its area, its landmarks' marks ("checked", "proposed", none)."""
+    matcher passes the check in its area, its landmarks' marks ("checked", "proposed", none),
+    the share of its points' sightings by sure panoramas (see trusted_share; none: not known)."""
 
     placement: dict
     verdict: str | None
     image: str
     area_checked: bool
     marks: str | None = None
+    trusted_share: float | None = None
 
 
 def build(
@@ -81,8 +87,19 @@ def build(
             m.image,
             unchecked_area=not (seen or m.area_checked),
             proposed_marks=not seen and m.marks == "proposed",
+            unsure_sources=not seen
+            and m.trusted_share is not None
+            and m.trusted_share < TRUSTED_SHARE,
         )
     return found
+
+
+def trusted_share(points: match.Points, trusted: Set[str], panoramas: Set[str]) -> float | None:
+    """The share of a placement's sightings (a point seen by a panorama: one) by `trusted`
+    panoramas (the survey's, COLMAP's), among those by `panoramas` (old photos left out); none
+    when no panorama saw any."""
+    seen = [i for s in points.seen for i in s if i in panoramas]
+    return sum(i in trusted for i in seen) / len(seen) if seen else None
 
 
 def registered(

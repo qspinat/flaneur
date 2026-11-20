@@ -154,7 +154,10 @@ def build3d(
                 "image": image_name(me.id),
                 "flipped": row["flipped"],
                 "shown": where,
-                **{k: row[k] for k in ("status", "unchecked_area", "proposed_marks")},
+                **{
+                    k: row[k]
+                    for k in ("status", "unchecked_area", "proposed_marks", "unsure_sources")
+                },
             }
         )
     ways = panoramas.links(pictures)
