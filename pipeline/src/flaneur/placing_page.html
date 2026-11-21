@@ -297,8 +297,10 @@ let made = 'proposal';   // how it was made: 'proposal' or 'points'
 let flipped = false, pairing = false, pairs = [], waiting = null, refused = '';  // why the pairs gave no fit
 let answering = false;   // an answer on its way: no other until the next photo shows
 let reopenedWith = null; // a photo reopened: the registration it had, shown first
+let toLay = null;        // a photo said near: match's panorama, view and pairs, laid there once
 let asking = 0;          // the latest proposal asked for (an older one coming back is ignored)
 let parallaxOn = false;  // the photo fitted from where the photographer stood (see /api/parallax)
+let parallaxWanted = false;  // as the user left the toggle: each photo opens so
 let fitted = null;       // the last fit by points: each pair's error; in parallax, where it stood
                          // and the pin it started from (`start`: an answer refits from it)
 let fitting = 0;         // the latest fit asked for (an older one coming back is ignored)
@@ -423,7 +425,8 @@ async function findNear() {
     say(`Aucun panorama à moins de ${rules.near_m} m : X si aucun ne voit la photo.`); return;
   }
   const still = near.findIndex((p) => p.id === shown);  // a small move keeps the panorama shown
-  const home = reopenedWith ? near.findIndex((p) => p.id === reopenedWith.registration.panorama) : -1;
+  const opening = reopenedWith?.registration.panorama ?? toLay?.panorama;
+  const home = opening ? near.findIndex((p) => p.id === opening) : -1;
   if (still >= 0) { at = still; drawNear(); where(); } else await goTo(Math.max(0, home));
 }
 async function goTo(i) {
@@ -432,7 +435,9 @@ async function goTo(i) {
   const sphere = near[at];
   const step = rules.view_step;
   view = { heading: Math.round((spot.heading ?? 0) / step) * step % 360 };
-  proposal = null; carried = null; made = 'proposal'; showView();
+  proposal = null; carried = null; made = 'proposal';
+  if (toLay?.panorama === sphere.id) { layOffer(); return; }
+  showView();
   const mine = ++asking;
   let found = null;
   if (reopenedWith && reopenedWith.registration.panorama === sphere.id) {  // as the user left it
@@ -450,6 +455,21 @@ async function goTo(i) {
     say(found.fit === 'parallax' ? 'Rouverte : posée en parallaxe. P et ses paires pour la refaire, sinon la passer (S).' : '');
   }
   else { say('Pas de proposition : la poser par points.'); enterPairing(); }
+}
+
+/** A photo said near: match's pairs laid in the view they were found in, the parallax on, and
+ *  the photo fitted from them at once (once the walls are there); the user corrects them. */
+async function layOffer() {
+  const { view: seen, pairs: laid } = toLay, here = near[at].id, me = photo;
+  toLay = null; view = { ...seen }; asking++;  // a proposal on its way: no longer wanted
+  setParallax(true); enterPairing(); where();  // the walls asked
+  pairs = laid.photo_px.map((px, i) => [px, laid.view_px[i]]);
+  drawDots(); help();
+  say('Jugée près : les paires trouvées sont posées, à corriger (un point se déplace d\'un clic).');
+  const walls = await depthAhead();  // the fit waits for them (none: made flat, and why said)
+  if (photo !== me || near[at]?.id !== here || !pairing) return;
+  await pairsChanged();
+  if (!walls && $('parallax').disabled) say(`Pas en parallaxe (${$('parallax').title}) : recalée à plat.`);
 }
 
 function viewUrl(id = near[at].id) {
@@ -494,6 +514,7 @@ function setParallax(on, why = '') {
  *  off). */
 function dropScene() {
   walling++; viewing++; viewAsked = '';  // the walls on their way, and as the view shows them
+  deepened = null;  // asked again when wanted: those on their way are let go
   if (at < 0 || near[at]?.id !== scene?.panorama) scene = null;
   drawInView();
   setTool(null); third = null; picked = false; draft = null;
@@ -502,7 +523,7 @@ function dropScene() {
 }
 async function toggleParallax() {
   if ($('parallax').disabled || at < 0) return;
-  setParallax(!parallaxOn);
+  setParallax(!parallaxOn); parallaxWanted = parallaxOn;
   if (parallaxOn && !(await depthAhead())) return;
   if (parallaxOn && viewAsked !== viewKey()) wallsInView();  // the walls had: drawn over the view again
   // a fit changes only from the pairs that may stand off the panorama: Entrée keeps the new one
@@ -512,12 +533,19 @@ async function toggleParallax() {
  *  the neighbours chosen if any; none to be had: the button says why, and parallax goes off.
  *  Whether these are still the walls wanted when they come. */
 let walling = 0;  // the walls last asked for, made (/api/depth) or saved (/api/walls)
+let walled = null;  // those of `deepened` on their way: whether they came, once they do
 async function depthAhead(again = false) {
   if (!parallaxOn || at < 0) return false;
   // the walls, from the neighbours chosen; and which neighbour sees best the way the view looks
   const key = `${near[at].id}|${JSON.stringify(chosenHere() ?? null)}|${view.heading}`;
-  if (key === deepened && !again) return true;  // asked already for these
+  if (key === deepened && !again) return walled ?? true;  // asked already: once they come
   deepened = key;
+  const asked = askWalls();
+  walled = asked;
+  asked.then(() => { if (walled === asked) walled = null; });
+  return asked;
+}
+async function askWalls() {
   const mine = ++walling, here = near[at].id;
   say('Murs autour du panorama en cours… (de nouveaux voisins : jusqu\'à une minute, le temps de les apparier)');
   try {
@@ -971,7 +999,10 @@ function measurable(img) {
   return false;
 }
 for (const id of Object.keys(PICTURES)) {
-  $(id).addEventListener('load', () => { if (waitingFor === $(id)) { waitingFor = null; say(''); } });
+  $(id).addEventListener('load', () => {
+    if (waitingFor === $(id)) { waitingFor = null; say(''); }
+    if (pairing) drawDots();  // dots laid before their picture came: put where they belong
+  });
 }
 function pixelOf(img, event) {
   const box = img.getBoundingClientRect();  // as shown, zoomed or not
@@ -1053,10 +1084,10 @@ $('view').addEventListener('click', async (e) => {
 function pickedUp() {
   forgetFit(); proposal = null; shown($('view-laid'), ''); showThird(); help();
 }
-/** The pairs changed: the warp comes again from those left, or goes. */
-function pairsChanged() {
+/** The pairs changed: the warp comes again from those left (once made), or goes. */
+async function pairsChanged() {
   showThird(); help();
-  if (pairs.length >= rules.min_points) fitPairs(); else { forgetFit(); proposal = null; shown($('view-laid'), ''); }
+  if (pairs.length >= rules.min_points) await fitPairs(); else { forgetFit(); proposal = null; shown($('view-laid'), ''); }
 }
 async function fitPairs(deep = true) {
   refused = '';
@@ -1344,7 +1375,8 @@ function show(next) {
   leavePairing();
   if (!next) { photo = null; $('title').textContent = 'Plus rien à placer.'; refreshChrome(); return; }
   photo = next; flipped = !!next.flipped; proposal = null; carried = null; at = -1;
-  pairs = []; forgetFit(); setParallax(parallaxOn);
+  toLay = next.offer ?? null;
+  pairs = []; forgetFit(); setParallax(parallaxWanted);  // one said near turned it on for itself
   spot = { lon: photo.lon, lat: photo.lat, heading: photo.heading };
   reopenedWith = next.registration ? { registration: next.registration, answer: next.answer,
                                        carried_from: next.carried_from, fit: next.fit } : null;
@@ -1352,7 +1384,7 @@ function show(next) {
   const why = { revoir: 'déjà jugée, à revoir', voisins: 'porte d\'autres photos', proche: 'un panorama tout près',
                 isolée: 'loin des autres',
                 'sans panorama': 'aucun panorama proche', passée: 'passée une fois', rouverte: 'rouverte',
-                portée: 'proposée depuis une photo placée' };
+                portée: 'proposée depuis une photo placée', près: 'jugée près : ses paires à corriger' };
   $('progress').textContent = `encore ${left} à placer · ${why[photo.why] || ''}`;
   $('pinned').src = photoUrl();
   map.jumpTo({ center: [spot.lon, spot.lat] });

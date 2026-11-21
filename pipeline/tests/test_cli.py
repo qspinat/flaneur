@@ -8,9 +8,12 @@ import cv2
 import numpy as np
 import pytest
 import typer
+from PIL import Image
+from shapely.geometry import Point
 from typer.testing import CliRunner
 
 from flaneur import (
+    bridging,
     chain,
     cli,
     confirming,
@@ -3174,3 +3177,90 @@ def test_only_chained_placements_said_yes_to_are_listed_the_others_proposed(tmp_
     scenes = dict.fromkeys(photos, "s")
 
     assert set(cli._chained_said_yes(scenes, cli._Judged())) == {"yes"}  # anchors gone: a yes holds
+
+
+def _paired_at(panorama: str, n: int) -> bridging.Paired:
+    photo_px = np.column_stack([np.arange(n) * 10.0, np.zeros(n)])
+    return bridging.Paired(panorama, registration.ViewOf(140.0), photo_px, photo_px + 5.0)
+
+
+def test_a_placement_said_near_is_offered_with_its_most_spread_pairs(monkeypatch):
+    m = cli._situation(_kept())
+    monkeypatch.setattr(cli, "_found_from", lambda photo_id, kept: (m, "points", "observed"))
+    spheres = [SimpleNamespace(id="few"), SimpleNamespace(id="many")]
+    monkeypatch.setattr(cli, "_sources_first", lambda points, by_id, m, fixed: spheres)
+    found = {"few": None, "many": _paired_at("many", 40)}  # too few pairs in the first
+    monkeypatch.setattr(cli.bridging, "paired", lambda points, obs, sphere, size: found[sphere.id])
+
+    offer = cli._offer_of("pm:1", _kept(), {}, set(), (600, 800))
+
+    assert offer["panorama"] == "many" and offer["view"]["heading"] == 140.0
+    assert len(offer["pairs"]["photo_px"]) == cli.OFFERED == len(offer["pairs"]["view_px"])
+    assert [0.0, 0.0] in offer["pairs"]["photo_px"] and [390.0, 0.0] in offer["pairs"]["photo_px"]
+    assert (offer["lon"], offer["lat"]) == pytest.approx(cli.to_degrees(Point(m.x, m.y)).coords[0])
+    json.dumps(offer, allow_nan=False)  # nothing the page could not read
+
+
+def test_a_placement_without_its_points_or_pairs_is_not_offered(monkeypatch):
+    monkeypatch.setattr(cli, "_found_from", lambda photo_id, kept: None)  # kept for other inputs
+
+    assert cli._offer_of("pm:1", _kept(), {}, set(), (600, 800)) is None
+
+
+def test_only_placements_said_near_on_the_image_as_it_is_are_offered(tmp_path, monkeypatch):
+    said = dict.fromkeys(["near", "bare", "broken", "recropped"], "near")
+    said |= {"yes": "yes", "no": "no"}
+    rows = ({"photo_id": k, "verdict": v, "inputs": "c:img"} for k, v in said.items())
+    (tmp_path / "anchors.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows))
+    monkeypatch.setattr(cli, "ANCHORS", tmp_path / "anchors.jsonl")
+    kept = {k: _kept(inputs="c:img") for k in said}
+    kept |= {"unjudged": _kept(inputs="c:img"), "unplaced": {"inputs": "c:img"}}
+    monkeypatch.setattr(cli, "_matches", lambda: kept)
+    image = tmp_path / "photo.jpg"
+    Image.new("RGB", (80, 60)).save(image)
+    photos = {k: {"image": image, "inputs": "img"} for k in kept}
+    photos["recropped"]["inputs"] = "img2"  # cropped again since match placed it
+    sizes = {}
+
+    def offer_of(photo_id, kept, by_id, fixed, size):
+        sizes[photo_id] = size
+        if photo_id == "broken":
+            raise ValueError("points illisibles")
+        return None if photo_id == "bare" else {"panorama": "p"}  # no pairs of its own
+
+    monkeypatch.setattr(cli, "_offer_of", offer_of)
+
+    assert cli._offers(photos, {}, set()) == {"near": {"panorama": "p"}}  # the others go on
+    assert sizes["near"] == (60, 80)  # the page's image: height, width
+    assert "recropped" not in sizes
+
+
+def test_an_unreadable_verdict_or_placement_offers_nothing_and_the_queue_goes_on(monkeypatch):
+    monkeypatch.setattr(cli, "_matches", lambda: json.loads("{"))
+
+    assert cli._offers({"pm:1": {"image": "x", "inputs": "img"}}, {}, set()) == {}
+
+
+def test_points_a_hair_apart_are_offered_once(monkeypatch):
+    m = cli._situation(_kept())
+    monkeypatch.setattr(cli, "_found_from", lambda photo_id, kept: (m, "points", "observed"))
+    monkeypatch.setattr(cli, "_sources_first", lambda *a: [SimpleNamespace(id="p")])
+    paired = _paired_at("p", cli.OFFERED)  # every one chosen
+    paired.photo_px[1] = paired.photo_px[0] + 0.003  # one detail matched through two rays
+    monkeypatch.setattr(cli.bridging, "paired", lambda *a: paired)
+
+    offered = cli._offer_of("pm:1", _kept(), {}, set(), (600, 800))["pairs"]["photo_px"]
+
+    assert len({tuple(p) for p in offered}) == len(offered)
+
+
+def test_the_most_spread_points_never_repeat_one():
+    at = np.array([[0.0, 0.0], [5.0, 0.0], [0.0, 0.0], [5.0, 0.0]])
+
+    assert sorted(cli._most_spread(at, 4)) == [0, 1]
+
+
+def test_near_photos_come_first_on_the_placing_page_and_yes_ones_no_longer_come_back():
+    ahead = cli._placing_ahead({"n"}, {"c": {}, "n": {}})
+
+    assert ahead == {"n": "près", "c": "portée"}

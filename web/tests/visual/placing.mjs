@@ -1,6 +1,6 @@
 // The placing page checked in a browser: with no proposal it opens on points without sending
-// the user away from them, and placing by points never saves the proposal the user set out to
-// correct. Against `flaneur placer --no-live --answers <trial file>` running (the proposal laid
+// the user away from them, placing by points never saves the proposal the user set out to
+// correct, and a photo said near opens with match's pairs laid. Against `flaneur placer --no-live --answers <trial file>` running (the proposal laid
 // in by the check, the answers counted as they are sent).
 // Usage: node tests/visual/placing.mjs [page-url] <folder>/fixture.json (alignment_fixture.py's)
 import { chromium } from 'playwright';
@@ -9,7 +9,19 @@ import { readFileSync } from 'node:fs';
 const [url = 'http://127.0.0.1:8772/', fixture] = process.argv.slice(2);
 const registration = JSON.parse(readFileSync(fixture, 'utf8')).registration;
 const browser = await chromium.launch();
-const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
+/** A page whose queue's photo `edit` changes (by default, no pairs offered: a photo said near
+ *  opens with them, checked last). */
+const pageWith = async (edit = (head) => { delete head.offer; }) => {
+  const opened = await browser.newPage({ viewport: { width: 1440, height: 900 } });
+  await opened.route('**/api/queue', async (route) => {
+    const queued = await (await route.fetch()).json();
+    if (queued.photo) await edit(queued.photo, opened);
+    return route.fulfill({ json: queued });
+  });
+  return opened;
+};
+const plainPage = () => pageWith();
+const page = await plainPage();
 const answers = [];
 let failed = 0;
 const check = (ok, what) => {
@@ -103,7 +115,7 @@ check(back.includes('⌫'), `a pair more refused says ⌫ takes it back (« ${ba
 // parallax: the toggle refits the pairs by where the photographer stood
 /** A page opened on points (no proposal), and a way to click pairs in it. */
 async function onPoints(routes) {
-  const opened = await browser.newPage({ viewport: { width: 1440, height: 900 } });
+  const opened = await plainPage();
   await opened.route('**/api/proposal/**', (route) => route.fulfill({ json: null }));
   for (const [path, handle] of Object.entries(routes)) await opened.route(path, handle);
   await opened.goto(url);
@@ -133,6 +145,16 @@ const wallsAround = (lon, lat, panorama, neighbour, place) => {
     mine: { drawn: [{ a: at(6, 0), b: at(6, 30), top: null }], removed: [] } };
 };
 const asked = { depth: [], parallax: [], standingLaid: 0, answer: null, epipolar: 0, second: null, walls: [], tint: 0 };
+/** /api/parallax's answer to `body`: the photographer at `at`, every pair with a depth. */
+const parallaxReply = (body, at, errors = Array(body.photo_px.length).fill(0.001)) => {
+  const n = body.photo_px.length;
+  return { json: {
+    registration: { ...registration, panorama: body.panorama }, ...at, height_above_ground: 1.6, heading: 120,
+    standing: { position: [0, 0, 0], turn: [0, 0, 0], focal: 500, shift: [0, 0], size: [600, 800] },
+    used: Array(n).fill(true), metres: Array(n).fill(12), source: Array(n).fill('wall'),
+    neighbours: [here?.neighbour ?? 'x'], chosen: null, errors,
+    held_out: { flat: Array(n).fill(0.04), parallax: Array(n).fill(0.01) } } };
+};
 /** A wall as /api/wallsview draws it over the view. */
 const wallsView = (route) => route.fulfill({ json: { walls: [
   { i: 0, made: 'fitted', foot: [[100, 900], [500, 800]], top: [[100, 300], [500, 400]] }] } });
@@ -155,12 +177,7 @@ const [deep, pairsAt] = await onPoints({
     asked.parallax.push(body);
     stood = { lon: body.lon + 0.00004, lat: body.lat - 0.00002 };
     const n = body.photo_px.length;
-    return route.fulfill({ json: {
-      registration: { ...registration, panorama: body.panorama }, ...stood, height_above_ground: 1.6, heading: 120,
-      standing: { position: [0, 0, 0], turn: [0, 0, 0], focal: 500, shift: [0, 0], size: [600, 800] },
-      used: Array(n).fill(true), metres: Array(n).fill(12), source: Array(n).fill('wall'),
-      neighbours: [here.neighbour], chosen: null, errors: [0.005, 0.02, 0.05, ...Array(n).fill(0.001)].slice(0, n),
-      held_out: { flat: Array(n).fill(0.04), parallax: Array(n).fill(0.01) } } });
+    return route.fulfill(parallaxReply(body, stood, [0.005, 0.02, 0.05, ...Array(n).fill(0.001)].slice(0, n)));
   },
   '**/api/epipolar': (route) => { asked.epipolar++; return route.fulfill({ json: { line: [[100, 600], [700, 640], [1200, 700]] } }); },
   '**/api/second': (route) => { asked.second = route.request().postDataJSON(); return route.fulfill({ json: { metres: 14.2 } }); },
@@ -466,6 +483,53 @@ check(refused[0] === 0 && refused[1].includes('La vue se charge'), `a click in a
 held = false;
 check(await loaded(coming, '#view') && (await coming.textContent('#message')) === '', 'once the view comes, the message goes');
 await coming.close();
+
+// a photo said near opens on the panorama and view match found it in, its pairs laid, the
+// parallax on and the photo fitted from them at once; flipped, the pairs go (they hold unflipped)
+const offering = { depth: 0, parallax: [], proposals: 0 };
+const EIGHT = [...Array(8)].map((_, i) => i);
+const offer = { view: { heading: 137.5, pitch: 0, fov: 75 },
+  pairs: { photo_px: EIGHT.map((i) => [40 + 60 * i, 50 + 40 * i]), view_px: EIGHT.map((i) => [100 + 120 * i, 200 + 60 * i]) } };
+const nearby = await pageWith(async (head, opened) => {  // as the server sends it: at match's camera
+  const { lon, lat } = head;
+  const around = await (await opened.request.get(new URL(`/api/near?lon=${lon}&lat=${lat}`, url).href)).json();
+  offer.panorama = (around[1] ?? around[0]).id;  // not the nearest: the page goes to it
+  Object.assign(head, { offer, heading: 200, why: 'près' });
+});
+for (const [path, handle] of Object.entries({
+  '**/api/proposal/**': (route) => { offering.proposals++; return route.fulfill({ json: null }); },
+  '**/api/depth': (route) => {
+    offering.depth++;
+    return route.fulfill({ json: wallsAround(...CENTRE, route.request().postDataJSON().panorama, 'x') });
+  },
+  '**/api/parallax': (route) => {
+    const body = route.request().postDataJSON();
+    offering.parallax.push(body);
+    return route.fulfill(parallaxReply(body, { lon: body.lon, lat: body.lat }));
+  },
+  '**/api/wallsview': wallsView,
+  '**/api/composite': (route) => route.fulfill(JPEG),
+})) await nearby.route(path, handle);
+await nearby.goto(url);
+check(await until(() => offering.parallax.length > 0, 60000), `the near photo is fitted in parallax at once (${offering.parallax.length})`);
+const opened = await nearby.evaluate(() => ({ panorama: near[at].id, view, pairs: pairs.length, pairing, on: parallaxOn,
+  heading: spot.heading, why: document.getElementById('progress').textContent,
+  where: document.getElementById('where').textContent, wanted: parallaxWanted }));
+check(opened.panorama === offer.panorama && opened.view.heading === 137.5 && opened.view.fov === 75,
+  `it opens on match's panorama and view (${opened.panorama}, ${JSON.stringify(opened.view)})`);
+check(opened.pairing && opened.pairs === 8 && opened.on && offering.depth > 0,
+  `on points, its 8 pairs laid, the parallax on and its walls asked (${JSON.stringify(opened)}, ${offering.depth})`);
+const fit = offering.parallax[0];
+check(fit.photo_px.length === 8 && JSON.stringify(fit.view_px[7]) === '[940,620]' && fit.panorama === offer.panorama,
+  'the fit is made from the pairs offered, in that panorama');
+check(opened.where.includes('138°'), `the line under the view says where it looks (« ${opened.where} »)`);
+check(!opened.wanted, 'the parallax turned on for this photo only: the next opens as the user left it');
+check(opened.heading === 200 && opened.why.includes('près'), `the pin turned as the queue sends it, and why it comes first (« ${opened.why} »)`);
+check(await loaded(nearby, '#photo') && await shows(nearby, '#photo-stage .dot', 8), 'the pairs are drawn on the photo');
+check(offering.proposals === 0, `no proposal asked for the offered panorama (${offering.proposals})`);
+await nearby.keyboard.press('r');
+check(await nearby.evaluate(() => pairs.length) === 0, 'flipped, the pairs offered go');
+await nearby.close();
 
 await browser.close();
 process.exit(failed ? 1 : 0);

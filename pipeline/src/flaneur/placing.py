@@ -70,6 +70,9 @@ class Sources:
     graph: dict[str, set[str]] = field(default_factory=dict)  # old neighbours, by photo
     # the photos proposed from the placed ones: {registration, carried_from}, by photo
     carried: Callable[[], dict[str, dict]] = dict
+    # a photo the user said near to, offered with the pairs match found (see cli._offer_of):
+    # {panorama, view, pairs: {photo_px, view_px}, lon, lat, heading}; none for the others
+    offer: Callable[[str], dict | None] = lambda _: None
     # a panorama's picture larger than its own (see SHOWN), the views shown cut from it; none to
     # be had, its own
     full: Callable[[str], np.ndarray | None] = lambda _: None
@@ -698,7 +701,14 @@ def next_photo(sources: Sources, nearest: dict[str, float], where: dict) -> dict
         answered=sum(i in sources.photos for i in answers),
     )
     head = found and {"id": found[0][0], **_shown(sources.photos[found[0][0]]), "why": found[0][1]}
-    proposed = head and carried(sources).get(head["id"])
+    offered = head and sources.offer(head["id"])
+    if offered:  # opened on match's pairs, in the panorama it found them in, at its camera
+        camera = ("lon", "lat", "heading")
+        head.update(
+            offer={k: v for k, v in offered.items() if k not in camera},
+            **{k: offered[k] for k in camera},
+        )
+    proposed = head and not offered and carried(sources).get(head["id"])
     if proposed:  # opened where its source was placed, on the panorama it was carried onto
         head.update(
             registration=registration.to_json(proposed["registration"]),

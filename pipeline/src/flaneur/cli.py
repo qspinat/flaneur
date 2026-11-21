@@ -16,7 +16,7 @@ import sys
 import threading
 import time
 from collections import Counter, OrderedDict, defaultdict
-from collections.abc import Callable, Iterable, Iterator, Sequence, Set
+from collections.abc import Callable, Collection, Iterable, Iterator, Sequence, Set
 from contextlib import closing, contextmanager
 from copy import copy as shallow
 from dataclasses import asdict, fields, replace
@@ -1237,6 +1237,12 @@ def _turned_down() -> set[str]:
     }
 
 
+def _size_of(image: Path) -> tuple[int, int]:
+    """An image's height and width (its header only)."""
+    with Image.open(image) as opened:
+        return opened.size[::-1]
+
+
 def _places(situated: dict[str, match.Situated]) -> dict[str, dict]:
     """Where the situated photos stand, for the photo walk."""
     places = {}
@@ -1663,6 +1669,93 @@ NEARER_M = 10.0
 PLAN_M = 40.0  # the confirmation page's plan: so far each way from its camera
 
 
+def _most_spread(at: np.ndarray, most: int) -> list[int]:
+    """Up to `most` of the points `at` (pixels), the most spread: the first, then each in turn
+    the farthest from those chosen (none where one is already: never twice the same)."""
+    chosen: list[int] = []
+    if len(at):
+        chosen.append(0)
+        gap = np.hypot(*(at - at[0]).T)
+        while len(chosen) < min(most, len(at)):
+            far = int(np.argmax(gap))
+            if gap[far] == 0:
+                break
+            chosen.append(far)
+            gap = np.minimum(gap, np.hypot(*(at - at[far]).T))
+    return chosen
+
+
+OFFERED = 24  # pairs of a placement said near laid on the placing page, the most spread
+
+
+def _offers(
+    photos: dict[str, dict], by_id: dict[str, match.Panorama], fixed: Set[str]
+) -> dict[str, dict]:
+    """The placements of match the user's last word on is near (the right place, the camera to
+    set right), as the placing page opens them (see _offer_of): those made on the photo's image
+    as it is now (its points' pixels are of it), with pairs of their own."""
+    try:
+        kept, judged = _matches(), _Judged()
+    except Exception as error:  # a file written wrong: no offer, the queue goes on
+        typer.echo(f"pas de paires proposées ({error})", err=True)
+        return {}
+    offers = {}
+    for k in sorted(photos):
+        m = kept.get(k)
+        if not (m and "x" in m and _image_of(m["inputs"]) == photos[k]["inputs"]):
+            continue
+        if not ((said := judged.on(k, m)) and said["verdict"] == "near"):
+            continue
+        try:
+            found = _offer_of(k, m, by_id, fixed, _size_of(photos[k]["image"]))
+        except Exception as error:  # this one opens as any other photo: the others go on
+            typer.echo(f"{k} : pas de paires proposées ({error})", err=True)
+            continue
+        if found:
+            offers[k] = found
+    return offers
+
+
+def _offer_of(
+    photo_id: str,
+    kept: dict,
+    by_id: dict[str, match.Panorama],
+    fixed: Set[str],
+    size: tuple[int, int],
+) -> dict | None:
+    """A placement of match, as the placing page opens it (see placing.Sources.offer): in the
+    first of its panoramas (see _sources_first) where it has enough pairs of its own (see
+    bridging.paired), up to OFFERED of them, the most spread, the photo's pixels at `size` (the
+    page's image of it); its camera as the starting pin. None without its points (kept for
+    other inputs) or pairs."""
+    if (found := _found_from(photo_id, kept)) is None:
+        return None
+    m, points, observed = found
+    for sphere in _sources_first(points, by_id, m, fixed):
+        if (paired := bridging.paired(points, observed, sphere, size)) is None:
+            continue
+        photo_px, view_px = np.round(paired.photo_px, 2), np.round(paired.view_px, 2)
+        chosen = _most_spread(photo_px, OFFERED)  # as sent: never twice the same pixel
+        return {
+            "panorama": paired.panorama,
+            "view": asdict(paired.view),
+            "pairs": {"photo_px": photo_px[chosen].tolist(), "view_px": view_px[chosen].tolist()},
+            **_places({photo_id: m})[photo_id],
+        }
+    return None
+
+
+def _placing_ahead(near: Collection[str], carried: dict[str, dict]) -> dict[str, str]:
+    """The photos the placing page shows first, with why: those said near (to set right from
+    match's pairs), then those carried from a photo placed. Those said yes are no longer put
+    first: they are registered on their own (see _registrations)."""
+    carried_only = (i for i in carried if i not in near)
+    return {
+        **dict.fromkeys(sorted(near), "près"),
+        **dict.fromkeys(carried_only, "portée"),
+    }
+
+
 def _pairs_shown(
     points: match.Points,
     photo: tuple[int, ...],
@@ -1686,14 +1779,7 @@ def _pairs_shown(
     else:
         inside = _inside(old, size) & _inside(today, size)
     kept = np.flatnonzero(inside)
-    chosen: list[int] = []
-    if len(kept):  # the farthest from those chosen, each in turn: spread over the photo
-        chosen.append(int(kept[0]))
-        gap = np.hypot(*(old[kept] - old[kept[0]]).T)
-        while len(chosen) < min(PAIRS_SHOWN, len(kept)):
-            far = int(np.argmax(gap))
-            chosen.append(int(kept[far]))
-            gap = np.minimum(gap, np.hypot(*(old[kept] - old[kept[far]]).T))
+    chosen = [int(kept[i]) for i in _most_spread(old[kept], PAIRS_SHOWN)]
     return [
         {
             "index": k,
@@ -4736,8 +4822,7 @@ def compare_parallax(answers: Path = PLACINGS) -> None:
             walls = made.scene(panorama, chosen)
             if walls is None:
                 raise ValueError("pas de panorama voisin")
-            with Image.open(image) as photo:
-                size = photo.size[::-1]  # height, width
+            size = _size_of(image)
             one = placing.compared(
                 row,
                 made.by_id[panorama],
@@ -4864,10 +4949,18 @@ def place_photos(
             found = None
         return found and {"registration": found, "carried_from": None}
 
-    revisit = {i: "revoir" for i, v in _verdicts().items() if v["verdict"] == "yes"}  # a camera
+    @functools.lru_cache(maxsize=1)
+    def offers_at(_: tuple) -> dict[str, dict]:  # made again on a new match or a new verdict
+        return _offers(photos, by_id, fixed)
 
-    def ahead() -> dict[str, str]:  # earlier yes verdicts, then photos carried from placed ones
-        return {**revisit, **{i: "portée" for i in carried_now() if i not in revisit}}
+    def offers_now() -> dict[str, dict]:
+        return offers_at(_stamp([MATCHES, ANCHORS]))
+
+    def ahead() -> dict[str, str]:  # near verdicts, then photos carried from placed ones
+        return _placing_ahead(offers_now(), carried_now())
+
+    def offer(photo_id: str) -> dict | None:
+        return offers_now().get(photo_id)
 
     def full(panorama: str) -> np.ndarray | None:
         """The panorama's picture at most placing.FULL_WIDTH px around, from its original
@@ -4937,6 +5030,7 @@ def place_photos(
         ahead,
         graph,
         carried_now,
+        offer=offer,
         full=full,
         scene=walls_at,
         pair=pair_at,

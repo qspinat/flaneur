@@ -1500,3 +1500,22 @@ def test_without_walls_no_camera_stands_and_parallax_is_the_worst(page):
     )
 
     assert stood.camera is None and stood.parallax == np.inf
+
+
+def test_a_photo_judged_near_opens_with_the_pairs_match_found(page, one):
+    sources, _ = page
+    offer = {
+        "panorama": "p1",
+        "view": {"heading": 140.0, "pitch": 0.0, "fov": 60.0},
+        "pairs": {"photo_px": [[1.0, 2.0]], "view_px": [[3.0, 4.0]]},
+        "lon": 2.3467,
+        "lat": 48.8521,
+        "heading": 50.0,
+    }
+    sources.offer = lambda photo_id: offer if photo_id == "pm:1" else None
+
+    _, queue = one(sources, "GET", "/api/queue")
+
+    head = json.loads(queue)["photo"]
+    assert (head["lon"], head["lat"], head["heading"]) == (2.3467, 48.8521, 50.0)  # match's camera
+    assert head["offer"] == {k: offer[k] for k in ("panorama", "view", "pairs")}  # it once only
