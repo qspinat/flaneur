@@ -89,6 +89,14 @@
   .crop.old::after { box-shadow: 0 0 0 2px var(--amber), 0 0 0 3px var(--ink); }
   .crop.today::after { box-shadow: 0 0 0 2px var(--paper), 0 0 0 3px var(--enamel); }
   .crop.today.projected::after { box-shadow: 0 0 0 2px var(--enamel); border: 1px dashed var(--paper); }
+  /* a pair marked wrong (F): its marks and its loupe in the "no" colour, its number struck */
+  .mark.wrong, .mark.wrong span, .old-side .mark.wrong, .today-side .mark.wrong span { background: var(--no); color: var(--paper); }
+  .mark.wrong span, .loupe.wrong b { text-decoration: line-through; }
+  .loupe.wrong { border-color: var(--no); }
+  .loupe.wrong b { background: var(--no); }
+  .loupe.wrong .crop { opacity: 0.5; }
+  #pairs-help { display: none; margin-top: 8px; }
+  #pictures.pairs #pairs-help { display: block; }
   #no-pairs { display: none; font-size: 14px; color: var(--quiet); }
   #pictures.pairs.empty #no-pairs { display: block; }
   /* the plan: drawn as a survey sheet, the camera found and the panorama its view comes from */
@@ -167,6 +175,7 @@
     <svg id="pair-line" aria-hidden="true"></svg>
   </div>
   <div id="loupes" aria-label="Chaque paire, ses deux détails agrandis"></div>
+  <p id="pairs-help" class="note"></p>
   <p id="no-pairs"></p>
   </section>
   <section id="judge">
@@ -204,7 +213,7 @@
     </div>
   </div>
   <p id="state"></p>
-  <p class="keys"><kbd>Entrée</kbd> oui · <kbd>P</kbd> bons bâtiments, caméra à corriger · <kbd>X</kbd> non, puis <kbd>1</kbd>–<kbd>5</kbd> pourquoi · <kbd>S</kbd> passer · <kbd>←</kbd> <kbd>→</kbd> précédente, suivante · <kbd>Espace</kbd> enfoncé : aujourd'hui seul · <kbd>O</kbd> contours · <kbd>L</kbd> contours corrigés de la parallaxe · <kbd>K</kbd> paires côte à côte, <kbd>N</kbd> (<kbd>Maj</kbd>+<kbd>N</kbd>) la paire suivante (précédente) · <kbd>V</kbd> la vue de l'autre panorama.
+  <p class="keys"><kbd>Entrée</kbd> oui · <kbd>P</kbd> bons bâtiments, caméra à corriger · <kbd>X</kbd> non, puis <kbd>1</kbd>–<kbd>5</kbd> pourquoi · <kbd>S</kbd> passer · <kbd>←</kbd> <kbd>→</kbd> précédente, suivante · <kbd>Espace</kbd> enfoncé : aujourd'hui seul · <kbd>O</kbd> contours · <kbd>L</kbd> contours corrigés de la parallaxe · <kbd>K</kbd> paires côte à côte, <kbd>N</kbd> (<kbd>Maj</kbd>+<kbd>N</kbd>) la paire suivante (précédente) · <kbd>F</kbd> la paire choisie fausse (ou plus) · <kbd>V</kbd> la vue de l'autre panorama.
     La photo est posée sur la vue d'aujourd'hui prise du panorama placé par COLMAP le plus proche de sa caméra quand il l'est nettement plus que ceux qui ont servi à la placer (sinon de l'un d'eux), cadrée comme sa caméra : glissez pour passer de l'une à l'autre. Les plaques disent à combien de mètres de la caméra se tient le panorama ; l'autre plaque (ou V) montre la vue de l'autre. Le panorama ne se tient pas où se tenait le photographe (voir le plan) : les façades proches se décalent d'autant. L redessine les contours là où la vue d'aujourd'hui voit ce qu'ils montrent, d'après les murs ajustés entre panoramas (sinon BD TOPO) : jugez alors sur les façades encore debout ; un arbre, un réverbère, un bâtiment démoli depuis prennent la distance du mur derrière eux et restent décalés. Oui : les façades, les arêtes et les fuyantes se continuent d'une image à l'autre, la caméra au bon endroit à un mètre près (à quelques mètres du panorama, les façades proches se décalent un peu, les lointaines non). P : les bons bâtiments, mais la caméra à déplacer ou à tourner ; elle sera corrigée plus tard. Un « non » ou un P la retire ; les photos situées à partir d'elle le seront de nouveau sans elle.</p>
   </section>
 </main>
@@ -348,7 +357,7 @@ function drawPairs(scene) {
   for (const [side, end] of [['.old-side', 'old'], ['.today-side', 'today']]) {
     document.querySelector(`${side} .marks`).replaceChildren(...pairs.map((pair, n) => {
       const mark = document.createElement('i');
-      mark.className = `mark${projected(pair, end)}`;
+      mark.className = `mark${projected(pair, end)}${pair.wrong ? ' wrong' : ''}`;
       mark.style.left = `${(pair[end][0] / scene.size[0]) * 100}%`;
       mark.style.top = `${(pair[end][1] / scene.size[1]) * 100}%`;
       mark.append(Object.assign(document.createElement('span'), { textContent: n + 1 }));
@@ -368,13 +377,36 @@ function drawPairs(scene) {
   };
   $('loupes').replaceChildren(...pairs.map((pair, n) => {
     const b = document.createElement('button');
-    b.className = 'loupe';
-    b.setAttribute('aria-label', `Paire ${n + 1} : le détail de la photo et celui d'aujourd'hui`);
+    b.className = `loupe${pair.wrong ? ' wrong' : ''}`;
+    b.setAttribute('aria-label', `Paire ${n + 1} : le détail de la photo et celui d'aujourd'hui${pair.wrong ? ', marquée fausse' : ''}`);
     b.append(Object.assign(document.createElement('b'), { textContent: n + 1 }), crop(pair, 'old'), crop(pair, 'today'));
     b.addEventListener('click', () => { chosen = chosen === n ? null : n; lit(chosen); });
     return lights(b, n);
   }));
+  const wrong = pairs.filter((pair) => pair.wrong).length;
+  $('pairs-help').textContent = !pairs.length ? '' : 'Une paire choisie (clic sur ses détails, ou N) : F la marque fausse — '
+    + `pas le même détail — ou ne l'est plus${wrong ? ` ; ${wrong} marquée${wrong > 1 ? 's' : ''} fausse${wrong > 1 ? 's' : ''}` : ''}.`;
   lit(null);
+}
+// the pair chosen marked wrong (the two details are not the same thing), or that mark taken
+// back: kept at once, for this placement (both of its views show the same points); never a
+// verdict, the photo stays shown
+async function markChosen() {
+  const p = photos[at], n = chosen;
+  const pair = view === 'pairs' && n != null && p ? (await sceneOf(p))?.pairs?.[n] : null;
+  if (!pair) return;
+  const wrong = !pair.wrong;
+  const response = await fetch('/api/pair', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ photo_id: p.id, index: pair.index, wrong }),
+  });
+  if (!response.ok) { $('state').textContent = `Refusé : ${await response.text()}`; return; }
+  for (const source of [false, true]) {
+    (await scenes[p.id + viewQuery(source)])?.pairs?.forEach((q) => { if (q.index === pair.index) q.wrong = wrong; });
+  }
+  if (photos[at] !== p || view !== 'pairs') return;
+  drawPairs(await sceneOf(p));
+  chosen = n; lit(n);
 }
 // one pair lit: its two ends ringed, joined by a line, the others dimmed (none: all plain)
 let chosen = null;
@@ -586,7 +618,7 @@ $('skip').addEventListener('click', () => open(at + 1));  // nothing written: a 
 const KEYS = {
   Enter: () => judge('yes'), p: () => judge('near'), x: openReasons, s: () => open(at + 1),
   o: () => show('outlines'), l: () => show('parallax'), k: () => show('pairs'), v: toggleSource,
-  n: () => stepPair(1), N: () => stepPair(-1),
+  n: () => stepPair(1), N: () => stepPair(-1), f: markChosen,
   ArrowRight: () => open(at + 1), ArrowLeft: () => open(at - 1),
 };
 const SLIDER_KEYS = ['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End', 'PageUp', 'PageDown'];
