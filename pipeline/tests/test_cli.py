@@ -625,22 +625,6 @@ def test_a_photo_is_matched_again_only_by_the_matchers_left_to_try(kept, refused
     assert cli._left_to_try(kept, "i", refused) == left
 
 
-def test_only_current_placements_by_lomag_are_left_out_of_chaining():
-    matches = {
-        "a": _kept(),
-        "b": _kept(matcher="disk"),
-        "c": _kept(matcher="lomag"),
-        "d": None,
-        "e": _kept(matcher="lomag"),  # stale or turned down: not situated
-    }
-
-    situated = {k: SimpleNamespace(inputs="i") for k in ("a", "b", "c")}
-    situated["d"] = SimpleNamespace(inputs="i:proposed-abc")  # said yes to: no points to chain by
-
-    assert cli._not_chained(matches, situated, {"disk"}) == {"c", "d"}
-    assert cli._not_chained(matches, situated, {"disk", "lomag"}) == {"d"}  # proposed: never
-
-
 def test_a_photo_placed_against_today_is_shown_so_rather_than_as_last_chained():
     situated = {"a": "placed now"}
     chained = {
@@ -2346,7 +2330,6 @@ def test_the_placed_list_is_written_from_the_answers_verdicts_and_matches(monkey
         "_chained": lambda: {
             "photos": {k: {"situated": _kept(inputs="i:from-ab12cd34")} for k in ("pc", "pm:1")}
         },
-        "_chain_checked": lambda: set(),
     }.items():
         monkeypatch.setattr(cli, name, value)
     seen_by = {"pm:3": _seen_by({"sure"}, {"gps"}), "pm:4": _seen_by({"gps"}, {"gps", "photo:x"})}
@@ -3122,19 +3105,47 @@ def test_the_chaining_check_says_for_each_area_whether_it_passes():
     back = {"kind": "vérité", "off": [0.2, 0.1], "wrong": False}
     rows = [back | {"area": "cite"}] * 10 + [back | {"area": "saint-severin"}] * 3
 
-    gates = cli._gates_by_area(rows)
+    by_area = cli._by_area(rows)
 
-    assert gates["cite"].passed and not gates["saint-severin"].passed
+    assert cli._check_passed(by_area["cite"]).passed
+    assert not cli._check_passed(by_area["saint-severin"]).passed
 
 
-def test_a_chained_placement_is_trusted_where_the_chaining_check_passed(tmp_path, monkeypatch):
+def test_an_area_trusts_the_chaining_where_its_check_passed_for_things_as_they_are(
+    tmp_path, monkeypatch
+):
     monkeypatch.setattr(cli, "CHAIN_CHECK", tmp_path / "check.json")
     monkeypatch.setattr(cli, "_chain_setup", lambda: "now")
+    monkeypatch.setattr(cli, "_per_area", lambda path, matcher: {})
+    monkeypatch.setattr(cli, "_check_current", lambda check, m, name, near_by: False)
     gate = lambda passed: {"passed": passed}  # noqa: E731
-    cli.write_json(
-        cli.CHAIN_CHECK, {"setup": "now", "areas": {"cite": gate(True), "x": gate(False)}}
-    )
+    areas = {"cite": gate(True), "saint-severin": gate(False)}
+    cli.write_json(cli.CHAIN_CHECK, {"setup": "now", "areas": areas})
 
-    assert cli._chain_checked() == {"cite"}
-    cli.write_json(cli.CHAIN_CHECK, {"setup": "before", "areas": {"cite": gate(True)}})
-    assert cli._chain_checked() == set()  # for other code or data: nothing
+    assert cli._checked_in([]) == {"saint-severin": [], "cite": [placed.CHAINED]}
+    cli.write_json(cli.CHAIN_CHECK, {"setup": "before", "areas": areas})
+    assert cli._checked_in([]) == {"saint-severin": [], "cite": []}  # other code or data
+
+
+def test_a_chained_placement_stays_while_it_is_of_the_photo_as_it_is_now(tmp_path, monkeypatch):
+    exported = tmp_path / "old.jpg"
+    exported.touch()
+    (tmp_path / "anchors.jsonl").write_text("")
+    situated = lambda inputs: {"situated": _kept(inputs=inputs)}  # noqa: E731
+    cli.write_json(
+        tmp_path / "chains.json",
+        {
+            "setup": "chaining's code and panoramas then",
+            "photos": {"same": situated("i:from-ab12cd34"), "cropped": situated("j:from-ab12cd34")},
+        },
+    )
+    for name, value in {
+        "CHAINS": tmp_path / "chains.json",
+        "ANCHORS": tmp_path / "anchors.jsonl",
+        "_scenes_now": lambda: {"same": "s", "cropped": "s"},
+        "_inputs": lambda scene, photo_id: "i",  # each photo as it is now
+        "_exported": lambda photo_id: exported,
+    }.items():
+        monkeypatch.setattr(cli, name, value)
+
+    assert set(cli._chained()["photos"]) == {"same"}  # cropped since: left out
