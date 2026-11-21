@@ -279,3 +279,17 @@ def test_a_copy_seen_small_is_matched_again_in_a_view_not_narrower_than_a_street
     tiny = registration.Registration("home", tuple(small.ravel()), VIEW)
 
     assert carrying.framed(tiny, HOME).fov == carrying.NARROWEST_DEG
+
+
+def test_a_view_faces_the_middle_of_directions_and_holds_them_with_a_margin():
+    spread = np.radians(10.0)
+    directions = np.array(
+        [[np.sin(a), np.cos(a), 0.0] for a in (-spread, spread)]
+        + [[0.0, np.cos(spread), s] for s in (-np.sin(spread), np.sin(spread))]
+    )
+
+    view = carrying.facing(directions)
+
+    assert view.heading == pytest.approx(0.0, abs=1e-6) or view.heading == pytest.approx(360.0)
+    assert view.pitch == pytest.approx(0.0, abs=1e-6)
+    assert view.fov == carrying.NARROWEST_DEG  # 2 × 10° × FRAMED: under the narrowest

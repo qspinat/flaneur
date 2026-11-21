@@ -2446,7 +2446,9 @@ def chain_photos() -> None:
     ancres. Puis chaque photo est re-située avec les points des autres (pas de celles situées
     depuis elle) : la photo enchaînée qui bouge le plus est écartée et les tours refaits sans
     elle ; celles du tour 0 qui bougent sont signalées, à juger. Écrit chains.json. Le contrôle
-    (`chain-check`) n'arrête rien : il dit, par quartier, la confiance des photos enchaînées."""
+    (`chain-check`) n'arrête rien : il dit, par quartier, la confiance des photos enchaînées.
+    Enfin chaque photo enchaînée qui ne se recale pas seule dans un panorama y est appariée de
+    nouveau, cadrée depuis sa caméra, pour la balade 3D."""
     work = _Chaining()
     typer.echo(f"tour 0 : {len(work.round_zero)} photos situées contre les panoramas")
     results, placed, doubts, set_aside = _chain_passes(work)
@@ -2468,6 +2470,8 @@ def chain_photos() -> None:
         f"{len(results)} photos situées par enchaînement ; {len(set_aside)} écartées ; "
         f"écrit dans {CHAINS}"
     )
+    world = functools.cache(_registering_world)  # read only if one is tried on its own pairs
+    _register_chained(work, work.kept_chained | results, lambda k, p: _register_one(k, p, *world()))
 
 
 def _for_pages(work: _Chaining, results: dict[str, dict], placed: dict[str, chain.Anchor]) -> None:
@@ -3659,9 +3663,13 @@ def _shown_in_3d(answering: tuple | None = None) -> dict[str, dict]:
 
 
 @functools.cache
+@functools.cache  # for one command: the code does not change under it
 def _registering_code() -> str:
-    """The code a placement of match is registered by, hashed."""
-    return _hash_of(bridging, registration, placed)
+    """The code a placement is registered by (a chained one from its camera too), hashed."""
+    chained = [_framed_from, _registered_from_camera, _matched_framed, _register_chained]
+    numbers = repr((FRAMED_FAR_M, REFRAMED_M, REFRAMED_TRIES))
+    code = [inspect.getsource(f) for f in chained] + [numbers]
+    return _hash_of(bridging, registration, placed, carrying) + _digest(code)[:8]
 
 
 def _registered_as(kept: dict) -> str:
@@ -4371,17 +4379,31 @@ def _matched_again(
     picture: Callable[[Path], np.ndarray | None],
     size: tuple[int, int],
 ) -> bridging.Paired | None:
+    """The photo matched again in `sphere` (see _matched_framed) framed on its copy there (see
+    carrying.framed)."""
+    framing = lambda: carrying.framed(copy, sphere.axes)  # noqa: E731
+    return _matched_framed(photo_id, framing, sphere, store, picture, size)
+
+
+def _matched_framed(
+    photo_id: str,
+    framing: Callable[[], registration.ViewOf],
+    sphere: match.Panorama,
+    store: chain.Store,
+    picture: Callable[[Path], np.ndarray | None],
+    size: tuple[int, int],
+) -> bridging.Paired | None:
     """The photo (its features as matching reads them, from `store`) matched against a view of
-    `sphere` (its 360° picture: `picture`) framed on its copy there (see carrying.framed),
-    shown at placing.SHOWN: the pairs that agree on one flat warp (raw matches, unlike match's
-    own pairs, which its geometry kept: measured 20/11, unfiltered 26 copies standing instead
-    of 39), the photo's pixels at `size` (the placement's); none from fewer than
-    MIN_MATCHED. Its features or picture missing: an error (not judged: done next time)."""
+    `sphere` (its 360° picture: `picture`) as `framing` frames it, shown at placing.SHOWN: the
+    pairs that agree on one flat warp (raw matches, unlike match's own pairs, which its geometry
+    kept: measured 20/11, unfiltered 26 copies standing instead of 39), the photo's pixels at
+    `size` (the placement's); none from fewer than MIN_MATCHED. Its features or picture
+    missing: an error (not judged: done next time)."""
     mine = _features(store, photo_id) if store is not None else None
     seen = picture(sphere.path)
     if mine is None or seen is None:
         raise FileNotFoundError(f"{photo_id} ou {sphere.path} : pas à portée")
-    view = carrying.framed(copy, sphere.axes)
+    view = framing()
     cut = match.perspective(seen, sphere.axes, view.heading, view.fov, placing.SHOWN, view.pitch)
     theirs = store.matcher.features(cut)
     pairs = store.matcher.pairs(mine, theirs)
@@ -4393,6 +4415,106 @@ def _matched_again(
     except (registration.NotFitted, cv2.error):  # too few agree, or a degenerate set
         return None
     return bridging.Paired(sphere.id, view, photo_px[agree], view_px[agree])
+
+
+FRAMED_FAR_M = 30.0  # a chained camera's corner ray meeting no wall: framed this far along it
+REFRAMED_M = carrying.FADE_M[1]  # a chained photo matched again in panoramas this near its camera
+REFRAMED_TRIES = 3  # at most this many of them, the nearest first
+
+
+def _framed_from(
+    camera: match.View, size: tuple[int, int], sphere: match.Panorama, blocks
+) -> registration.ViewOf:
+    """A view of `sphere` framed where a camera found without it (a chained one) sees a photo
+    of `size`: its corners' rays met on today's walls (`blocks`: BD TOPO; none met, FRAMED_FAR_M
+    along), seen from the panorama (see carrying.facing)."""
+    h, w = size
+    corners = np.array([[0.0, 0.0], [w, 0.0], [w, h], [0.0, h]])
+    eye = np.array([camera.x, camera.y, camera.z])
+    directions = match.rays(corners, size, camera.fov, camera.horizon, camera.heading)
+    met, edge = blocks.hit(eye, directions)
+    world = np.where((edge >= 0)[:, None], met, eye + FRAMED_FAR_M * directions)
+    seen = world - np.array([sphere.x, sphere.y, sphere.z])
+    return carrying.facing(seen / np.linalg.norm(seen, axis=1, keepdims=True))
+
+
+def _registered_from_camera(
+    photo_id: str,
+    placement: dict,
+    camera: match.View,
+    homes: list["_Home"],
+    store: chain.Store,
+    picture: Callable[[Path], np.ndarray | None],
+    blocks,
+) -> tuple[registration.Registration, "_Home", placing.Stood] | None:
+    """A chained photo (`placement`, as kept) registered in the first of `homes` (panoramas
+    with their walls) where, matched again in a view framed from its `camera` (see
+    _framed_from), its pairs hold one turn of the panorama's camera (see
+    registration.turned_through): that registration, the home, and the standing camera
+    fitted there against the walls (see placing.stood_against_flat); none in none."""
+    if (found := _found_from(photo_id, placement)) is None:
+        return None
+    size = found[2].size
+    for home in homes:
+        framing = functools.partial(_framed_from, camera, size, home.sphere, blocks)
+        paired = _matched_framed(photo_id, framing, home.sphere, store, picture, size)
+        if paired is None:
+            continue
+        args = (paired.photo_px, paired.view_px, size, placing.SHOWN, home.sphere.id)
+        try:
+            flat = registration.turned_through(*args, paired.view, home.sphere.axes)[0]
+        except (registration.NotFitted, cv2.error):
+            continue
+        pin = (camera.x, camera.y)
+        stood = placing.stood_against_flat(
+            paired.photo_px, paired.view_px, paired.view, home.sphere, size, home.scene, pin
+        )
+        return flat, home, stood
+    return None
+
+
+def _register_chained(
+    work: "_Chaining",
+    rows: dict[str, dict],
+    alone: Callable[[str, dict], registration.Registration | None],
+) -> None:
+    """The photos chained (`rows`, as chains.json keeps them) that do not register on their own
+    (`alone`: from their own pairs, as the list registers match's placements) registered from
+    their camera (see _registered_from_camera), kept in REGISTERED as the list reads them (made
+    from the placement: see _registered_as), with their standing camera; those already made
+    for their placement left. Done with chaining, at night: it matches again (the list, after
+    each answer, only reads)."""
+    was = register.load(REGISTERED)
+    out = dict(was)
+    picture = functools.lru_cache(maxsize=1)(lambda path: cv2.imread(str(path)))
+    blocks = None
+    for k, row in rows.items():
+        placement = row["situated"]
+        if was.get(k, {}).get("made") == (made := _registered_as(placement)):
+            continue
+        if alone(k, placement) is not None:
+            continue  # the list registers it from its own pairs
+        m = _situation(placement)
+        camera = m.view(work.heights.street(m.x, m.y))
+        near = sorted(work.near_by, key=lambda p: np.hypot(p.x - camera.x, p.y - camera.y))
+        within = [p for p in near if np.hypot(p.x - camera.x, p.y - camera.y) <= REFRAMED_M]
+        homes = [h for p in within if (h := _standing_home(p.id))][:REFRAMED_TRIES]
+        blocks = blocks or work.then(date.today().year).blocks
+        try:
+            found = _registered_from_camera(
+                k, placement, camera, homes, work.store, picture, blocks
+            )
+        except Exception as error:  # this one left, tried again next time: the others go on
+            typer.echo(f"{k} : pas recalée depuis sa caméra ({error})", err=True)
+            continue
+        if found is None:
+            continue
+        flat, home, stood = found
+        standing = {"walls": _walls_of(home), **_standing_as(stood, home)}
+        out[k] = {"made": made, "registration": registration.to_json(flat), "standing": standing}
+        typer.echo(f"{k} : recalée sur {home.sphere.id[:8]} depuis sa caméra enchaînée")
+    if out != was:
+        write_json(REGISTERED, out)
 
 
 def _copy_panoramas(holding: set[str], folder: Path) -> None:

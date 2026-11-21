@@ -11,6 +11,7 @@ import typer
 from typer.testing import CliRunner
 
 from flaneur import (
+    carrying,
     chain,
     cli,
     confirming,
@@ -3172,3 +3173,54 @@ def test_a_chained_placement_stays_while_of_the_photo_now_and_its_anchors_placed
     chained = cli._chained(cli._scenes_now(), cli._Judged(), {"placed"})
 
     assert set(chained["photos"]) == {"same", "kept-yes", "after"}
+
+
+def test_a_panorama_s_view_framed_from_a_chained_camera_faces_where_it_looks():
+    camera = match.View(0.0, 0.0, 2.0, 0.0, 0.5, 40.0)  # facing north
+    sphere = match.Panorama("p", 0.0, -3.0, 2.5, 0.0, None)  # 3 m behind it
+    wall_y = 20.0
+
+    def hit(origin, directions):  # a wall across the street, 20 m north
+        t = (wall_y - origin[1]) / directions[:, 1]
+        return origin + t[:, None] * directions, np.zeros(len(directions), int)
+
+    view = cli._framed_from(camera, (600, 800), sphere, SimpleNamespace(hit=hit))
+
+    assert min(view.heading, 360 - view.heading) < 0.5
+    half_wide = np.degrees(np.arctan(wall_y * np.tan(np.radians(20)) / (wall_y + 3)))
+    assert 2 * half_wide < view.fov <= carrying.WIDEST_DEG  # the photo, with a margin
+
+
+def test_the_chaining_registers_its_photos_for_the_walk_as_the_list_reads_them(
+    tmp_path, monkeypatch
+):
+    reg = registration.Registration("p", (1.0,) * 9, registration.ViewOf(heading=0.0))
+    placement = _kept(inputs="i:from-ab12cd34")
+    monkeypatch.setattr(cli, "REGISTERED", tmp_path / "registered.json")
+    monkeypatch.setattr(cli, "_registering_code", lambda: "code")
+    monkeypatch.setattr(cli, "_walls_of", lambda home: "walls")
+    tried = []
+
+    def from_camera(photo_id, *args):
+        tried.append(photo_id)
+        home = SimpleNamespace(sphere=SimpleNamespace(id="p"))
+        return (reg, home, None) if photo_id == "found" else None
+
+    monkeypatch.setattr(cli, "_registered_from_camera", from_camera)
+    made = cli._registered_as(placement)
+    cli.write_json(cli.REGISTERED, {"done": {"made": made, "registration": None}})
+    work = SimpleNamespace(
+        heights=SimpleNamespace(street=lambda x, y: 0.0),
+        near_by=[],
+        then=lambda year: SimpleNamespace(blocks="today"),
+        store="DISK's",
+    )
+    rows = {k: {"situated": placement} for k in ("found", "none", "done")}
+
+    cli._register_chained(work, rows, lambda k, p: None)
+
+    kept = json.loads(cli.REGISTERED.read_text())
+    assert tried == ["found", "none"]  # one registered for this placement already: left
+    assert kept["found"]["made"] == made and kept["found"]["registration"]["panorama"] == "p"
+    assert kept["found"]["standing"] == {"walls": "walls", "camera": None, "held": 0}
+    assert "none" not in kept  # left to the list's own registration (and tried again)
