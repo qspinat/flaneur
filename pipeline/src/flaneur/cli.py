@@ -1237,6 +1237,12 @@ def _turned_down() -> set[str]:
     }
 
 
+def _size_of(image: Path) -> tuple[int, int]:
+    """An image's height and width (its header only)."""
+    with Image.open(image) as opened:
+        return opened.size[::-1]
+
+
 def _places(situated: dict[str, match.Situated]) -> dict[str, dict]:
     """Where the situated photos stand, for the photo walk."""
     places = {}
@@ -1680,19 +1686,20 @@ def _most_spread(at: np.ndarray, most: int) -> list[int]:
 OFFERED = 24  # pairs of a placement said near laid on the placing page, the most spread
 
 
-def _said_near(kept: dict[str, dict | None], judged: "_Judged") -> set[str]:
-    """The placements of match (round 0, not a camera proposed) the user's last word on is near:
-    the right place, the camera to set right on the placing page."""
-    return {
-        k
-        for k, m in kept.items()
-        if m
-        and "x" in m
-        and not _is_proposal(m["inputs"])
-        and not _is_chained(m["inputs"])
-        and (said := judged.on(k, m)) is not None
-        and said["verdict"] == "near"
-    }
+def _offers(
+    photos: dict[str, dict], by_id: dict[str, match.Panorama], fixed: Set[str]
+) -> dict[str, dict]:
+    """The placements of match the user's last word on is near (the right place, the camera to
+    set right), as the placing page opens them (see _offer_of): those with pairs of their own."""
+    kept, judged = _matches(), _Judged()
+    offers = {}
+    for k in sorted(photos):
+        m = kept.get(k)
+        if not (m and "x" in m and (said := judged.on(k, m)) and said["verdict"] == "near"):
+            continue
+        if found := _offer_of(k, m, by_id, fixed, _size_of(photos[k]["image"])):
+            offers[k] = found
+    return offers
 
 
 def _offer_of(
@@ -1714,7 +1721,6 @@ def _offer_of(
         if (paired := bridging.paired(points, observed, sphere, size)) is None:
             continue
         chosen = _most_spread(paired.photo_px, OFFERED)
-        lon, lat = to_degrees(Point(m.x, m.y)).coords[0]
         return {
             "panorama": paired.panorama,
             "view": asdict(paired.view),
@@ -1722,9 +1728,7 @@ def _offer_of(
                 "photo_px": np.round(paired.photo_px[chosen], 2).tolist(),
                 "view_px": np.round(paired.view_px[chosen], 2).tolist(),
             },
-            "lon": lon,
-            "lat": lat,
-            "heading": round(float(m.heading), 1),
+            **_places({photo_id: m})[photo_id],
         }
     return None
 
@@ -4806,8 +4810,7 @@ def compare_parallax(answers: Path = PLACINGS) -> None:
             walls = made.scene(panorama, chosen)
             if walls is None:
                 raise ValueError("pas de panorama voisin")
-            with Image.open(image) as photo:
-                size = photo.size[::-1]  # height, width
+            size = _size_of(image)
             one = placing.compared(
                 row,
                 made.by_id[panorama],
@@ -4934,20 +4937,18 @@ def place_photos(
             found = None
         return found and {"registration": found, "carried_from": None}
 
-    kept_matches = _matches()
+    @functools.lru_cache(maxsize=1)
+    def offers_at(_: tuple) -> dict[str, dict]:  # made again on a new match or a new verdict
+        return _offers(photos, by_id, fixed)
 
-    def near_now() -> set[str]:  # read anew: the confirmation page may answer meanwhile
-        return _said_near({k: kept_matches.get(k) for k in photos}, _Judged())
+    def offers_now() -> dict[str, dict]:
+        return offers_at(_stamp([MATCHES, ANCHORS]))
 
     def ahead() -> dict[str, str]:  # near verdicts, then photos carried from placed ones
-        return _placing_ahead(near_now(), carried_now())
+        return _placing_ahead(offers_now(), carried_now())
 
     def offer(photo_id: str) -> dict | None:
-        if photo_id not in near_now():
-            return None
-        with Image.open(photos[photo_id]["image"]) as image:  # the page's, its header only
-            width, height = image.size
-        return _offer_of(photo_id, kept_matches[photo_id], by_id, fixed, (height, width))
+        return offers_now().get(photo_id)
 
     def full(panorama: str) -> np.ndarray | None:
         """The panorama's picture at most placing.FULL_WIDTH px around, from its original

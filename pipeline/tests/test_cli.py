@@ -8,6 +8,7 @@ import cv2
 import numpy as np
 import pytest
 import typer
+from PIL import Image
 from shapely.geometry import Point
 from typer.testing import CliRunner
 
@@ -3206,16 +3207,27 @@ def test_a_placement_without_its_points_or_pairs_is_not_offered(monkeypatch):
     assert cli._offer_of("pm:1", _kept(), {}, set(), (600, 800)) is None
 
 
-def test_only_match_s_placements_said_near_are_offered(tmp_path, monkeypatch):
-    said = [("near", "near", "i"), ("yes", "yes", "i"), ("no", "no", "i")]
-    said += [("proposed", "near", "i:proposed-ab12cd34"), ("chained", "near", "i:from-ab12cd34")]
+def test_only_placements_said_near_are_offered_and_only_those_with_pairs(tmp_path, monkeypatch):
+    said = [("near", "near"), ("bare", "near"), ("yes", "yes"), ("no", "no")]
     (tmp_path / "anchors.jsonl").write_text(
-        "".join(json.dumps({"photo_id": k, "verdict": v, "inputs": i}) + "\n" for k, v, i in said)
+        "".join(json.dumps({"photo_id": k, "verdict": v, "inputs": "i"}) + "\n" for k, v in said)
     )
     monkeypatch.setattr(cli, "ANCHORS", tmp_path / "anchors.jsonl")
-    kept = {k: _kept(inputs=i) for k, _, i in said} | {"unjudged": _kept()}
+    kept = {k: _kept() for k, _ in said} | {"unjudged": _kept(), "unplaced": {"inputs": "i"}}
+    monkeypatch.setattr(cli, "_matches", lambda: kept)
+    image = tmp_path / "photo.jpg"
+    Image.new("RGB", (80, 60)).save(image)
+    photos = {k: {"image": image} for k in kept}
+    sizes = {}
 
-    assert cli._said_near(kept, cli._Judged()) == {"near"}
+    def offer_of(photo_id, kept, by_id, fixed, size):
+        sizes[photo_id] = size
+        return None if photo_id == "bare" else {"panorama": "p"}  # no pairs of its own
+
+    monkeypatch.setattr(cli, "_offer_of", offer_of)
+
+    assert cli._offers(photos, {}, set()) == {"near": {"panorama": "p"}}
+    assert sizes == {"near": (60, 80), "bare": (60, 80)}  # the page's image: height, width
 
 
 def test_near_photos_come_first_on_the_placing_page_and_yes_ones_no_longer_come_back():
