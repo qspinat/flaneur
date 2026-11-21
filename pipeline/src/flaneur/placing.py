@@ -702,8 +702,8 @@ def next_photo(sources: Sources, nearest: dict[str, float], where: dict) -> dict
     )
     head = found and {"id": found[0][0], **_shown(sources.photos[found[0][0]]), "why": found[0][1]}
     offered = head and sources.offer(head["id"])
-    if offered:  # opened on match's pairs, in the panorama it found them in
-        head["offer"] = offered
+    if offered:  # opened on match's pairs, in the panorama it found them in, at its camera
+        head.update(offer=offered, **{k: offered[k] for k in ("lon", "lat", "heading")})
     proposed = head and not offered and carried(sources).get(head["id"])
     if proposed:  # opened where its source was placed, on the panorama it was carried onto
         head.update(

@@ -16,7 +16,7 @@ import sys
 import threading
 import time
 from collections import Counter, OrderedDict, defaultdict
-from collections.abc import Callable, Iterable, Iterator, Sequence, Set
+from collections.abc import Callable, Collection, Iterable, Iterator, Sequence, Set
 from contextlib import closing, contextmanager
 from copy import copy as shallow
 from dataclasses import asdict, fields, replace
@@ -1743,11 +1743,10 @@ def _offer_of(
     return None
 
 
-def _placing_ahead(near: Iterable[str], carried: dict[str, dict]) -> dict[str, str]:
+def _placing_ahead(near: Collection[str], carried: dict[str, dict]) -> dict[str, str]:
     """The photos the placing page shows first, with why: those said near (to set right from
     match's pairs), then those carried from a photo placed. Those said yes are no longer put
     first: they are registered on their own (see _registrations)."""
-    near = set(near)
     carried_only = (i for i in carried if i not in near)
     return {
         **dict.fromkeys(sorted(near), "près"),

@@ -1516,4 +1516,6 @@ def test_a_photo_judged_near_opens_with_the_pairs_match_found(page, one):
 
     _, queue = one(sources, "GET", "/api/queue")
 
-    assert json.loads(queue)["photo"]["offer"] == offer
+    head = json.loads(queue)["photo"]
+    assert head["offer"] == offer
+    assert (head["lon"], head["lat"], head["heading"]) == (2.3467, 48.8521, 50.0)  # match's camera
