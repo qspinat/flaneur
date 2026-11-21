@@ -1218,14 +1218,18 @@ def _confirmed() -> dict[str, match.Situated]:
     their place and the 3D walk shows them (unless their place was set by hand since: a
     reviewed place wins, see export.photos). A placement not judged (as placed, or as found
     again: see _Judged.on) waits for a yes (a camera can collapse onto a panorama's spot and
-    still look right).
-    Photos placed by chaining are not among them: chaining is set aside."""
+    still look right). A photo placed by chaining said yes to is among them, where match has
+    none said yes to (see _chained)."""
     judged = _Judged()
-    return {
+    found = {
         photo_id: m
         for photo_id, m in _situated(marks=False).items()  # shown: marks aside
         if judged.said_yes(photo_id, asdict(m))
     }
+    for photo_id, row in _chained(_scenes_now(), judged)["photos"].items():
+        if photo_id not in found and judged.said_yes(photo_id, row["situated"]):
+            found[photo_id] = _situation(row["situated"])
+    return found
 
 
 def _turned_down() -> set[str]:
@@ -1319,11 +1323,16 @@ def _check_setup(matcher: str, area: str, near_by: list[match.Panorama]) -> str:
     setup = f"{area}:{_scene_of(inside, (centre.x, centre.y), _code())}"
     if matcher == DISK:
         return setup
+    return f"{setup}:{_lomag_code()}"
+
+
+def _lomag_code() -> str:
+    """LoMa-G's own code and LoMa's revision, hashed."""
     from importlib import metadata
 
     code = Path(__file__).with_name("lomag.py").read_bytes()
     revision = metadata.distribution("lomatch").read_text("direct_url.json") or ""
-    return f"{setup}:{hashlib.sha1(code + revision.encode()).hexdigest()[:8]}"
+    return hashlib.sha1(code + revision.encode()).hexdigest()[:8]
 
 
 def _of_matcher(path: Path, matcher: str) -> Path:
@@ -1881,15 +1890,15 @@ def _checked_in(near_by: list[match.Panorama]) -> dict[str, list[str]]:
             f"{MATCHERS[m].label} pas encore contrôlé pour ces panoramas ({', '.join(areas)}) : "
             f"`flaneur match-check --perimes --matcher {m}`"
         )
-    chained = register.load(CHAIN_CHECK)
-    if not chained or chained.get("setup") != _chain_setup():  # its setup read only if checked
+    check = register.load(CHAIN_CHECK)  # its setup read only if checked: then the chaining's too
+    if not check or check.get("setup") != (now := _chain_setup()):
         typer.echo(
             "enchaînement pas encore contrôlé pour ce code et ces données : `flaneur chain-check`"
         )
-    else:
-        for name, gate in chained.get("areas", {}).items():
-            if gate["passed"]:
-                checked.setdefault(name, []).append(placed.CHAINED)
+    elif register.load(CHAINS).get("setup") == now:  # the photos chained, as the check saw them
+        for name, gate in check.get("areas", {}).items():
+            if gate["passed"] and name in checked:
+                checked[name].append(placed.CHAINED)
     if failed:
         typer.echo(f"contrôle non passé : {', '.join(failed)} (leurs placements le disent)")
     return checked
@@ -2163,13 +2172,15 @@ MERGE_PX = 1.5  # a photo's LoMa-G keypoint this near one of its DISK keypoints:
 
 def _chain_setup() -> str:
     """What chaining and its check now depend on: what matching does, chaining's own code
-    (chain.py, and what of it lives here, with its numbers)."""
+    (chain.py, and what of it lives here, with its numbers), LoMa-G's (its anchors are paired
+    through it) and the areas (the check's confidence is said for each)."""
     here = [_Chaining, _merged, _rounds, _chain_passes, _inconsistent, _placed_from, _too_far]
     check = [_degraded, _replay, _check_passed, chain_check, _check_fold]
     numbers = (MERGE_PX, CHAIN_PASSES, CHECK_M, CHECK_DEG, CHECK_BLOCK_M, CHECK_FOLDS)
     numbers += (CHECK_HALVINGS, CHECK_FEWEST_RAYS, DECOY_M, CHAIN_CHECK_LEAST, CHAIN_CHECK_WRONG)
-    code = [inspect.getsource(f) for f in here + check] + [repr(numbers)]
-    digest = _digest([Path(chain.__file__).read_text(), *code])[:8]
+    code = [inspect.getsource(f) for f in here + check] + [repr(numbers), _lomag_code()]
+    areas = {name: square.wkt for name, square in pilot.AREAS.items()}
+    digest = _digest([Path(chain.__file__).read_text(), *code, areas])[:8]
     return f"{_setup()}:{digest}"
 
 
@@ -2431,6 +2442,7 @@ def chain_photos() -> None:
             "set_aside": set_aside,
         },
     )
+    write_json(CHECKED_AREAS, _checked_in(work.near_by))  # what the list says of each area: now
     typer.echo(
         f"{len(results)} photos situées par enchaînement ; {len(set_aside)} écartées ; "
         f"écrit dans {CHAINS}"
@@ -3251,20 +3263,24 @@ def match_sheet(per_page: int = 10) -> None:
     typer.echo(f"{len(rows)} photos situées ; planches dans {DATA / 'pilot'}/match_sheet_*.jpg")
 
 
-def _chained() -> dict:
+def _chained(scenes: dict, judged: "_Judged") -> dict:
     """What the last chaining found (chains.json): the photos it placed (`photos`, each its
     `situated`, a Situated's fields; `round`; the photos it was placed `from`), those still of
-    the photo as it is now (see _found_as_now: a yes holds; panoramas or code changed since do
-    not take one away, the check's confidence says it), and the `doubts` (why each)."""
+    the photo as it is now (`scenes`; see _found_as_now: a yes holds, others wait for the next
+    chaining as match's wait for the next match) and placed from no photo the user has since
+    turned down (nor from one placed from it: rows are in round order), and the `doubts` (why
+    each)."""
     kept = register.load(CHAINS)
-    scenes, judged = _scenes_now(), _Judged()
-    photos = {
-        k: row
-        for k, row in kept.get("photos", {}).items()
-        if k in scenes
-        and _exported(k).exists()
-        and _found_as_now(k, row["situated"], _inputs(scenes[k], k), judged, marks=False)
-    }
+    left_out, photos = _turned_down(), {}
+    for k, row in kept.get("photos", {}).items():
+        if left_out & set(row["from"]):
+            left_out.add(k)
+        elif (
+            k in scenes
+            and _exported(k).exists()
+            and _found_as_now(k, row["situated"], _inputs(scenes[k], k), judged, marks=False)
+        ):
+            photos[k] = row
     return {**kept, "photos": photos}
 
 
@@ -3553,8 +3569,8 @@ def _placed_photos(write: bool = False, answering: tuple | None = None) -> dict[
         mark, marked_on = marks.get(k, (None, None))
         if _photo_of(m["inputs"]) != _photo_part(k):  # placed before these marks: not on them
             mark = None
-        chained = _is_chained(m["inputs"])
-        method = placed.CHAINED if chained else (m.get("matcher") or DISK)
+        source = placed.CHAINED if _is_chained(m["inputs"]) else placed.MATCHED
+        method = source if source == placed.CHAINED else (m.get("matcher") or DISK)
         return placed.Matched(
             m,
             said and said["verdict"],
@@ -3562,7 +3578,7 @@ def _placed_photos(write: bool = False, answering: tuple | None = None) -> dict[
             method in checked.get(_area_of((m["x"], m["y"])), []),
             mark if marked_on == image else None,
             unsure(k, m),
-            placed.CHAINED if chained else placed.MATCHED,
+            source,
         )
 
     matched = {
@@ -3575,7 +3591,7 @@ def _placed_photos(write: bool = False, answering: tuple | None = None) -> dict[
     for k, p in _proposed_now(scenes, judged, marks=False).items():
         if judged.said_yes(k, p) and not (k in matched and matched[k].verdict == "yes"):
             matched[k] = weighed(k, p)  # the user's yes wins over a placement not judged
-    for k, row in _chained()["photos"].items():  # where match has no placement as now
+    for k, row in _chained(scenes, judged)["photos"].items():  # where match has none as now
         # one chained without anchors keeps no points of its own (see _keep_chained): left out
         if k not in matched and _is_chained(row["situated"]["inputs"]):
             matched[k] = weighed(k, row["situated"])
@@ -3848,7 +3864,7 @@ def confirm_placed(port: int = 8768, open_browser: bool = True) -> None:
     today = then(date.today().year)
     walls = _ViewWalls(near_by, fixed, today.blocks)
     by_id = {p.id: p for p in near_by}
-    chained = _chained()
+    chained = _chained(_scenes_now(), _Judged())
     situated, rounds = _with_chained(_situated(marks=False), chained, set(titles))  # as shown
     for k, why in chained.get("doubts", {}).items():
         if k in rounds:
