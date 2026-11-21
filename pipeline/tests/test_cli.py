@@ -3235,6 +3235,25 @@ def test_only_placements_said_near_on_the_image_as_it_is_are_offered(tmp_path, m
     assert "recropped" not in sizes
 
 
+def test_an_unreadable_verdict_or_placement_offers_nothing_and_the_queue_goes_on(monkeypatch):
+    monkeypatch.setattr(cli, "_matches", lambda: json.loads("{"))
+
+    assert cli._offers({"pm:1": {"image": "x", "inputs": "img"}}, {}, set()) == {}
+
+
+def test_points_a_hair_apart_are_offered_once(monkeypatch):
+    m = cli._situation(_kept())
+    monkeypatch.setattr(cli, "_found_from", lambda photo_id, kept: (m, "points", "observed"))
+    monkeypatch.setattr(cli, "_sources_first", lambda *a: [SimpleNamespace(id="p")])
+    paired = _paired_at("p", cli.OFFERED)  # every one chosen
+    paired.photo_px[1] = paired.photo_px[0] + 0.003  # one detail matched through two rays
+    monkeypatch.setattr(cli.bridging, "paired", lambda *a: paired)
+
+    offered = cli._offer_of("pm:1", _kept(), {}, set(), (600, 800))["pairs"]["photo_px"]
+
+    assert len({tuple(p) for p in offered}) == len(offered)
+
+
 def test_the_most_spread_points_never_repeat_one():
     at = np.array([[0.0, 0.0], [5.0, 0.0], [0.0, 0.0], [5.0, 0.0]])
 

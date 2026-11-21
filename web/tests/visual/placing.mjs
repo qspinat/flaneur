@@ -488,13 +488,13 @@ await coming.close();
 // parallax on and the photo fitted from them at once; flipped, the pairs go (they hold unflipped)
 const offering = { depth: 0, parallax: [], proposals: 0 };
 const EIGHT = [...Array(8)].map((_, i) => i);
-const offer = { view: { heading: 137.5, pitch: 0, fov: 75 }, heading: 200,
+const offer = { view: { heading: 137.5, pitch: 0, fov: 75 },
   pairs: { photo_px: EIGHT.map((i) => [40 + 60 * i, 50 + 40 * i]), view_px: EIGHT.map((i) => [100 + 120 * i, 200 + 60 * i]) } };
 const nearby = await pageWith(async (head, opened) => {  // as the server sends it: at match's camera
   const { lon, lat } = head;
   const around = await (await opened.request.get(new URL(`/api/near?lon=${lon}&lat=${lat}`, url).href)).json();
   offer.panorama = (around[1] ?? around[0]).id;  // not the nearest: the page goes to it
-  Object.assign(head, { offer: { ...offer, lon, lat }, heading: offer.heading, why: 'près' });
+  Object.assign(head, { offer, heading: 200, why: 'près' });
 });
 for (const [path, handle] of Object.entries({
   '**/api/proposal/**': (route) => { offering.proposals++; return route.fulfill({ json: null }); },
@@ -513,7 +513,8 @@ for (const [path, handle] of Object.entries({
 await nearby.goto(url);
 check(await until(() => offering.parallax.length > 0, 60000), `the near photo is fitted in parallax at once (${offering.parallax.length})`);
 const opened = await nearby.evaluate(() => ({ panorama: near[at].id, view, pairs: pairs.length, pairing, on: parallaxOn,
-  heading: spot.heading, why: document.getElementById('progress').textContent }));
+  heading: spot.heading, why: document.getElementById('progress').textContent,
+  where: document.getElementById('where').textContent, wanted: parallaxWanted }));
 check(opened.panorama === offer.panorama && opened.view.heading === 137.5 && opened.view.fov === 75,
   `it opens on match's panorama and view (${opened.panorama}, ${JSON.stringify(opened.view)})`);
 check(opened.pairing && opened.pairs === 8 && opened.on && offering.depth > 0,
@@ -521,6 +522,8 @@ check(opened.pairing && opened.pairs === 8 && opened.on && offering.depth > 0,
 const fit = offering.parallax[0];
 check(fit.photo_px.length === 8 && JSON.stringify(fit.view_px[7]) === '[940,620]' && fit.panorama === offer.panorama,
   'the fit is made from the pairs offered, in that panorama');
+check(opened.where.includes('138°'), `the line under the view says where it looks (« ${opened.where} »)`);
+check(!opened.wanted, 'the parallax turned on for this photo only: the next opens as the user left it');
 check(opened.heading === 200 && opened.why.includes('près'), `the pin turned as the queue sends it, and why it comes first (« ${opened.why} »)`);
 check(await loaded(nearby, '#photo') && await shows(nearby, '#photo-stage .dot', 8), 'the pairs are drawn on the photo');
 check(offering.proposals === 0, `no proposal asked for the offered panorama (${offering.proposals})`);

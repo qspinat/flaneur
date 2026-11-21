@@ -1694,7 +1694,11 @@ def _offers(
     """The placements of match the user's last word on is near (the right place, the camera to
     set right), as the placing page opens them (see _offer_of): those made on the photo's image
     as it is now (its points' pixels are of it), with pairs of their own."""
-    kept, judged = _matches(), _Judged()
+    try:
+        kept, judged = _matches(), _Judged()
+    except Exception as error:  # a file written wrong: no offer, the queue goes on
+        typer.echo(f"pas de paires proposées ({error})", err=True)
+        return {}
     offers = {}
     for k in sorted(photos):
         m = kept.get(k)
@@ -1730,14 +1734,12 @@ def _offer_of(
     for sphere in _sources_first(points, by_id, m, fixed):
         if (paired := bridging.paired(points, observed, sphere, size)) is None:
             continue
-        chosen = _most_spread(paired.photo_px, OFFERED)
+        photo_px, view_px = np.round(paired.photo_px, 2), np.round(paired.view_px, 2)
+        chosen = _most_spread(photo_px, OFFERED)  # as sent: never twice the same pixel
         return {
             "panorama": paired.panorama,
             "view": asdict(paired.view),
-            "pairs": {
-                "photo_px": np.round(paired.photo_px[chosen], 2).tolist(),
-                "view_px": np.round(paired.view_px[chosen], 2).tolist(),
-            },
+            "pairs": {"photo_px": photo_px[chosen].tolist(), "view_px": view_px[chosen].tolist()},
             **_places({photo_id: m})[photo_id],
         }
     return None
