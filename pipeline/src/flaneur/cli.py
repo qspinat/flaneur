@@ -1870,7 +1870,8 @@ def _match_with(matcher: str, photos: list[export.WalkPhoto], at: _Run) -> None:
 def _checked_in(near_by: list[match.Panorama]) -> dict[str, list[str]]:
     """For each area, the methods whose known-answer check passed there for its panoramas as
     they are (the matchers; placed.CHAINED, the chaining's check for the code and data as they
-    are): how sure a placement of each is there (see placed.Matched), not whether it is tried.
+    are: a measure only, the chained photos listed being those said yes to): how sure a
+    placement of each is there (see placed.Matched), not whether it is tried.
     Says which checks are still to make (with the command), and which failed."""
     checked: dict[str, list[str]] = {name: [] for name in pilot.AREAS}
     to_make, failed = defaultdict(list), []
@@ -2711,7 +2712,8 @@ def chain_check(seed: int = 0) -> None:
     comparée à sa place (juste à CHECK_M et CHECK_DEG). Un leurre par photo : une autre photo
     confirmée à DECOY_M de là, donnée pour être à sa place, ne doit pas y être située. La porte
     (assez de photos revenues, peu de fausses, aucun leurre pris), par quartier, est la
-    confiance des photos enchaînées (lue par la liste des photos placées) : elle n'arrête rien."""
+    confiance des photos enchaînées, une mesure : elle n'arrête rien, et seules les photos
+    enchaînées dites justes entrent dans la liste des photos placées."""
     work = _Chaining()
     rng = np.random.default_rng(seed)
     truths = sorted(  # placed against today: the chaining is not checked against its own
@@ -3298,11 +3300,6 @@ def _anchoring(placements: dict[str, dict]) -> set[str]:
     }
 
 
-def _said_near(judged: "_Judged", photo_id: str, placed: dict) -> bool:
-    """Whether the user's last word on a placement is near (the right place, the camera off)."""
-    return bool(said := judged.on(photo_id, placed)) and said["verdict"] == "near"
-
-
 def _chained_wins(judged: "_Judged", photo_id: str, chained: dict, today: dict | None) -> bool:
     """Whether a photo's chained placement is shown rather than its placement against `today`
     (none: there is none): the user said yes to it, and not to that one."""
@@ -3601,8 +3598,8 @@ def _placed_photos(write: bool = False, answering: tuple | None = None) -> dict[
     """The photos placed now (see placed.build): the placing page's answers on the image each
     has now; match's placements of each photo as it is now (see _found_as_now), the yes
     given to cameras matching turned down (as _situated), and the last chaining's placements the
-    user said yes or near to (from anchors: see _chained; the others are only proposed, on the
-    confirmation page), each with the user's word,
+    user said yes to (the others are only proposed, on the confirmation page), each with the
+    user's word,
     whether its method passes the check in the area its camera stands in, its landmarks' state
     (on that image). `write`: kept in PLACED_PHOTOS too, when changed; `answering`: the placing
     page's answers, already read (see _placing_answers)."""
@@ -3643,11 +3640,12 @@ def _placed_photos(write: bool = False, answering: tuple | None = None) -> dict[
     for k, p in _proposed_now(scenes, judged, marks=False).items():
         if judged.said_yes(k, p) and not (k in matched and matched[k].verdict == "yes"):
             matched[k] = weighed(k, p)  # the user's yes wins over a placement not judged
-    anchors = _anchoring({k: m.placement for k, m in matched.items() if m.verdict in (None, "yes")})
-    for k, row in _chained(scenes, judged, anchors)["photos"].items():
-        c = row["situated"]  # where match has none as now, or this one is said yes to
-        if not judged.said_yes(k, c) and not _said_near(judged, k, c):
-            continue  # proposed on the confirmation page only, until the user has seen it
+    # the chained photos said yes to (their anchors then do not matter: see _chained); the
+    # others are only proposed, on the confirmation page
+    for k, row in _chained(scenes, judged, set())["photos"].items():
+        c = row["situated"]
+        if not judged.said_yes(k, c):
+            continue
         if k not in matched or _chained_wins(judged, k, c, matched[k].placement):
             matched[k] = weighed(k, c)
     found = placed.build(_on_image_now(answers), far, matched, _registrations)

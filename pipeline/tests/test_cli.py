@@ -2291,7 +2291,7 @@ def test_the_placed_list_is_written_from_the_answers_verdicts_and_matches(monkey
     said = [("pm:1", "near", "i"), ("pp", "yes", "i:proposed-ab12cd34")]  # pp: a camera refused
     said.append(("pm:3", "yes", "i:from-ab12cd34"))  # its chained camera said yes to
     said.append(("pm:1", "yes", "i:from-ab12cd34"))  # match's said near, the chained one yes
-    said.append(("pn", "near", "i:from-ab12cd34"))  # a chained one said near: listed as near
+    said.append(("pn", "near", "i:from-ab12cd34"))  # a chained one said near: not listed
     (tmp_path / "anchors.jsonl").write_text(
         "".join(json.dumps({"photo_id": k, "verdict": v, "inputs": i}) + "\n" for k, v, i in said)
     )
@@ -2349,7 +2349,7 @@ def test_the_placed_list_is_written_from_the_answers_verdicts_and_matches(monkey
         "pm:3": ("checked", "chain", False),  # a yes wins over match's not judged
         "pm:4": ("automatic", "match", False),  # its marks were made on another crop
         "pp": ("checked", "match", False),
-        "pn": ("near", "chain", False),  # pc, chained and not judged: proposed on the page only
+        # pc (not judged) and pn (said near): chained, proposed on the confirmation page only
     }
     assert {k for k, p in written.items() if p["unsure_sources"]} == {"pm:4"}  # gps only
 
