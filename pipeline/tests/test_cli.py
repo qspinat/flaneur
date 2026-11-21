@@ -3222,7 +3222,7 @@ def test_only_placements_said_near_on_the_image_as_it_is_are_offered(tmp_path, m
     photos["recropped"]["inputs"] = "img2"  # cropped again since match placed it
     sizes = {}
 
-    def offer_of(photo_id, kept, by_id, fixed, size):
+    def offer_of(photo_id, kept, by_id, fixed, size, wrong):
         sizes[photo_id] = size
         if photo_id == "broken":
             raise ValueError("points illisibles")
@@ -3266,7 +3266,7 @@ def test_near_photos_come_first_on_the_placing_page_and_yes_ones_no_longer_come_
     assert ahead == {"n": "près", "c": "portée"}
 
 
-def test_points_marked_wrong_are_not_offered_on_the_placing_page(tmp_path, monkeypatch):
+def test_points_marked_wrong_are_not_offered_on_the_placing_page(monkeypatch):
     m = cli._situation(_kept())
     points = cli.match.Points(
         np.array([[1.0, 1.0], [2.0, 2.0], [3.0, 3.0]]),
@@ -3275,12 +3275,28 @@ def test_points_marked_wrong_are_not_offered_on_the_placing_page(tmp_path, monke
     )
     monkeypatch.setattr(cli, "_found_from", lambda photo_id, kept: (m, points, "observed"))
     monkeypatch.setattr(cli, "_sources_first", lambda *a: [SimpleNamespace(id="p")])
-    monkeypatch.setattr(cli, "WRONG_PAIRS", tmp_path / "wrong_pairs.jsonl")
-    cli.confirming.mark_pair(cli.WRONG_PAIRS, "pm:1", "c:img", 1, True)
-    cli.confirming.mark_pair(cli.WRONG_PAIRS, "pm:1", "c:old", 0, True)  # another placement's
     given = []
     monkeypatch.setattr(cli.bridging, "paired", lambda pts, *a: given.append(pts.pixels) or None)
 
-    cli._offer_of("pm:1", _kept(inputs="c:img"), {}, set(), (600, 800))
+    cli._offer_of("pm:1", _kept(inputs="c:img"), {}, set(), (600, 800), {1})
 
     assert given[0].tolist() == [[1.0, 1.0], [3.0, 3.0]]
+
+
+def test_the_marks_on_a_placement_go_to_its_offer_only(tmp_path, monkeypatch):
+    monkeypatch.setattr(cli, "WRONG_PAIRS", tmp_path / "wrong_pairs.jsonl")
+    cli.confirming.mark_pair(cli.WRONG_PAIRS, "pm:1", "c:img", 1, True)
+    cli.confirming.mark_pair(cli.WRONG_PAIRS, "pm:1", "c:old", 0, True)  # another placement's
+    monkeypatch.setattr(cli, "ANCHORS", tmp_path / "anchors.jsonl")
+    cli.confirming.record(cli.ANCHORS, "pm:1", "near", "c:img", 1)
+    monkeypatch.setattr(cli, "_matches", lambda: {"pm:1": _kept(inputs="c:img")})
+    image = tmp_path / "photo.jpg"
+    Image.new("RGB", (80, 60)).save(image)
+    given = {}
+    monkeypatch.setattr(
+        cli, "_offer_of", lambda k, m, by_id, fixed, size, wrong: given.update({k: wrong})
+    )
+
+    cli._offers({"pm:1": {"image": image, "inputs": "img"}}, {}, set())
+
+    assert given == {"pm:1": {1}}

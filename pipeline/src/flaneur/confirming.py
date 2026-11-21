@@ -59,7 +59,7 @@ def mark_pair(path: Path, photo_id: str, inputs: str, index: object, wrong: obje
     """Append the user's mark on a pair shown (`index`: its row among the points of the
     placement made from `inputs`): wrong (the two details are not the same thing), or that mark
     taken back."""
-    if not isinstance(index, int) or isinstance(index, bool) or index < 0:
+    if type(index) is not int or index < 0:
         raise ValueError("une paire est désignée par son numéro de point")
     if not isinstance(wrong, bool):
         raise ValueError("une paire est marquée fausse ou ne l'est plus (vrai ou faux)")
@@ -150,15 +150,27 @@ def serve(
                 and parts[1] in by_id
                 and (found := scene(parts[1], source=source)) is not None
             ):
-                photo = by_id[parts[1]]
-                self._json(
-                    with_marks(found, marked(marks).get((photo["id"], photo["inputs"]), set()))
-                )
+                wrong = marked(marks).get((parts[1], by_id[parts[1]]["inputs"]), set())
+                self._json(with_marks(found, wrong))
             else:
                 self._send(404, b"not found", "text/plain")
 
         def do_POST(self) -> None:  # noqa: N802
-            if self.path not in ("/api/verdict", "/api/pair"):
+            writes = {  # a verdict on the photo, or a mark on one of its pairs (not a verdict)
+                "/api/verdict": lambda photo, body: record(
+                    path,
+                    photo["id"],
+                    body.get("verdict"),
+                    photo["inputs"],
+                    body.get("seconds", 0),
+                    photo.get("camera"),
+                    body.get("reason"),
+                ),
+                "/api/pair": lambda photo, body: mark_pair(
+                    marks, photo["id"], photo["inputs"], body.get("index"), body.get("wrong")
+                ),
+            }
+            if self.path not in writes:
                 self._send(404, b"not found", "text/plain")
                 return
             try:
@@ -166,28 +178,7 @@ def serve(
                 photo = by_id.get(body.get("photo_id"))
                 if photo is None:
                     raise ValueError(f"photo inconnue : {body.get('photo_id')}")
-                if self.path == "/api/pair":
-                    self._json(
-                        mark_pair(
-                            marks,
-                            photo["id"],
-                            photo["inputs"],
-                            body.get("index"),
-                            body.get("wrong"),
-                        )
-                    )
-                    return
-                self._json(
-                    record(
-                        path,
-                        photo["id"],
-                        body.get("verdict"),
-                        photo["inputs"],
-                        body.get("seconds", 0),
-                        photo.get("camera"),
-                        body.get("reason"),
-                    )
-                )
+                self._json(writes[self.path](photo, body))
             except (ValueError, KeyError, TypeError, AttributeError) as error:
                 self._send(400, str(error).encode(), "text/plain; charset=utf-8")
 

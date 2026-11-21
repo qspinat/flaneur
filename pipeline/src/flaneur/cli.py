@@ -1696,7 +1696,7 @@ def _offers(
     set right), as the placing page opens them (see _offer_of): those made on the photo's image
     as it is now (its points' pixels are of it), with pairs of their own."""
     try:
-        kept, judged = _matches(), _Judged()
+        kept, judged, wrong = _matches(), _Judged(), confirming.marked(WRONG_PAIRS)
     except Exception as error:  # a file written wrong: no offer, the queue goes on
         typer.echo(f"pas de paires proposées ({error})", err=True)
         return {}
@@ -1708,7 +1708,9 @@ def _offers(
         if not ((said := judged.on(k, m)) and said["verdict"] == "near"):
             continue
         try:
-            found = _offer_of(k, m, by_id, fixed, _size_of(photos[k]["image"]))
+            found = _offer_of(
+                k, m, by_id, fixed, _size_of(photos[k]["image"]), wrong.get((k, m["inputs"]), set())
+            )
         except Exception as error:  # this one opens as any other photo: the others go on
             typer.echo(f"{k} : pas de paires proposées ({error})", err=True)
             continue
@@ -1723,18 +1725,19 @@ def _offer_of(
     by_id: dict[str, match.Panorama],
     fixed: Set[str],
     size: tuple[int, int],
+    wrong: Set[int] = frozenset(),
 ) -> dict | None:
     """A placement of match, as the placing page opens it (see placing.Sources.offer): in the
     first of its panoramas (see _sources_first) where it has enough pairs of its own (see
     bridging.paired), up to OFFERED of them, the most spread, the photo's pixels at `size` (the
-    page's image of it), none the user marked wrong; its camera as the starting pin. None
+    page's image of it), none of the points `wrong` (marked so by the user, see
+    confirming.marked); its camera as the starting pin. None
     without its points (kept for other inputs) or pairs."""
     if (found := _found_from(photo_id, kept)) is None:
         return None
     m, points, observed = found
-    wrong = confirming.marked(WRONG_PAIRS).get((photo_id, kept["inputs"]), set())
-    if wrong:  # marked wrong on the confirmation page: never laid again
-        right = np.array([i not in wrong for i in range(len(points.pixels))], bool)
+    if wrong:  # marked so on the confirmation page: never laid again
+        right = ~np.isin(np.arange(len(points.pixels)), list(wrong))
         points = match.Points(points.pixels[right], points.world[right], points.seen[right])
     for sphere in _sources_first(points, by_id, m, fixed):
         if (paired := bridging.paired(points, observed, sphere, size)) is None:
@@ -4959,7 +4962,7 @@ def place_photos(
         return _offers(photos, by_id, fixed)
 
     def offers_now() -> dict[str, dict]:
-        return offers_at(_stamp([MATCHES, ANCHORS]))
+        return offers_at(_stamp([MATCHES, ANCHORS, WRONG_PAIRS]))
 
     def ahead() -> dict[str, str]:  # near verdicts, then photos carried from placed ones
         return _placing_ahead(offers_now(), carried_now())
