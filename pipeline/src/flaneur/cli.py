@@ -1671,13 +1671,15 @@ PLAN_M = 40.0  # the confirmation page's plan: so far each way from its camera
 
 def _most_spread(at: np.ndarray, most: int) -> list[int]:
     """Up to `most` of the points `at` (pixels), the most spread: the first, then each in turn
-    the farthest from those chosen."""
+    the farthest from those chosen (none where one is already: never twice the same)."""
     chosen: list[int] = []
     if len(at):
         chosen.append(0)
         gap = np.hypot(*(at - at[0]).T)
         while len(chosen) < min(most, len(at)):
             far = int(np.argmax(gap))
+            if gap[far] == 0:
+                break
             chosen.append(far)
             gap = np.minimum(gap, np.hypot(*(at - at[far]).T))
     return chosen
@@ -1690,14 +1692,22 @@ def _offers(
     photos: dict[str, dict], by_id: dict[str, match.Panorama], fixed: Set[str]
 ) -> dict[str, dict]:
     """The placements of match the user's last word on is near (the right place, the camera to
-    set right), as the placing page opens them (see _offer_of): those with pairs of their own."""
+    set right), as the placing page opens them (see _offer_of): those made on the photo's image
+    as it is now (its points' pixels are of it), with pairs of their own."""
     kept, judged = _matches(), _Judged()
     offers = {}
     for k in sorted(photos):
         m = kept.get(k)
-        if not (m and "x" in m and (said := judged.on(k, m)) and said["verdict"] == "near"):
+        if not (m and "x" in m and _image_of(m["inputs"]) == photos[k]["inputs"]):
             continue
-        if found := _offer_of(k, m, by_id, fixed, _size_of(photos[k]["image"])):
+        if not ((said := judged.on(k, m)) and said["verdict"] == "near"):
+            continue
+        try:
+            found = _offer_of(k, m, by_id, fixed, _size_of(photos[k]["image"]))
+        except Exception as error:  # this one opens as any other photo: the others go on
+            typer.echo(f"{k} : pas de paires proposées ({error})", err=True)
+            continue
+        if found:
             offers[k] = found
     return offers
 
@@ -1733,13 +1743,14 @@ def _offer_of(
     return None
 
 
-def _placing_ahead(near: Set[str], carried: dict[str, dict]) -> dict[str, str]:
+def _placing_ahead(near: Iterable[str], carried: dict[str, dict]) -> dict[str, str]:
     """The photos the placing page shows first, with why: those said near (to set right from
-    match's pairs), then those carried from a photo placed. Those said yes do not come back:
-    they are registered on their own (see _registrations)."""
+    match's pairs), then those carried from a photo placed. Those said yes are no longer put
+    first: they are registered on their own (see _registrations)."""
+    near = set(near)
     carried_only = (i for i in carried if i not in near)
     return {
-        **dict.fromkeys(sorted(near), "près : à corriger"),
+        **dict.fromkeys(sorted(near), "près"),
         **dict.fromkeys(carried_only, "portée"),
     }
 

@@ -3207,30 +3207,41 @@ def test_a_placement_without_its_points_or_pairs_is_not_offered(monkeypatch):
     assert cli._offer_of("pm:1", _kept(), {}, set(), (600, 800)) is None
 
 
-def test_only_placements_said_near_are_offered_and_only_those_with_pairs(tmp_path, monkeypatch):
-    said = [("near", "near"), ("bare", "near"), ("yes", "yes"), ("no", "no")]
-    (tmp_path / "anchors.jsonl").write_text(
-        "".join(json.dumps({"photo_id": k, "verdict": v, "inputs": "i"}) + "\n" for k, v in said)
-    )
+def test_only_placements_said_near_on_the_image_as_it_is_are_offered(tmp_path, monkeypatch):
+    said = dict.fromkeys(["near", "bare", "broken", "recropped"], "near")
+    said |= {"yes": "yes", "no": "no"}
+    rows = ({"photo_id": k, "verdict": v, "inputs": "c:img"} for k, v in said.items())
+    (tmp_path / "anchors.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows))
     monkeypatch.setattr(cli, "ANCHORS", tmp_path / "anchors.jsonl")
-    kept = {k: _kept() for k, _ in said} | {"unjudged": _kept(), "unplaced": {"inputs": "i"}}
+    kept = {k: _kept(inputs="c:img") for k in said}
+    kept |= {"unjudged": _kept(inputs="c:img"), "unplaced": {"inputs": "c:img"}}
     monkeypatch.setattr(cli, "_matches", lambda: kept)
     image = tmp_path / "photo.jpg"
     Image.new("RGB", (80, 60)).save(image)
-    photos = {k: {"image": image} for k in kept}
+    photos = {k: {"image": image, "inputs": "img"} for k in kept}
+    photos["recropped"]["inputs"] = "img2"  # cropped again since match placed it
     sizes = {}
 
     def offer_of(photo_id, kept, by_id, fixed, size):
         sizes[photo_id] = size
+        if photo_id == "broken":
+            raise ValueError("points illisibles")
         return None if photo_id == "bare" else {"panorama": "p"}  # no pairs of its own
 
     monkeypatch.setattr(cli, "_offer_of", offer_of)
 
-    assert cli._offers(photos, {}, set()) == {"near": {"panorama": "p"}}
-    assert sizes == {"near": (60, 80), "bare": (60, 80)}  # the page's image: height, width
+    assert cli._offers(photos, {}, set()) == {"near": {"panorama": "p"}}  # the others go on
+    assert sizes["near"] == (60, 80)  # the page's image: height, width
+    assert "recropped" not in sizes
+
+
+def test_the_most_spread_points_never_repeat_one():
+    at = np.array([[0.0, 0.0], [5.0, 0.0], [0.0, 0.0], [5.0, 0.0]])
+
+    assert sorted(cli._most_spread(at, 4)) == [0, 1]
 
 
 def test_near_photos_come_first_on_the_placing_page_and_yes_ones_no_longer_come_back():
     ahead = cli._placing_ahead({"n"}, {"c": {}, "n": {}})
 
-    assert ahead == {"n": "près : à corriger", "c": "portée"}
+    assert ahead == {"n": "près", "c": "portée"}
