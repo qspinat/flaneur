@@ -3298,6 +3298,11 @@ def _anchoring(placements: dict[str, dict]) -> set[str]:
     }
 
 
+def _said_near(judged: "_Judged", photo_id: str, placed: dict) -> bool:
+    """Whether the user's last word on a placement is near (the right place, the camera off)."""
+    return bool(said := judged.on(photo_id, placed)) and said["verdict"] == "near"
+
+
 def _chained_wins(judged: "_Judged", photo_id: str, chained: dict, today: dict | None) -> bool:
     """Whether a photo's chained placement is shown rather than its placement against `today`
     (none: there is none): the user said yes to it, and not to that one."""
@@ -3595,8 +3600,9 @@ def _sure_panoramas() -> tuple[set[str], set[str]]:
 def _placed_photos(write: bool = False, answering: tuple | None = None) -> dict[str, placed.Placed]:
     """The photos placed now (see placed.build): the placing page's answers on the image each
     has now; match's placements of each photo as it is now (see _found_as_now), the yes
-    given to cameras matching turned down (as _situated), and the last chaining's placements of
-    the photos match did not place (from anchors: see _chained), each with the user's word,
+    given to cameras matching turned down (as _situated), and the last chaining's placements the
+    user said yes or near to (from anchors: see _chained; the others are only proposed, on the
+    confirmation page), each with the user's word,
     whether its method passes the check in the area its camera stands in, its landmarks' state
     (on that image). `write`: kept in PLACED_PHOTOS too, when changed; `answering`: the placing
     page's answers, already read (see _placing_answers)."""
@@ -3640,6 +3646,8 @@ def _placed_photos(write: bool = False, answering: tuple | None = None) -> dict[
     anchors = _anchoring({k: m.placement for k, m in matched.items() if m.verdict in (None, "yes")})
     for k, row in _chained(scenes, judged, anchors)["photos"].items():
         c = row["situated"]  # where match has none as now, or this one is said yes to
+        if not judged.said_yes(k, c) and not _said_near(judged, k, c):
+            continue  # proposed on the confirmation page only, until the user has seen it
         if k not in matched or _chained_wins(judged, k, c, matched[k].placement):
             matched[k] = weighed(k, c)
     found = placed.build(_on_image_now(answers), far, matched, _registrations)

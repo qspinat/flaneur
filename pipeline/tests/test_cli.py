@@ -2291,6 +2291,7 @@ def test_the_placed_list_is_written_from_the_answers_verdicts_and_matches(monkey
     said = [("pm:1", "near", "i"), ("pp", "yes", "i:proposed-ab12cd34")]  # pp: a camera refused
     said.append(("pm:3", "yes", "i:from-ab12cd34"))  # its chained camera said yes to
     said.append(("pm:1", "yes", "i:from-ab12cd34"))  # match's said near, the chained one yes
+    said.append(("pn", "near", "i:from-ab12cd34"))  # a chained one said near: listed as near
     (tmp_path / "anchors.jsonl").write_text(
         "".join(json.dumps({"photo_id": k, "verdict": v, "inputs": i}) + "\n" for k, v, i in said)
     )
@@ -2310,7 +2311,7 @@ def test_the_placed_list_is_written_from_the_answers_verdicts_and_matches(monkey
         "SIGHTS": tmp_path / "sights.jsonl",
         "ANCHORS": tmp_path / "anchors.jsonl",
         "_placing_answers": lambda: ({}, {"pa": answer}, set()),
-        "_scenes_now": lambda: {k: "s" for k in ("pm:1", "pm:2", "pm:3", "pm:4", "pp", "pc")},
+        "_scenes_now": lambda: {k: "s" for k in ("pm:1", "pm:2", "pm:3", "pm:4", "pp", "pc", "pn")},
         "_matches": lambda: {
             "pm:1": _kept(),
             "pm:2": _kept(inputs="before"),
@@ -2331,7 +2332,8 @@ def test_the_placed_list_is_written_from_the_answers_verdicts_and_matches(monkey
         "_sure_panoramas": lambda: ({"sure"}, {"sure", "gps"}),  # sure of their pose, known
         "_chained": lambda scenes, judged, anchors: {
             "photos": {
-                k: {"situated": _kept(inputs="i:from-ab12cd34")} for k in ("pc", "pm:1", "pm:3")
+                k: {"situated": _kept(inputs="i:from-ab12cd34")}
+                for k in ("pc", "pm:1", "pm:3", "pn")
             }
         },
     }.items():
@@ -2347,10 +2349,9 @@ def test_the_placed_list_is_written_from_the_answers_verdicts_and_matches(monkey
         "pm:3": ("checked", "chain", False),  # a yes wins over match's not judged
         "pm:4": ("automatic", "match", False),  # its marks were made on another crop
         "pp": ("checked", "match", False),
-        "pc": ("automatic", "chain", False),
+        "pn": ("near", "chain", False),  # pc, chained and not judged: proposed on the page only
     }
     assert {k for k, p in written.items() if p["unsure_sources"]} == {"pm:4"}  # gps only
-    assert written["pc"]["unchecked_area"]  # the chaining's check not passed in its area
 
 
 def test_only_the_photos_placed_with_a_registration_go_to_3d(monkeypatch):
