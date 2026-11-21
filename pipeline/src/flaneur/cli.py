@@ -910,13 +910,11 @@ CHECK_TRACE = DATA / "pilot" / "match_check_trace.json"  # the same, for the kno
 MATCH_CHECK = DATA / "pilot" / "match_check.json"  # the known-answer check's last result
 CHAINS = DATA / "pilot" / "chains.json"  # old photos placed from old photos (chain)
 CHAIN_CHECK = DATA / "pilot" / "chain_check.json"  # the chaining's known-answer check
-# Cameras matching turned down although many points agreed with them, proposed to the user
-# (`flaneur presque`): of those with 50 points agreeing or more, 56 % were right by eye (night
-# of 10 November, the last matcher's trace).
+# Cameras matching turned down although many points agreed with them, once proposed to the
+# user (`presque`, 11–12 November; dropped by its rule: 37 % right, 50 % wanted): the file is
+# kept as answered (a yes is a placement, a near comes first on the placing page).
 PROPOSED_CAMERAS = DATA / "pilot" / "proposed_cameras.json"
-PROPOSE_AGREE = 50
-PROPOSAL = "proposed"  # a proposed camera's "matcher": PROPOSAL-<the camera's fingerprint>
-PROPOSED_ABOVE_M = 1.6  # a proposed camera's height above the street when no placement gives one
+PROPOSAL = "proposed"  # a proposed camera's "matcher": PROPOSAL-<where it stood, hashed>
 ANCHORS = DATA / "overrides" / "anchors.jsonl"  # the user's yes or no to photos placed
 MATCH_RADIUS_M = 60  # a placement from a caption can be 25 m off
 MATCH_PANORAMAS = 16  # ranked by a quick first pass, the best views matched in full
@@ -1110,7 +1108,7 @@ def _left_to_try(kept: dict | None, inputs: str, refused: bool = False) -> list[
 
 
 def _is_proposal(inputs: str) -> bool:
-    """Whether a placement's inputs are a camera proposed (see _proposals)."""
+    """Whether a placement's inputs are a camera proposed (see PROPOSED_CAMERAS)."""
     return re.search(rf":{PROPOSAL}-[0-9a-f]+$", inputs) is not None
 
 
@@ -1119,7 +1117,7 @@ def _situated(marks: bool = True) -> dict[str, match.Situated]:
     now (a match found from other panoramas or another crop of the photo is left out, unless
     the user said yes to it and the photo is the same: see _Judged.holds), and not turned down
     by the user (as placed, or as found again: see _Judged.on); and those whose camera matching
-    turned down the user said yes to (see _proposals). Without `marks`: see _found_as_now."""
+    turned down the user said yes to (see PROPOSED_CAMERAS). Without `marks`: see _found_as_now."""
     scenes, judged, matches = _scenes_now(), _Judged(), _matches()
     found = {}
     for photo_id, m in matches.items():
@@ -1135,7 +1133,7 @@ def _situated(marks: bool = True) -> dict[str, match.Situated]:
 
 
 def _proposed_now(scenes: dict[str, str], judged: "_Judged", marks: bool = True) -> dict[str, dict]:
-    """The cameras proposed (see _proposals) for photos as they are now (`scenes`: each one's,
+    """The cameras proposed (see PROPOSED_CAMERAS) for photos as they are now (`scenes`: each one's,
     see _scene_of) the user did not turn down, or said yes to while the photo is the same (see
     _stands, `marks`)."""
     return {
@@ -1145,72 +1143,6 @@ def _proposed_now(scenes: dict[str, str], judged: "_Judged", marks: bool = True)
         and _exported(k).exists()
         and _stands(k, p, _inputs(scenes[k], k), judged, marks)
     }
-
-
-def _fingerprint(camera: dict) -> str:
-    """A camera's own mark (where it stands, where it looks): a yes to one is not to another."""
-    where = f"{camera['x']:.2f},{camera['y']:.2f},{camera['heading']:.1f},{camera['fov']:.1f}"
-    return hashlib.sha1(where.encode()).hexdigest()[:8]
-
-
-def _proposals(
-    trace: dict[str, dict],
-    matches: dict[str, dict | None],
-    place_of: Callable[[str], tuple[float, float]],
-    inputs_of: Callable[[str], str],
-    above: float,
-) -> dict[str, dict]:
-    """For each photo matching did not place (`matches`: the walk's, as kept), the best camera
-    it turned down when at least PROPOSE_AGREE points agreed with it (`trace`: each photo's
-    last match, made from what it is now: `inputs_of`), as a placement to say yes or no to
-    (matcher PROPOSAL: a yes to it is not a yes to a placement found later), with why it was
-    turned down; `above` the street (a camera turned down keeps no height), `place_of` its
-    caption, no points kept (not an anchor)."""
-    proposed = {}
-    for photo_id, run in trace.items():
-        best = max(run.get("candidates") or [], key=lambda c: c["agree"], default=None)
-        kept = matches.get(photo_id)
-        if best is None or best["agree"] < PROPOSE_AGREE or not kept or "x" in kept:
-            continue
-        inputs = inputs_of(photo_id)
-        if kept["inputs"] != inputs or run.get("inputs", inputs) != inputs:
-            continue  # matched, or traced, from another image
-        x0, y0 = place_of(photo_id)
-        proposed[photo_id] = {
-            **{k: best[k] for k in ("x", "y", "heading", "horizon", "fov", "agree")},
-            "above_street": above,
-            "panoramas": 0,
-            "moved_m": round(float(np.hypot(best["x"] - x0, best["y"] - y0)), 1),
-            "walls": [],
-            "inputs": _placed_inputs(inputs, f"{PROPOSAL}-{_fingerprint(best)}"),
-            "matcher": f"{PROPOSAL}-{_fingerprint(best)}",
-            "outline": 0.0,
-            "why": best["why"] or "rivale",
-        }
-    return proposed
-
-
-@app.command("presque")
-def propose_turned_down() -> None:
-    """Propose à la page de confirmation les caméras que le contrôle a refusées alors que
-    beaucoup de points s'accordaient avec elles (data/pilot/proposed_cameras.json) : un « oui »
-    en fait une place (sans points gardés : pas une ancre d'enchaînement)."""
-    scenes, kept = _scenes_now(), _matches()
-    with closing(db.connect(DB_PATH)) as conn:
-        walk = {me.id: me for me in export.photos(conn, DATA / "pilot", REVIEWS)}
-    heights = [m["above_street"] for m in kept.values() if m and "x" in m]
-    proposed = _proposals(
-        register.load(MATCH_TRACE),
-        {k: m for k, m in kept.items() if k in walk and _exported(k).exists()},
-        lambda k: _place_of(walk[k]),
-        lambda k: _inputs(scenes[k], k),
-        float(np.median(heights)) if heights else PROPOSED_ABOVE_M,
-    )
-    judged = _Judged()  # those said yes to stay, whatever became of their panoramas
-    held = {k: p for k, p in register.load(PROPOSED_CAMERAS).items() if judged.holds(k, p)}
-    proposed = {**proposed, **held}
-    write_json(PROPOSED_CAMERAS, proposed)
-    typer.echo(f"{len(proposed)} caméras refusées proposées à la confirmation ({PROPOSED_CAMERAS})")
 
 
 def _confirmed() -> dict[str, match.Situated]:
@@ -1688,23 +1620,46 @@ def _most_spread(at: np.ndarray, most: int) -> list[int]:
 OFFERED = 24  # pairs of a placement said near laid on the placing page, the most spread
 
 
-def _offers(
-    photos: dict[str, dict], by_id: dict[str, match.Panorama], fixed: Set[str]
-) -> dict[str, dict]:
-    """The placements of match the user's last word on is near (the right place, the camera to
-    set right), as the placing page opens them (see _offer_of): those made on the photo's image
-    as it is now (its points' pixels are of it), with pairs of their own."""
+def _said_near(photos: dict[str, dict]) -> dict[str, dict]:
+    """The photos the user's last word on is near (the right place, the camera to set right),
+    on the image as it is now (`photos`: the placing page's), with the placement said near:
+    match's, once judged its word is the photo's (it came after any camera proposed); else a
+    camera once proposed (`presque`). The placing page puts them first."""
     try:
         kept, judged = _matches(), _Judged()
-    except Exception as error:  # a file written wrong: no offer, the queue goes on
-        typer.echo(f"pas de paires proposées ({error})", err=True)
+    except Exception as error:  # a file written wrong: none first, the queue goes on
+        typer.echo(f"photos jugées « près » illisibles ({error})", err=True)
         return {}
-    offers = {}
+    try:
+        proposed = register.load(PROPOSED_CAMERAS)
+    except Exception as error:  # match's placements said near come first all the same
+        typer.echo(f"caméras proposées illisibles ({error})", err=True)
+        proposed = {}
+
+    def said_on(k: str, m: dict | None) -> str | None:
+        if m and "x" in m and _image_of(m["inputs"]) == photos[k]["inputs"]:
+            return (judged.on(k, m) or {}).get("verdict")
+        return None
+
+    near = {}
     for k in sorted(photos):
-        m = kept.get(k)
-        if not (m and "x" in m and _image_of(m["inputs"]) == photos[k]["inputs"]):
-            continue
-        if not ((said := judged.on(k, m)) and said["verdict"] == "near"):
+        word = said_on(k, kept.get(k))
+        if word == "near" or (word is None and said_on(k, proposed.get(k)) == "near"):
+            near[k] = kept[k] if word else proposed[k]
+    return near
+
+
+def _offers(
+    near: dict[str, dict],
+    photos: dict[str, dict],
+    by_id: dict[str, match.Panorama],
+    fixed: Set[str],
+) -> dict[str, dict]:
+    """The placements said near (see _said_near) as the placing page opens them (see
+    _offer_of): those with pairs of their own (a camera proposed kept no points)."""
+    offers = {}
+    for k, m in near.items():
+        if _is_proposal(m["inputs"]):
             continue
         try:
             found = _offer_of(k, m, by_id, fixed, _size_of(photos[k]["image"]))
@@ -1746,9 +1701,9 @@ def _offer_of(
 
 
 def _placing_ahead(near: Collection[str], carried: dict[str, dict]) -> dict[str, str]:
-    """The photos the placing page shows first, with why: those said near (to set right from
-    match's pairs), then those carried from a photo placed. Those said yes are no longer put
-    first: they are registered on their own (see _registrations)."""
+    """The photos the placing page shows first, with why: those said near (to set right, from
+    match's pairs when it kept some), then those carried from a photo placed. Those said yes
+    are no longer put first: they are registered on their own (see _registrations)."""
     carried_only = (i for i in carried if i not in near)
     return {
         **dict.fromkeys(sorted(near), "près"),
@@ -4950,17 +4905,21 @@ def place_photos(
         return found and {"registration": found, "carried_from": None}
 
     @functools.lru_cache(maxsize=1)
-    def offers_at(_: tuple) -> dict[str, dict]:  # made again on a new match or a new verdict
-        return _offers(photos, by_id, fixed)
+    def near_at(_: tuple) -> dict[str, dict]:  # made again on a new verdict or match
+        return _said_near(photos)
 
-    def offers_now() -> dict[str, dict]:
-        return offers_at(_stamp([MATCHES, ANCHORS]))
+    @functools.lru_cache(maxsize=1)
+    def offers_at(stamp: tuple) -> dict[str, dict]:  # only for the photo opened: pairs are slow
+        return _offers(near_at(stamp), photos, by_id, fixed)
+
+    def stamp() -> tuple:
+        return _stamp([MATCHES, ANCHORS, PROPOSED_CAMERAS])
 
     def ahead() -> dict[str, str]:  # near verdicts, then photos carried from placed ones
-        return _placing_ahead(offers_now(), carried_now())
+        return _placing_ahead(near_at(stamp()), carried_now())
 
     def offer(photo_id: str) -> dict | None:
-        return offers_now().get(photo_id)
+        return offers_at(stamp()).get(photo_id)
 
     def full(panorama: str) -> np.ndarray | None:
         """The panorama's picture at most placing.FULL_WIDTH px around, from its original

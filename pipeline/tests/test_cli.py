@@ -880,44 +880,10 @@ def test_a_placement_marked_since_stays_when_its_redo_finds_nothing(tmp_path, mo
     assert tries == ["lomag", "disk"]  # tried with the marks once, not every night
 
 
-def _candidate(agree, why, x=10.0):
-    return {
-        "x": x,
-        "y": 0.0,
-        "heading": 90.0,
-        "fov": 50.0,
-        "horizon": 0.5,
-        "agree": agree,
-        "spread_m": None,
-        "why": why,
-    }
-
-
-def test_a_camera_turned_down_with_many_points_agreeing_is_proposed():
-    trace = {
-        "a": {"candidates": [_candidate(30, "x"), _candidate(60, "position incertaine")]},
-        "b": {"candidates": [_candidate(40, "position incertaine")]},  # too few agree
-        "c": {"candidates": [_candidate(80, "ne peut se tenir là")]},  # placed by a matcher
-        "d": {"candidates": [_candidate(80, "rivale")]},  # traced from another image
-    }
-    matches = {
-        "a": {"inputs": "i", "tried": ["lomag"]},
-        "b": {"inputs": "i", "tried": ["lomag"]},
-        "c": {"x": 0.0, "inputs": "i:lomag", "matcher": "lomag"},
-        "d": {"inputs": "old", "tried": ["lomag"]},
-    }
-
-    proposed = cli._proposals(trace, matches, lambda k: (10.0, 3.0), lambda k: "i", 2.4)
-
-    assert set(proposed) == {"a"}
-    a = proposed["a"]
-    assert (a["agree"], a["why"], a["above_street"], a["moved_m"]) == (
-        60,
-        "position incertaine",
-        2.4,
-        3.0,
-    )
-    assert a["inputs"].startswith("i:proposed-")
+def _proposal(inputs, x=10.0):
+    """A camera once proposed (`presque`), as its file keeps it."""
+    matcher = f"proposed-{int(x):08x}"
+    return _kept(inputs=f"{inputs}:{matcher}", matcher=matcher, x=x, y=0.0)
 
 
 @pytest.mark.parametrize(
@@ -929,13 +895,7 @@ def test_a_proposed_camera_is_a_placement_once_said_yes_to(
 ):
     photo = tmp_path / "old.jpg"
     cv2.imwrite(str(photo), np.zeros((8, 8, 3), np.uint8))
-    proposal = cli._proposals(
-        {"a": {"candidates": [_candidate(60, "position incertaine")]}},
-        {"a": {"inputs": "s:i", "tried": ["lomag"]}},
-        lambda k: (0.0, 0.0),
-        lambda k: "s:i",
-        2.4,
-    )
+    proposal = {"a": _proposal("s:i")}
     (tmp_path / "proposed.json").write_text(json.dumps(proposal))
     monkeypatch.setattr(cli, "PROPOSED_CAMERAS", tmp_path / "proposed.json")
     monkeypatch.setattr(cli, "_matches", dict)
@@ -954,21 +914,7 @@ def test_a_proposed_camera_is_a_placement_once_said_yes_to(
 def test_a_yes_is_to_the_camera_proposed_not_to_the_next_one(tmp_path, monkeypatch):
     photo = tmp_path / "old.jpg"
     photo.write_bytes(b"x")
-    run = {"a": {"inputs": "i", "tried": ["lomag"]}}
-    first = cli._proposals(
-        {"a": {"candidates": [_candidate(60, "rivale", x=10.0)]}},
-        run,
-        lambda k: (0, 0),
-        lambda k: "i",
-        2,
-    )
-    later = cli._proposals(
-        {"a": {"candidates": [_candidate(70, "rivale", x=50.0)]}},
-        run,
-        lambda k: (0, 0),
-        lambda k: "i",
-        2,
-    )
+    first, later = {"a": _proposal("i", x=10.0)}, {"a": _proposal("i", x=50.0)}
     monkeypatch.setattr(cli, "PROPOSED_CAMERAS", tmp_path / "proposed.json")
     monkeypatch.setattr(cli, "_matches", dict)
     monkeypatch.setattr(cli, "_exported", lambda photo_id: photo)
@@ -988,17 +934,6 @@ def test_a_yes_is_to_the_camera_proposed_not_to_the_next_one(tmp_path, monkeypat
     assert "a" in cli._situated()  # the camera said yes to
     (tmp_path / "proposed.json").write_text(json.dumps(later))
     assert "a" not in cli._situated()  # another, 40 m away
-
-
-def test_a_trace_made_from_another_image_proposes_nothing():
-    trace = {"a": {"inputs": "old", "candidates": [_candidate(60, "rivale")]}}
-
-    assert (
-        cli._proposals(
-            trace, {"a": {"inputs": "i", "tried": []}}, lambda k: (0, 0), lambda k: "i", 2
-        )
-        == {}
-    )
 
 
 def test_a_no_to_a_proposed_camera_leaves_the_photo_to_chaining(monkeypatch):
@@ -1249,29 +1184,6 @@ def test_matching_never_redoes_a_photo_whose_proposed_camera_was_said_yes_to(tmp
     kept = json.loads((tmp_path / "matches.json").read_text())
     assert kept["pm:1"] == unplaced
     assert kept["pm:2"]["x"] == CAMERA.x  # the other, matched
-
-
-def test_a_proposed_camera_said_yes_to_is_proposed_still_whatever_its_panoramas(
-    tmp_path, monkeypatch
-):
-    held = _kept(inputs="old:img:proposed-12345678")
-    (tmp_path / "proposed.json").write_text(json.dumps({"a": held, "b": _kept(inputs="old:x")}))
-    (tmp_path / "anchors.jsonl").write_text(json.dumps(_said("yes", held["inputs"], 1.0, 2.0)))
-    for name, value in {
-        "PROPOSED_CAMERAS": tmp_path / "proposed.json",
-        "ANCHORS": tmp_path / "anchors.jsonl",
-        "MATCH_TRACE": tmp_path / "trace.json",
-        "_scenes_now": dict,
-        "_matches": dict,
-        "_photo_part": lambda photo_id: "img",
-    }.items():
-        monkeypatch.setattr(cli, name, value)
-    monkeypatch.setattr(cli.db, "connect", lambda path: SimpleNamespace(close=lambda: None))
-    monkeypatch.setattr(cli.export, "photos", lambda *args: [])
-
-    cli.propose_turned_down()  # none proposed anew: the panoramas changed
-
-    assert json.loads((tmp_path / "proposed.json").read_text()) == {"a": held}
 
 
 def test_a_proposed_camera_said_yes_to_wins_over_a_placement_not_judged(monkeypatch, tmp_path):
@@ -3207,19 +3119,39 @@ def test_a_placement_without_its_points_or_pairs_is_not_offered(monkeypatch):
     assert cli._offer_of("pm:1", _kept(), {}, set(), (600, 800)) is None
 
 
-def test_only_placements_said_near_on_the_image_as_it_is_are_offered(tmp_path, monkeypatch):
-    said = dict.fromkeys(["near", "bare", "broken", "recropped"], "near")
+def test_photos_said_near_on_the_image_as_it_is_come_first_with_or_without_pairs(
+    tmp_path, monkeypatch
+):
+    said = dict.fromkeys(["near", "bare", "recropped", "proposed"], "near")
     said |= {"yes": "yes", "no": "no"}
-    rows = ({"photo_id": k, "verdict": v, "inputs": "c:img"} for k, v in said.items())
-    (tmp_path / "anchors.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows))
-    monkeypatch.setattr(cli, "ANCHORS", tmp_path / "anchors.jsonl")
-    kept = {k: _kept(inputs="c:img") for k in said}
+    kept = {k: _kept(inputs="c:img") for k in said if k != "proposed"}
     kept |= {"unjudged": _kept(inputs="c:img"), "unplaced": {"inputs": "c:img"}}
+    proposed = {"proposed": _proposal("c:img"), "no": _proposal("c:img")}
+    proposed["yes"] = _proposal("c:img", x=40.0)  # said near once, match's placement yes since
+    placed = kept | {"proposed": proposed["proposed"]}
+    rows = [{"photo_id": "yes", "verdict": "near", "inputs": proposed["yes"]["inputs"]}]
+    rows += [{"photo_id": k, "verdict": v, "inputs": placed[k]["inputs"]} for k, v in said.items()]
+    (tmp_path / "anchors.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows))
+    (tmp_path / "proposed.json").write_text(json.dumps(proposed))
+    monkeypatch.setattr(cli, "ANCHORS", tmp_path / "anchors.jsonl")
+    monkeypatch.setattr(cli, "PROPOSED_CAMERAS", tmp_path / "proposed.json")
     monkeypatch.setattr(cli, "_matches", lambda: kept)
+    photos = {k: {"image": "x", "inputs": "img"} for k in placed}
+    photos["recropped"]["inputs"] = "img2"  # cropped again since match placed it
+
+    near = cli._said_near(photos)
+
+    assert set(near) == {"near", "bare", "proposed"}  # a camera proposed: no pairs, first still
+    assert near["proposed"] == proposed["proposed"]
+    assert cli._placing_ahead(near, {}) == dict.fromkeys(["bare", "near", "proposed"], "près")
+
+
+def test_near_placements_are_offered_with_their_pairs_one_failing_leaving_the_others(
+    tmp_path, monkeypatch
+):
     image = tmp_path / "photo.jpg"
     Image.new("RGB", (80, 60)).save(image)
-    photos = {k: {"image": image, "inputs": "img"} for k in kept}
-    photos["recropped"]["inputs"] = "img2"  # cropped again since match placed it
+    photos = dict.fromkeys(["near", "bare", "broken"], {"image": image, "inputs": "img"})
     sizes = {}
 
     def offer_of(photo_id, kept, by_id, fixed, size):
@@ -3230,15 +3162,16 @@ def test_only_placements_said_near_on_the_image_as_it_is_are_offered(tmp_path, m
 
     monkeypatch.setattr(cli, "_offer_of", offer_of)
 
-    assert cli._offers(photos, {}, set()) == {"near": {"panorama": "p"}}  # the others go on
+    offers = cli._offers(dict.fromkeys(photos, _kept()), photos, {}, set())
+
+    assert offers == {"near": {"panorama": "p"}}  # the others go on
     assert sizes["near"] == (60, 80)  # the page's image: height, width
-    assert "recropped" not in sizes
 
 
-def test_an_unreadable_verdict_or_placement_offers_nothing_and_the_queue_goes_on(monkeypatch):
+def test_an_unreadable_verdict_or_placement_puts_nothing_first_and_the_queue_goes_on(monkeypatch):
     monkeypatch.setattr(cli, "_matches", lambda: json.loads("{"))
 
-    assert cli._offers({"pm:1": {"image": "x", "inputs": "img"}}, {}, set()) == {}
+    assert cli._said_near({"pm:1": {"image": "x", "inputs": "img"}}) == {}
 
 
 def test_points_a_hair_apart_are_offered_once(monkeypatch):

@@ -1384,7 +1384,7 @@ function show(next) {
   const why = { revoir: 'déjà jugée, à revoir', voisins: 'porte d\'autres photos', proche: 'un panorama tout près',
                 isolée: 'loin des autres',
                 'sans panorama': 'aucun panorama proche', passée: 'passée une fois', rouverte: 'rouverte',
-                portée: 'proposée depuis une photo placée', près: 'jugée près : ses paires à corriger' };
+                portée: 'proposée depuis une photo placée', près: 'jugée près : à corriger' };
   $('progress').textContent = `encore ${left} à placer · ${why[photo.why] || ''}`;
   $('pinned').src = photoUrl();
   map.jumpTo({ center: [spot.lon, spot.lat] });
