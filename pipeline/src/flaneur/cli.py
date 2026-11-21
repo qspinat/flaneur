@@ -914,7 +914,7 @@ CHAIN_CHECK = DATA / "pilot" / "chain_check.json"  # the chaining's known-answer
 # user (`presque`, 11–12 November; dropped by its rule: 37 % right, 50 % wanted): the file is
 # kept as answered (a yes is a placement, a near comes first on the placing page).
 PROPOSED_CAMERAS = DATA / "pilot" / "proposed_cameras.json"
-PROPOSAL = "proposed"  # a proposed camera's "matcher": PROPOSAL-<the camera's fingerprint>
+PROPOSAL = "proposed"  # a proposed camera's "matcher": PROPOSAL-<where it stood, hashed>
 ANCHORS = DATA / "overrides" / "anchors.jsonl"  # the user's yes or no to photos placed
 MATCH_RADIUS_M = 60  # a placement from a caption can be 25 m off
 MATCH_PANORAMAS = 16  # ranked by a quick first pass, the best views matched in full
@@ -1620,40 +1620,47 @@ def _most_spread(at: np.ndarray, most: int) -> list[int]:
 OFFERED = 24  # pairs of a placement said near laid on the placing page, the most spread
 
 
-def _offers(
-    photos: dict[str, dict], by_id: dict[str, match.Panorama], fixed: Set[str]
-) -> dict[str, dict | None]:
+def _said_near(photos: dict[str, dict]) -> dict[str, dict]:
     """The photos the user's last word on is near (the right place, the camera to set right),
-    on the image as it is now: placements of match as the placing page opens them (see
-    _offer_of), those with pairs of their own; and cameras once proposed (`presque`, no points
-    kept: None, opened as any photo)."""
+    on the image as it is now (`photos`: the placing page's), with the placement said near:
+    match's, else a camera once proposed (`presque`); the placing page puts them first."""
     try:
         kept, judged, proposed = _matches(), _Judged(), register.load(PROPOSED_CAMERAS)
-    except Exception as error:  # a file written wrong: no offer, the queue goes on
-        typer.echo(f"pas de paires proposées ({error})", err=True)
+    except Exception as error:  # a file written wrong: none first, the queue goes on
+        typer.echo(f"photos jugées « près » illisibles ({error})", err=True)
         return {}
-
-    def near_now(k: str, m: dict | None) -> bool:
-        return bool(
-            m
-            and "x" in m
-            and _image_of(m["inputs"]) == photos[k]["inputs"]
-            and (said := judged.on(k, m))
-            and said["verdict"] == "near"
-        )
-
-    offers: dict[str, dict | None] = {}
+    near = {}
     for k in sorted(photos):
-        if near_now(k, kept.get(k)):
-            try:
-                found = _offer_of(k, kept[k], by_id, fixed, _size_of(photos[k]["image"]))
-            except Exception as error:  # this one opens as any other photo: the others go on
-                typer.echo(f"{k} : pas de paires proposées ({error})", err=True)
-                continue
-            if found:
-                offers[k] = found
-        elif near_now(k, proposed.get(k)):
-            offers[k] = None
+        for m in (kept.get(k), proposed.get(k)):
+            if (
+                m
+                and "x" in m
+                and _image_of(m["inputs"]) == photos[k]["inputs"]
+                and (said := judged.on(k, m))
+                and said["verdict"] == "near"
+            ):
+                near[k] = m
+                break
+    return near
+
+
+def _offers(
+    near: dict[str, dict],
+    photos: dict[str, dict],
+    by_id: dict[str, match.Panorama],
+    fixed: Set[str],
+) -> dict[str, dict]:
+    """The placements said near (see _said_near) as the placing page opens them (see
+    _offer_of): those with pairs of their own (a camera proposed kept no points)."""
+    offers = {}
+    for k, m in near.items():
+        try:
+            found = _offer_of(k, m, by_id, fixed, _size_of(photos[k]["image"]))
+        except Exception as error:  # this one opens as any other photo: the others go on
+            typer.echo(f"{k} : pas de paires proposées ({error})", err=True)
+            continue
+        if found:
+            offers[k] = found
     return offers
 
 
@@ -1687,9 +1694,9 @@ def _offer_of(
 
 
 def _placing_ahead(near: Collection[str], carried: dict[str, dict]) -> dict[str, str]:
-    """The photos the placing page shows first, with why: those said near (to set right from
-    match's pairs), then those carried from a photo placed. Those said yes are no longer put
-    first: they are registered on their own (see _registrations)."""
+    """The photos the placing page shows first, with why: those said near (to set right, from
+    match's pairs when it kept some), then those carried from a photo placed. Those said yes
+    are no longer put first: they are registered on their own (see _registrations)."""
     carried_only = (i for i in carried if i not in near)
     return {
         **dict.fromkeys(sorted(near), "près"),
@@ -4891,17 +4898,18 @@ def place_photos(
         return found and {"registration": found, "carried_from": None}
 
     @functools.lru_cache(maxsize=1)
-    def offers_at(_: tuple) -> dict[str, dict | None]:  # made again on a new match or a new verdict
-        return _offers(photos, by_id, fixed)
+    def near_at(_: tuple) -> tuple[dict[str, dict], dict[str, dict]]:  # again on a new verdict
+        near = _said_near(photos)
+        return near, _offers(near, photos, by_id, fixed)
 
-    def offers_now() -> dict[str, dict | None]:
-        return offers_at(_stamp([MATCHES, ANCHORS]))
+    def near_now() -> tuple[dict[str, dict], dict[str, dict]]:
+        return near_at(_stamp([MATCHES, ANCHORS]))
 
     def ahead() -> dict[str, str]:  # near verdicts, then photos carried from placed ones
-        return _placing_ahead(offers_now(), carried_now())
+        return _placing_ahead(near_now()[0], carried_now())
 
     def offer(photo_id: str) -> dict | None:
-        return offers_now().get(photo_id)
+        return near_now()[1].get(photo_id)
 
     def full(panorama: str) -> np.ndarray | None:
         """The panorama's picture at most placing.FULL_WIDTH px around, from its original

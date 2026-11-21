@@ -3119,19 +3119,37 @@ def test_a_placement_without_its_points_or_pairs_is_not_offered(monkeypatch):
     assert cli._offer_of("pm:1", _kept(), {}, set(), (600, 800)) is None
 
 
-def test_only_placements_said_near_on_the_image_as_it_is_are_offered(tmp_path, monkeypatch):
-    said = dict.fromkeys(["near", "bare", "broken", "recropped"], "near")
+def test_photos_said_near_on_the_image_as_it_is_come_first_with_or_without_pairs(
+    tmp_path, monkeypatch
+):
+    said = dict.fromkeys(["near", "bare", "recropped", "proposed"], "near")
     said |= {"yes": "yes", "no": "no"}
-    rows = ({"photo_id": k, "verdict": v, "inputs": "c:img"} for k, v in said.items())
-    (tmp_path / "anchors.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows))
-    monkeypatch.setattr(cli, "ANCHORS", tmp_path / "anchors.jsonl")
-    kept = {k: _kept(inputs="c:img") for k in said}
+    kept = {k: _kept(inputs="c:img") for k in said if k != "proposed"}
     kept |= {"unjudged": _kept(inputs="c:img"), "unplaced": {"inputs": "c:img"}}
+    proposed = {"proposed": _proposal("c:img"), "no": _proposal("c:img")}
+    placed = kept | {"proposed": proposed["proposed"]}
+    rows = ({"photo_id": k, "verdict": v, "inputs": placed[k]["inputs"]} for k, v in said.items())
+    (tmp_path / "anchors.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows))
+    (tmp_path / "proposed.json").write_text(json.dumps(proposed))
+    monkeypatch.setattr(cli, "ANCHORS", tmp_path / "anchors.jsonl")
+    monkeypatch.setattr(cli, "PROPOSED_CAMERAS", tmp_path / "proposed.json")
     monkeypatch.setattr(cli, "_matches", lambda: kept)
+    photos = {k: {"image": "x", "inputs": "img"} for k in placed}
+    photos["recropped"]["inputs"] = "img2"  # cropped again since match placed it
+
+    near = cli._said_near(photos)
+
+    assert set(near) == {"near", "bare", "proposed"}  # a camera proposed: no pairs, first still
+    assert near["proposed"] == proposed["proposed"]
+    assert cli._placing_ahead(near, {}) == dict.fromkeys(["bare", "near", "proposed"], "près")
+
+
+def test_near_placements_are_offered_with_their_pairs_one_failing_leaving_the_others(
+    tmp_path, monkeypatch
+):
     image = tmp_path / "photo.jpg"
     Image.new("RGB", (80, 60)).save(image)
-    photos = {k: {"image": image, "inputs": "img"} for k in kept}
-    photos["recropped"]["inputs"] = "img2"  # cropped again since match placed it
+    photos = dict.fromkeys(["near", "bare", "broken"], {"image": image, "inputs": "img"})
     sizes = {}
 
     def offer_of(photo_id, kept, by_id, fixed, size):
@@ -3142,33 +3160,16 @@ def test_only_placements_said_near_on_the_image_as_it_is_are_offered(tmp_path, m
 
     monkeypatch.setattr(cli, "_offer_of", offer_of)
 
-    assert cli._offers(photos, {}, set()) == {"near": {"panorama": "p"}}  # the others go on
+    offers = cli._offers(dict.fromkeys(photos, _kept()), photos, {}, set())
+
+    assert offers == {"near": {"panorama": "p"}}  # the others go on
     assert sizes["near"] == (60, 80)  # the page's image: height, width
-    assert "recropped" not in sizes
 
 
-def test_cameras_proposed_and_said_near_come_first_without_pairs(tmp_path, monkeypatch):
-    said = {"near": "near", "recropped": "near", "yes": "yes", "no": "no"}
-    proposed = {k: _kept(inputs="c:img:proposed-ab12cd34") for k in said}
-    rows = ({"photo_id": k, "verdict": v, **proposed[k]} for k, v in said.items())
-    (tmp_path / "anchors.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows))
-    (tmp_path / "proposed.json").write_text(json.dumps(proposed))
-    monkeypatch.setattr(cli, "ANCHORS", tmp_path / "anchors.jsonl")
-    monkeypatch.setattr(cli, "PROPOSED_CAMERAS", tmp_path / "proposed.json")
-    monkeypatch.setattr(cli, "_matches", lambda: {})
-    photos = {k: {"image": "x", "inputs": "img"} for k in said}
-    photos["recropped"]["inputs"] = "img2"
-
-    offers = cli._offers(photos, {}, set())
-
-    assert offers == {"near": None}  # no points kept: opens as any photo
-    assert cli._placing_ahead(offers, {}) == {"near": "près"}
-
-
-def test_an_unreadable_verdict_or_placement_offers_nothing_and_the_queue_goes_on(monkeypatch):
+def test_an_unreadable_verdict_or_placement_puts_nothing_first_and_the_queue_goes_on(monkeypatch):
     monkeypatch.setattr(cli, "_matches", lambda: json.loads("{"))
 
-    assert cli._offers({"pm:1": {"image": "x", "inputs": "img"}}, {}, set()) == {}
+    assert cli._said_near({"pm:1": {"image": "x", "inputs": "img"}}) == {}
 
 
 def test_points_a_hair_apart_are_offered_once(monkeypatch):
