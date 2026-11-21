@@ -88,46 +88,66 @@ def test_a_no_comes_back_with_its_reason():
 
 def test_the_last_mark_on_a_pair_holds_for_its_placement_only(tmp_path):
     path = tmp_path / "wrong_pairs.jsonl"
-    confirming.mark_pair(path, "pm:1", "abc", 3, True)
-    confirming.mark_pair(path, "pm:1", "abc", 5, True)
-    confirming.mark_pair(path, "pm:1", "abc", 5, False)  # taken back
-    confirming.mark_pair(path, "pm:1", "other", 7, True)  # found again from other inputs
+    confirming.mark_pair(path, "pm:1", "abc", [3.0, 4.5], True)
+    confirming.mark_pair(path, "pm:1", "abc", [5.0, 1.0], True)
+    confirming.mark_pair(path, "pm:1", "abc", [5.0, 1.0], False)  # taken back
+    confirming.mark_pair(path, "pm:1", "other", [7.0, 2.0], True)  # found again from other inputs
 
-    assert confirming.marked(path) == {("pm:1", "abc"): {3}, ("pm:1", "other"): {7}}
+    assert confirming.marked(path) == {
+        ("pm:1", "abc"): {(3.0, 4.5)},
+        ("pm:1", "other"): {(7.0, 2.0)},
+    }
 
 
 @pytest.mark.parametrize(
-    ("index", "wrong"), [(-1, True), (1.5, True), (True, True), ("3", True), (None, True), (3, "1")]
+    ("point", "wrong"),
+    [([1.0], True), ([1.0, "2"], True), (None, True), ([1.0, float("nan")], True), ([1, 2], "1")],
 )
-def test_a_mark_on_no_pair_or_neither_wrong_nor_right_is_refused(tmp_path, index, wrong):
+def test_a_mark_on_no_point_or_neither_wrong_nor_right_is_refused(tmp_path, point, wrong):
     with pytest.raises(ValueError):
-        confirming.mark_pair(tmp_path / "wrong_pairs.jsonl", "pm:1", "abc", index, wrong)
+        confirming.mark_pair(tmp_path / "wrong_pairs.jsonl", "pm:1", "abc", point, wrong)
 
 
 def test_the_pairs_shown_say_which_are_marked_wrong():
-    scene = {"pairs": [{"index": 3}, {"index": 4}], "plan": {}}
+    scene = {"pairs": [{"index": 3, "point": [1.0, 2.0]}, {"index": 4, "point": [3.0, 4.0]}]}
 
-    shown = confirming.with_marks(scene, {3})
+    shown = confirming.with_marks(scene, {(1.0, 2.0)})
 
     assert [p["wrong"] for p in shown["pairs"]] == [True, False]
-    assert confirming.with_marks({"pairs": None}, {3}) == {"pairs": None}
+    assert confirming.with_marks({"pairs": None}, {(1.0, 2.0)}) == {"pairs": None}
 
 
 def test_a_pair_marked_on_the_page_comes_back_marked_and_judges_nothing(tmp_path, ask):
     placed = [{"id": "pm:1", "inputs": "abc", "round": 0}]
     anchors, marks = tmp_path / "anchors.jsonl", tmp_path / "wrong_pairs.jsonl"
-    scene = {"pairs": [{"index": 3}, {"index": 4}]}
+    scene = {"pairs": [{"index": 3, "point": [1.0, 2.0]}, {"index": 4, "point": [3.0, 4.0]}]}
     server = confirming.serve(
         placed, anchors, marks, dict, lambda *a, **k: None, lambda *a, **k: scene, 0
     )
 
-    (marked, _), (refused, _), (_, shown) = ask(
+    (marked, _), (unshown, _), (unknown, _), (_, shown) = ask(
         server,
         ("POST", "/api/pair", {"photo_id": "pm:1", "index": 4, "wrong": True}),
+        ("POST", "/api/pair", {"photo_id": "pm:1", "index": 99, "wrong": True}),  # not shown
         ("POST", "/api/pair", {"photo_id": "pm:2", "index": 4, "wrong": True}),
         ("GET", "/scene/pm:1"),
     )
 
-    assert (marked, refused) == (200, 400)
+    assert (marked, unshown, unknown) == (200, 400, 400)
     assert [p["wrong"] for p in json.loads(shown)["pairs"]] == [False, True]
+    assert confirming.marked(marks) == {("pm:1", "abc"): {(3.0, 4.0)}}  # by its point
     assert not anchors.exists()  # a mark is not a verdict
+
+
+def test_a_marks_file_written_wrong_leaves_the_pairs_shown_unmarked(tmp_path, ask):
+    placed = [{"id": "pm:1", "inputs": "abc", "round": 0}]
+    marks = tmp_path / "wrong_pairs.jsonl"
+    marks.write_text("{not json\n")
+    scene = {"pairs": [{"index": 3, "point": [1.0, 2.0]}]}
+    server = confirming.serve(
+        placed, tmp_path / "a.jsonl", marks, dict, lambda *a, **k: None, lambda *a, **k: scene, 0
+    )
+
+    ((status, shown),) = ask(server, ("GET", "/scene/pm:1"))
+
+    assert status == 200 and json.loads(shown)["pairs"][0]["wrong"] is False

@@ -90,10 +90,8 @@
   .crop.today::after { box-shadow: 0 0 0 2px var(--paper), 0 0 0 3px var(--enamel); }
   .crop.today.projected::after { box-shadow: 0 0 0 2px var(--enamel); border: 1px dashed var(--paper); }
   /* a pair marked wrong (F): its marks and its loupe in the "no" colour, its number struck */
-  .mark.wrong, .mark.wrong span, .old-side .mark.wrong, .today-side .mark.wrong span { background: var(--no); color: var(--paper); }
-  .mark.wrong span, .loupe.wrong b { text-decoration: line-through; }
+  #pairs .mark.wrong, #pairs .mark.wrong span, .loupe.wrong b { background: var(--no); color: var(--paper); text-decoration: line-through; }
   .loupe.wrong { border-color: var(--no); }
-  .loupe.wrong b { background: var(--no); }
   .loupe.wrong .crop { opacity: 0.5; }
   #pairs-help { display: none; margin-top: 8px; }
   #pictures.pairs #pairs-help { display: block; }
@@ -378,35 +376,38 @@ function drawPairs(scene) {
   $('loupes').replaceChildren(...pairs.map((pair, n) => {
     const b = document.createElement('button');
     b.className = `loupe${pair.wrong ? ' wrong' : ''}`;
-    b.setAttribute('aria-label', `Paire ${n + 1} : le détail de la photo et celui d'aujourd'hui${pair.wrong ? ', marquée fausse' : ''}`);
+    b.setAttribute('aria-label', LOUPE(n) + (pair.wrong ? ', marquée fausse' : ''));
     b.append(Object.assign(document.createElement('b'), { textContent: n + 1 }), crop(pair, 'old'), crop(pair, 'today'));
     b.addEventListener('click', () => { chosen = chosen === n ? null : n; lit(chosen); });
     return lights(b, n);
   }));
-  const wrong = pairs.filter((pair) => pair.wrong).length;
-  $('pairs-help').textContent = !pairs.length ? '' : 'Une paire choisie (clic sur ses détails, ou N) : F la marque fausse — '
-    + `pas le même détail — ou ne l'est plus${wrong ? ` ; ${wrong} marquée${wrong > 1 ? 's' : ''} fausse${wrong > 1 ? 's' : ''}` : ''}.`;
+  sayMarked(pairs);
   lit(null);
+}
+const LOUPE = (n) => `Paire ${n + 1} : le détail de la photo et celui d'aujourd'hui`;
+function sayMarked(pairs) {
+  const wrong = pairs.filter((pair) => pair.wrong).length, s = wrong > 1 ? 's' : '';
+  $('pairs-help').textContent = !pairs.length ? ''
+    : wrong ? `${wrong} paire${s} marquée${s} fausse${s} (F sur la paire choisie pour l'enlever).`
+    : 'F : la paire choisie (clic ou N) marquée fausse, pas le même détail.';
 }
 // the pair chosen marked wrong (the two details are not the same thing), or that mark taken
 // back: kept at once, for this placement (both of its views show the same points); never a
-// verdict, the photo stays shown
+// verdict, the photo stays shown and the pair chosen
 async function markChosen() {
   const p = photos[at], n = chosen;
-  const pair = view === 'pairs' && n != null && p ? (await sceneOf(p))?.pairs?.[n] : null;
+  if (view !== 'pairs' || n == null) return;
+  const scene = await sceneOf(p), pair = scene?.pairs?.[n];
   if (!pair) return;
   const wrong = !pair.wrong;
-  const response = await fetch('/api/pair', {
-    method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ photo_id: p.id, index: pair.index, wrong }),
-  });
-  if (!response.ok) { $('state').textContent = `Refusé : ${await response.text()}`; return; }
-  for (const source of [false, true]) {
-    (await scenes[p.id + viewQuery(source)])?.pairs?.forEach((q) => { if (q.index === pair.index) q.wrong = wrong; });
-  }
+  if (!(await post('/api/pair', { photo_id: p.id, index: pair.index, wrong }))) return;
+  const mark = (s) => s?.pairs?.forEach((q) => { if (q.index === pair.index) q.wrong = wrong; });
+  mark(scene);
+  scenes[p.id + viewQuery(!fromSource)]?.then(mark);
   if (photos[at] !== p || view !== 'pairs') return;
-  drawPairs(await sceneOf(p));
-  chosen = n; lit(n);
+  document.querySelectorAll(`#pictures [data-n="${n}"]`).forEach((e) => e.classList.toggle('wrong', wrong));
+  document.querySelector(`.loupe[data-n="${n}"]`)?.setAttribute('aria-label', LOUPE(n) + (wrong ? ', marquée fausse' : ''));
+  sayMarked(scene.pairs);
 }
 // one pair lit: its two ends ringed, joined by a line, the others dimmed (none: all plain)
 let chosen = null;
@@ -593,16 +594,18 @@ function openReasons() { $('reasons').classList.add('open'); $('reason-buttons')
 function closeReasons() { $('reasons').classList.remove('open'); }
 const reasonsOpen = () => $('reasons').classList.contains('open');
 
+/** A write sent (a verdict, a mark); refused, the page says why. Whether it was kept. */
+async function post(path, body) {
+  const response = await fetch(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  if (!response.ok) $('state').textContent = `Refusé : ${await response.text()}`;
+  return response.ok;
+}
 async function judge(verdict, reason = null) {
   const p = photos[at];
   if (!p || saving) return;
   saving = true;
   try {
-    const response = await fetch('/api/verdict', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ photo_id: p.id, verdict, reason, seconds: (performance.now() - shownAt) / 1000 }),
-    });
-    if (!response.ok) { $('state').textContent = `Refusé : ${await response.text()}`; return; }
+    if (!(await post('/api/verdict', { photo_id: p.id, verdict, reason, seconds: (performance.now() - shownAt) / 1000 }))) return;
     p.verdict = verdict;
     p.reason = reason;
     open(at + 1);

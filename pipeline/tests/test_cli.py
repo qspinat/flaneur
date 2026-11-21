@@ -3278,16 +3278,14 @@ def test_points_marked_wrong_are_not_offered_on_the_placing_page(monkeypatch):
     given = []
     monkeypatch.setattr(cli.bridging, "paired", lambda pts, *a: given.append(pts.pixels) or None)
 
-    cli._offer_of("pm:1", _kept(inputs="c:img"), {}, set(), (600, 800), {1})
+    cli._offer_of("pm:1", _kept(inputs="c:img"), {}, set(), (600, 800), {(2.0, 2.0)})
 
     assert given[0].tolist() == [[1.0, 1.0], [3.0, 3.0]]
 
 
 def test_the_marks_on_a_placement_go_to_its_offer_only(tmp_path, monkeypatch):
-    monkeypatch.setattr(cli, "WRONG_PAIRS", tmp_path / "wrong_pairs.jsonl")
-    cli.confirming.mark_pair(cli.WRONG_PAIRS, "pm:1", "c:img", 1, True)
-    cli.confirming.mark_pair(cli.WRONG_PAIRS, "pm:1", "c:old", 0, True)  # another placement's
-    monkeypatch.setattr(cli, "ANCHORS", tmp_path / "anchors.jsonl")
+    cli.confirming.mark_pair(cli.WRONG_PAIRS, "pm:1", "c:img", [2.0, 2.0], True)
+    cli.confirming.mark_pair(cli.WRONG_PAIRS, "pm:1", "c:old", [1.0, 1.0], True)  # another's
     cli.confirming.record(cli.ANCHORS, "pm:1", "near", "c:img", 1)
     monkeypatch.setattr(cli, "_matches", lambda: {"pm:1": _kept(inputs="c:img")})
     image = tmp_path / "photo.jpg"
@@ -3299,4 +3297,15 @@ def test_the_marks_on_a_placement_go_to_its_offer_only(tmp_path, monkeypatch):
 
     cli._offers({"pm:1": {"image": image, "inputs": "img"}}, {}, set())
 
-    assert given == {"pm:1": {1}}
+    assert given == {"pm:1": {(2.0, 2.0)}}
+
+
+def test_each_pair_shown_carries_its_point_as_kept(monkeypatch):
+    points = cli.match.Points(
+        np.array([[10.0, 20.0]]), np.array([[0.0, 5.0, 2.0]]), np.array([frozenset()], dtype=object)
+    )
+    monkeypatch.setattr(cli.match, "project", lambda view, world, size: np.array([[50.0, 60.0]]))
+
+    pairs = cli._pairs_shown(points, (100, 100, 3), (100, 100), "view")
+
+    assert pairs and pairs[0]["point"] == [10.0, 20.0]

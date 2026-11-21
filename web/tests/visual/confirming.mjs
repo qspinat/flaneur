@@ -37,12 +37,12 @@ await page.keyboard.press('f');
 await page.waitForFunction(() => document.querySelectorAll('.loupe.wrong').length === 1, null, { timeout: 5000 }).catch(() => {});
 check(sent.pair.length === 1 && sent.pair[0].photo_id === shownId && sent.pair[0].index === index && sent.pair[0].wrong === true,
   `F marks the pair chosen wrong for this photo (${JSON.stringify(sent.pair[0])}, point ${index})`);
-const look = await page.evaluate(() => [document.querySelectorAll('.loupe.wrong').length,
-  document.querySelectorAll('#pairs .mark.wrong').length, document.querySelector('.loupe.wrong')?.dataset.n,
-  document.getElementById('pairs-help').textContent, photos[at].id]);
-check(look[0] === 1 && look[1] === 2 && look[2] === '1', `its loupe and both its points show it (${look.slice(0, 3)})`);
-check(look[3].includes('1 marquée fausse'), `the line under the loupes counts it (« ${look[3]} »)`);
-check(look[4] === shownId && sent.verdict === 0, 'the photo stays shown, no verdict sent');
+const look = await page.evaluate(() => ({ loupes: document.querySelectorAll('.loupe.wrong').length,
+  marks: document.querySelectorAll('#pairs .mark.wrong').length, n: document.querySelector('.loupe.wrong')?.dataset.n,
+  help: document.getElementById('pairs-help').textContent, id: photos[at].id }));
+check(look.loupes === 1 && look.marks === 2 && look.n === '1', `its loupe and both its points show it (${JSON.stringify(look)})`);
+check(look.help.includes('1 paire marquée fausse'), `the line under the loupes counts it (« ${look.help} »)`);
+check(look.id === shownId && sent.verdict === 0, 'the photo stays shown, no verdict sent');
 check(await page.evaluate(() => chosen) === 1, 'the pair stays chosen');
 await page.keyboard.press('f');
 await page.waitForFunction(() => !document.querySelector('.loupe.wrong'), null, { timeout: 5000 }).catch(() => {});

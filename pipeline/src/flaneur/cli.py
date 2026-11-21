@@ -1725,19 +1725,19 @@ def _offer_of(
     by_id: dict[str, match.Panorama],
     fixed: Set[str],
     size: tuple[int, int],
-    wrong: Set[int] = frozenset(),
+    wrong: Set[tuple[float, float]] = frozenset(),
 ) -> dict | None:
     """A placement of match, as the placing page opens it (see placing.Sources.offer): in the
     first of its panoramas (see _sources_first) where it has enough pairs of its own (see
     bridging.paired), up to OFFERED of them, the most spread, the photo's pixels at `size` (the
-    page's image of it), none of the points `wrong` (marked so by the user, see
+    page's image of it), none of the points at the pixels `wrong` (marked so by the user, see
     confirming.marked); its camera as the starting pin. None
     without its points (kept for other inputs) or pairs."""
     if (found := _found_from(photo_id, kept)) is None:
         return None
     m, points, observed = found
     if wrong:  # marked so on the confirmation page: never laid again
-        right = ~np.isin(np.arange(len(points.pixels)), list(wrong))
+        right = np.array([tuple(xy) not in wrong for xy in np.round(points.pixels, 3).tolist()])
         points = match.Points(points.pixels[right], points.world[right], points.seen[right])
     for sphere in _sources_first(points, by_id, m, fixed):
         if (paired := bridging.paired(points, observed, sphere, size)) is None:
@@ -1791,6 +1791,7 @@ def _pairs_shown(
     return [
         {
             "index": k,
+            "point": [round(float(v), 3) for v in points.pixels[k]],  # as kept: a mark's key
             "old": [round(float(v), 2) for v in old[k]],
             "today": [round(float(v), 2) for v in today[k]],
             "matched": bool(here[k]),
@@ -4958,7 +4959,7 @@ def place_photos(
         return found and {"registration": found, "carried_from": None}
 
     @functools.lru_cache(maxsize=1)
-    def offers_at(_: tuple) -> dict[str, dict]:  # made again on a new match or a new verdict
+    def offers_at(_: tuple) -> dict[str, dict]:  # again on a new match, verdict or pair marked
         return _offers(photos, by_id, fixed)
 
     def offers_now() -> dict[str, dict]:
