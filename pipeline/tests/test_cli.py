@@ -11,6 +11,7 @@ import typer
 from typer.testing import CliRunner
 
 from flaneur import (
+    chain,
     cli,
     confirming,
     depth,
@@ -111,7 +112,9 @@ def test_a_chained_photo_keeps_its_points_apart_from_match_s(tmp_path, monkeypat
         where={"b": SimpleNamespace(around=(0.0, 0.0))},
         heights=SimpleNamespace(street=lambda x, y: 0.0),
         then=lambda year: SimpleNamespace(blocks=None),
-        anchor=lambda photo_id, camera, points, inputs: SimpleNamespace(id=photo_id),
+        anchor=lambda photo_id, camera, points, inputs: chain.Anchor(
+            photo_id, camera, None, None, points, inputs
+        ),
         store=SimpleNamespace(),  # match's DISK store: never written by chaining
     )
     for name, value in {
@@ -125,10 +128,13 @@ def test_a_chained_photo_keeps_its_points_apart_from_match_s(tmp_path, monkeypat
     monkeypatch.setattr(cli.outlines, "contrast", lambda *args: 0.1)
     monkeypatch.setattr(cli, "CHAINED_POINTS", tmp_path)
 
-    results, _ = cli._rounds(work, set())
+    results, placed = cli._rounds(work, set())
+    assert not any(tmp_path.iterdir())  # not while chaining: a pass may set it aside
+    cli._for_pages(work, results, placed)
 
     inputs = results["b"]["situated"]["inputs"]
     assert cli.chain.Store(tmp_path, None).points("b", inputs).pixels.tolist() == [[0.0, 0.0]]
+    assert results["b"]["situated"]["outline"] == 0.1
 
 
 def test_a_photo_placed_without_anchors_keeps_nothing_of_its_own(tmp_path, monkeypatch):
@@ -619,34 +625,19 @@ def test_a_photo_is_matched_again_only_by_the_matchers_left_to_try(kept, refused
     assert cli._left_to_try(kept, "i", refused) == left
 
 
-def test_only_current_placements_by_lomag_are_left_out_of_chaining():
-    matches = {
-        "a": _kept(),
-        "b": _kept(matcher="disk"),
-        "c": _kept(matcher="lomag"),
-        "d": None,
-        "e": _kept(matcher="lomag"),  # stale or turned down: not situated
-    }
+def test_a_photo_placed_against_today_is_shown_so_unless_only_its_chained_camera_is_said_yes():
+    today = match.Situated(**_kept(inputs="i"))
+    situated = {"a": today, "d": today}
+    row = lambda frm: {"situated": _kept(inputs="i:from-ab12cd34"), "round": 1, "from": frm}  # noqa: E731
+    chained = {"photos": {"a": row(["b"]), "c": row(["a"]), "d": row(["b"])}}
+    judged = SimpleNamespace(said_yes=lambda k, p: k == "d" and p["inputs"] == "i:from-ab12cd34")
 
-    situated = {k: SimpleNamespace(inputs="i") for k in ("a", "b", "c")}
-    situated["d"] = SimpleNamespace(inputs="i:proposed-abc")  # said yes to: no points to chain by
+    shown, rounds = cli._with_chained(situated, chained, {"a", "c", "d"}, judged)
 
-    assert cli._not_chained(matches, situated) == {"c", "d"}
-
-
-def test_a_photo_placed_against_today_is_shown_so_rather_than_as_last_chained():
-    situated = {"a": "placed now"}
-    chained = {
-        "photos": {
-            "a": {"situated": _kept(), "round": 2, "from": ["b"]},
-            "c": {"situated": _kept(), "round": 1, "from": ["a"]},
-        }
-    }
-
-    shown, rounds = cli._with_chained(situated, chained, {"a", "c"})
-
-    assert shown["a"] == "placed now" and rounds["a"] == {"round": 0, "from": []}
-    assert shown["c"] == match.Situated(**_kept()) and rounds["c"] == {"round": 1, "from": ["a"]}
+    assert shown["a"] == today and rounds["a"] == {"round": 0, "from": []}
+    assert shown["c"] == match.Situated(**_kept(inputs="i:from-ab12cd34"))
+    assert rounds["c"] == {"round": 1, "from": ["a"]}
+    assert rounds["d"]["round"] == 1  # its chained camera said yes to, not today's
 
 
 def test_each_matcher_has_its_own_known_answer_check(tmp_path):
@@ -2298,6 +2289,8 @@ def test_the_placed_list_is_written_from_the_answers_verdicts_and_matches(monkey
     exported.touch()
     answer = {"registration": {"panorama": "q"}, "inputs": "h", "flipped": False}
     said = [("pm:1", "near", "i"), ("pp", "yes", "i:proposed-ab12cd34")]  # pp: a camera refused
+    said.append(("pm:3", "yes", "i:from-ab12cd34"))  # its chained camera said yes to
+    said.append(("pm:1", "yes", "i:from-ab12cd34"))  # match's said near, the chained one yes
     (tmp_path / "anchors.jsonl").write_text(
         "".join(json.dumps({"photo_id": k, "verdict": v, "inputs": i}) + "\n" for k, v, i in said)
     )
@@ -2317,7 +2310,7 @@ def test_the_placed_list_is_written_from_the_answers_verdicts_and_matches(monkey
         "SIGHTS": tmp_path / "sights.jsonl",
         "ANCHORS": tmp_path / "anchors.jsonl",
         "_placing_answers": lambda: ({}, {"pa": answer}, set()),
-        "_scenes_now": lambda: {k: "s" for k in ("pm:1", "pm:2", "pm:3", "pm:4", "pp")},
+        "_scenes_now": lambda: {k: "s" for k in ("pm:1", "pm:2", "pm:3", "pm:4", "pp", "pc")},
         "_matches": lambda: {
             "pm:1": _kept(),
             "pm:2": _kept(inputs="before"),
@@ -2336,6 +2329,11 @@ def test_the_placed_list_is_written_from_the_answers_verdicts_and_matches(monkey
         },
         "_kept_store": lambda m, kept: (SimpleNamespace(points=lambda k, i: seen_by.get(k)), "i"),
         "_sure_panoramas": lambda: ({"sure"}, {"sure", "gps"}),  # sure of their pose, known
+        "_chained": lambda scenes, judged, anchors: {
+            "photos": {
+                k: {"situated": _kept(inputs="i:from-ab12cd34")} for k in ("pc", "pm:1", "pm:3")
+            }
+        },
     }.items():
         monkeypatch.setattr(cli, name, value)
     seen_by = {"pm:3": _seen_by({"sure"}, {"gps"}), "pm:4": _seen_by({"gps"}, {"gps", "photo:x"})}
@@ -2345,12 +2343,14 @@ def test_the_placed_list_is_written_from_the_answers_verdicts_and_matches(monkey
     written = json.loads((tmp_path / "placed.json").read_text())
     assert {k: (p["status"], p["source"], p["proposed_marks"]) for k, p in written.items()} == {
         "pa": ("checked", "page", False),
-        "pm:1": ("near", "match", False),  # pm:2 was placed from what the photo no longer is
-        "pm:3": ("automatic", "match", True),
+        "pm:1": ("checked", "chain", False),  # pm:2 was placed from what the photo no longer is
+        "pm:3": ("checked", "chain", False),  # a yes wins over match's not judged
         "pm:4": ("automatic", "match", False),  # its marks were made on another crop
         "pp": ("checked", "match", False),
+        "pc": ("automatic", "chain", False),
     }
     assert {k for k, p in written.items() if p["unsure_sources"]} == {"pm:4"}  # gps only
+    assert written["pc"]["unchecked_area"]  # the chaining's check not passed in its area
 
 
 def test_only_the_photos_placed_with_a_registration_go_to_3d(monkeypatch):
@@ -2949,3 +2949,226 @@ def test_a_photo_shown_from_a_proposal_said_yes_to_has_no_copy_standing(monkeypa
     drawn = cli._copies_drawn(held, carried)
 
     assert made == [] and drawn["pm:1"] == carried["pm:1"]["copies"]
+
+
+def _rays(n: int) -> match.Rays:
+    return match.Rays(
+        np.arange(n),
+        np.full(n, "p", dtype=object),
+        np.zeros((n, 3)),
+        np.tile([0.0, 1.0, 0.0], (n, 1)),
+        np.full((n, 3), np.nan),
+        np.full((n, 6), np.nan),
+    )
+
+
+def test_a_photo_checked_keeps_only_rays_too_few_for_match_alone(monkeypatch):
+    camera = match.Camera(1.0, 2.0, 1.5, 90.0, 0.5, 60.0, agree=30, panoramas=2)
+    placed = lambda observed, where, trace, *more: match.Found(  # noqa: E731
+        camera if len(observed.rays.keys) >= 100 else None, np.zeros((0, 6)), None
+    )
+    monkeypatch.setattr(cli.match, "place", placed)
+    observed = match.Observed(np.zeros((800, 2)), (60, 80), _rays(800), 1)
+
+    cut = cli._degraded(observed, None, np.random.default_rng(0))
+
+    assert 50 <= len(cut.rays.keys) < 100  # halved until match alone no longer places it
+    assert set(cut.rays.keys) <= set(range(800))
+
+
+def test_a_photo_match_still_places_from_a_few_rays_is_left_out_of_the_check(monkeypatch):
+    camera = match.Camera(1.0, 2.0, 1.5, 90.0, 0.5, 60.0, agree=30, panoramas=2)
+    monkeypatch.setattr(
+        cli.match, "place", lambda observed, where, trace, *more: match.Found(camera, None, None)
+    )
+    observed = match.Observed(np.zeros((40, 2)), (60, 80), _rays(40), 1)
+
+    assert cli._degraded(observed, None, np.random.default_rng(0)) is None
+
+
+def test_photos_checked_together_stand_in_the_same_block():
+    assert cli._check_fold(652060.0, 6861010.0) == cli._check_fold(652190.0, 6861140.0)
+    folds = {cli._check_fold(652000.0 + 150 * i, 6861000.0) for i in range(40)}
+    assert folds == set(range(cli.CHECK_FOLDS))
+
+
+def test_the_check_hides_its_photos_and_sets_each_decoy_where_another_stands():
+    view = lambda x: match.View(x, 0.0, 30.0, 0.0, 0.5, 60.0)  # noqa: E731
+    anchor = lambda i, x: SimpleNamespace(id=i, view=view(x))  # noqa: E731
+    work = object.__new__(cli._Chaining)
+    work.round_zero = {"h": anchor("h", 0.0), "d": anchor("d", 100.0), "a": anchor("a", 10.0)}
+    work.where = {
+        i: match.Where(None, around=(x, 0.0)) for i, x in (("h", 0), ("d", 100), ("a", 10))
+    }
+    work.negatives, work.cut, work._seen = {}, {}, {"a": "as matched"}
+    me = lambda i: SimpleNamespace(id=i)  # noqa: E731
+
+    replay = cli._replay(work, {"h": "cut h"}, {"d": ("cut d", "h")})
+
+    assert set(replay.round_zero) == {"a"} and set(work.round_zero) == {"h", "d", "a"}
+    assert replay.observed(me("h")) == "cut h" and replay.observed(me("a")) == "as matched"
+    assert work.observed(me("a")) == "as matched" and not work.cut
+    assert replay.where["d"].around == (0, 0.0)  # the decoy is said to be where h stands
+    assert [a.id for a in replay.anchors(me("d"), replay.round_zero)] == ["a"]
+
+
+@pytest.mark.parametrize(
+    ("answered", "wrong", "fooled", "passed"),
+    [(9, 0, 0, False), (10, 1, 0, True), (10, 2, 0, False), (20, 0, 1, False)],
+)
+def test_the_check_passes_on_enough_answers_few_wrong_and_no_decoy_taken(
+    answered, wrong, fooled, passed
+):
+    rows = [{"kind": "vérité", "off": [0.2, 0.1], "wrong": i < wrong} for i in range(answered)]
+    rows += [{"kind": "vérité", "why": "sans réponse"}] * 30  # no answer: no evidence either way
+    rows += [{"kind": "leurre", "wrong": i < fooled} for i in range(3)] + [{"kind": "leurre"}]
+
+    assert cli._check_passed(rows)[0] is passed
+
+
+def test_a_lomag_keypoint_beside_a_disk_one_is_that_detail():
+    disk = np.array([[0.0, 0.0], [10.0, 10.0]])
+    lomag = np.array([[10.5, 10.0], [50.0, 50.0], [1.0, 1.0]])
+
+    assert cli._merged(disk, lomag, 3).tolist() == [1, 4, 0]
+    assert cli._merged(np.empty((0, 2)), lomag, 3).tolist() == [3, 4, 5]
+
+
+class _Kept:
+    """A store of features and pairs, as chain.Store answers them."""
+
+    def __init__(self, keypoints: dict[str, list], pairs: dict[str, list]):
+        self.keypoints, self.found = keypoints, pairs
+
+    def features(self, photo_id, image, read):
+        k = np.array(self.keypoints[photo_id], float).reshape(-1, 2)
+        return match.Features(k, np.zeros((len(k), 4), np.float32), (60, 80))
+
+    def pairs(self, a, b, features):
+        return np.array(self.found[b[0]], int).reshape(-1, 2)
+
+
+def _two_matchers(monkeypatch) -> cli._Chaining:
+    monkeypatch.setattr(cli, "_image", lambda photo_id: "img")
+    work = object.__new__(cli._Chaining)
+    work.store = _Kept(
+        {"me": [[0, 0], [10, 10]], "L": [[0, 0]] * 4, "D": [[0, 0]] * 4}, {"D": [[0, 3]]}
+    )
+    work.lomag_store = _Kept(
+        {"me": [[10.5, 10], [50, 50], [10.2, 10]], "L": [[1, 1]] * 3, "D": [[2, 2]]},
+        {"L": [[0, 0], [1, 2], [2, 1]]},
+    )
+    work.by_lomag = {"L"}
+    work._lomag_keypoints, work._disk_keypoints, work._rows_of = {}, {}, {}
+    return work
+
+
+def test_a_photo_pairs_with_each_anchor_through_the_matcher_that_placed_it(monkeypatch):
+    work = _two_matchers(monkeypatch)
+    anchor = lambda i: work.anchor(i, None, None, "")  # noqa: E731
+    observed = match.Observed(np.zeros((6, 2)), (60, 80), _rays(0))  # 2 DISK, 1 band, 3 LoMa-G
+
+    pairs = work.paired(SimpleNamespace(id="me"), observed)
+
+    assert [r.tolist() for r in pairs(anchor("D"))] == [[0], [3]]
+    # LoMa-G rows: its keypoints beside DISK's are theirs (1), the others after them (4);
+    # the anchor's after its own DISK keypoints (4 + 0, 4 + 2); one detail once per anchor
+    assert [r.tolist() for r in pairs(anchor("L"))] == [[1, 4], [4, 6]]
+
+
+def test_only_an_anchor_lomag_placed_has_its_lomag_keypoints_after_its_disk_ones(monkeypatch):
+    work = _two_matchers(monkeypatch)
+    view = match.View(0.0, 0.0, 30.0, 0.0, 0.5, 60.0)
+
+    anchor = work.anchor("me", view, None, "inputs")
+
+    assert anchor.keypoints.tolist() == [[0, 0], [10, 10]]  # paired through DISK: its rows
+    lomag_placed = work.anchor("L", view, None, "inputs")  # paired through LoMa-G: after them
+    assert lomag_placed.keypoints.tolist() == [[0, 0]] * 4 + [[1, 1]] * 3
+
+
+def test_a_photo_only_lomag_observed_has_its_rays_on_its_lomag_keypoints_rows(monkeypatch):
+    work = _two_matchers(monkeypatch)
+    monkeypatch.setattr(cli, "_inputs", lambda scene, photo_id: "now")
+    rays = _rays(4)  # on its LoMa-G keypoints 0, 1, 2, and on a band zoomed on a landmark (3)
+    lomag_seen = match.Observed(np.zeros((4, 2)), (60, 80), rays, 2)
+    work.store.observed = lambda photo_id, inputs: None  # DISK: never observed it
+    work.lomag_store.observed = lambda photo_id, inputs: lomag_seen if inputs == "then" else None
+    work.scenes, work.cut, work._seen = {"me": None}, {}, {}
+    work.situated = {"me": SimpleNamespace(inputs="then:lomag")}
+
+    seen = work.observed(SimpleNamespace(id="me"))
+
+    # its details: 2 DISK keypoints, then its 3 LoMa-G ones (the first and last are DISK's
+    # second); the ray on the band left out
+    assert len(seen.pixels) == 5 and seen.size == (60, 80) and seen.views == 2
+    assert seen.rays.keys.tolist() == [1, 2 + 1, 1]
+
+
+def test_the_chaining_check_says_for_each_area_whether_it_passes():
+    back = {"kind": "vérité", "off": [0.2, 0.1], "wrong": False}
+    rows = [back | {"area": "cite"}] * 10 + [back | {"area": "saint-severin"}] * 3
+
+    by_area = cli._by_area(rows)
+
+    assert cli._check_passed(by_area["cite"]).passed
+    assert not cli._check_passed(by_area["saint-severin"]).passed
+
+
+def test_an_area_trusts_the_chaining_where_its_check_passed_for_things_as_they_are(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(cli, "CHAIN_CHECK", tmp_path / "check.json")
+    monkeypatch.setattr(cli, "CHAINS", tmp_path / "chains.json")
+    monkeypatch.setattr(cli, "_chain_setup", lambda: "now")
+    monkeypatch.setattr(cli, "_per_area", lambda path, matcher: {})
+    monkeypatch.setattr(cli, "_check_current", lambda check, m, name, near_by: False)
+    gate = lambda passed: {"passed": passed}  # noqa: E731
+    areas = {"cite": gate(True), "saint-severin": gate(False)}
+    cli.write_json(cli.CHAIN_CHECK, {"setup": "now", "areas": areas})
+    cli.write_json(cli.CHAINS, {"setup": "now", "photos": {}})
+
+    assert cli._checked_in([]) == {"saint-severin": [], "cite": [placed.CHAINED]}
+    cli.write_json(cli.CHAINS, {"setup": "before", "photos": {}})
+    assert cli._checked_in([]) == {"saint-severin": [], "cite": []}  # chained by other code
+    cli.write_json(cli.CHAIN_CHECK, {"setup": "before", "areas": areas})
+    assert cli._checked_in([]) == {"saint-severin": [], "cite": []}  # checked with other code
+
+
+def test_a_chained_placement_stays_while_of_the_photo_now_and_its_anchors_placed(
+    tmp_path, monkeypatch
+):
+    exported = tmp_path / "old.jpg"
+    exported.touch()
+    said_yes = {"photo_id": "kept-yes", "verdict": "yes", "inputs": "i:from-ab12cd34"}
+    (tmp_path / "anchors.jsonl").write_text(json.dumps(said_yes) + "\n")
+    row = lambda inputs, *from_: {"situated": _kept(inputs=inputs), "from": list(from_)}  # noqa: E731
+    cli.write_json(
+        tmp_path / "chains.json",
+        {
+            "setup": "chaining's code and panoramas then",
+            "photos": {
+                "same": row("i:from-ab12cd34", "placed"),
+                "cropped": row("j:from-ab12cd34", "placed"),
+                "child": row("i:from-ab12cd34", "gone"),  # its anchor no longer placed
+                "grandchild": row("i:from-ab12cd34", "child"),
+                "kept-yes": row("i:from-ab12cd34", "gone"),  # said yes to: holds
+                "after": row("i:from-ab12cd34", "same"),  # from one chained before it
+                "alone": row("i", "placed"),  # placed without anchors: no points of its own
+            },
+        },
+    )
+    for name, value in {
+        "CHAINS": tmp_path / "chains.json",
+        "ANCHORS": tmp_path / "anchors.jsonl",
+        "_scenes_now": lambda: {
+            k: "s" for k in ("same", "cropped", "child", "grandchild", "kept-yes", "after", "alone")
+        },
+        "_inputs": lambda scene, photo_id: "i",  # each photo as it is now
+        "_exported": lambda photo_id: exported,
+    }.items():
+        monkeypatch.setattr(cli, name, value)
+
+    chained = cli._chained(cli._scenes_now(), cli._Judged(), {"placed"})
+
+    assert set(chained["photos"]) == {"same", "kept-yes", "after"}

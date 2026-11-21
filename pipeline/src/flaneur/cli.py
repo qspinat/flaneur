@@ -18,6 +18,7 @@ import time
 from collections import Counter, OrderedDict, defaultdict
 from collections.abc import Callable, Iterable, Iterator, Sequence, Set
 from contextlib import closing, contextmanager
+from copy import copy as shallow
 from dataclasses import asdict, fields, replace
 from datetime import date, datetime, timedelta
 from enum import StrEnum
@@ -1113,17 +1114,6 @@ def _is_proposal(inputs: str) -> bool:
     return re.search(rf":{PROPOSAL}-[0-9a-f]+$", inputs) is not None
 
 
-def _not_chained(matches: dict[str, dict | None], situated: dict[str, match.Situated]) -> set[str]:
-    """The `situated` photos placed by a matcher other than DISK (chaining pairs old photos by
-    DISK's features, which their observations and points do not refer to), or proposed and
-    said yes to (no points kept)."""
-    return {
-        k
-        for k, m in situated.items()
-        if (matches.get(k) or {}).get("matcher", DISK) != DISK or _is_proposal(m.inputs)
-    }
-
-
 def _situated(marks: bool = True) -> dict[str, match.Situated]:
     """The old photos whose camera was found against today's panoramas, from what they are
     now (a match found from other panoramas or another crop of the photo is left out, unless
@@ -1228,14 +1218,16 @@ def _confirmed() -> dict[str, match.Situated]:
     their place and the 3D walk shows them (unless their place was set by hand since: a
     reviewed place wins, see export.photos). A placement not judged (as placed, or as found
     again: see _Judged.on) waits for a yes (a camera can collapse onto a panorama's spot and
-    still look right).
-    Photos placed by chaining are not among them: chaining is set aside."""
+    still look right). A photo placed by chaining said yes to is among them, where match has
+    none said yes to (see _chained)."""
     judged = _Judged()
-    return {
-        photo_id: m
-        for photo_id, m in _situated(marks=False).items()  # shown: marks aside
-        if judged.said_yes(photo_id, asdict(m))
-    }
+    situated = _situated(marks=False)  # shown: marks aside
+    found = {k: m for k, m in situated.items() if judged.said_yes(k, asdict(m))}
+    anchors = _anchoring({k: asdict(m) for k, m in situated.items()})
+    for photo_id, row in _chained(_scenes_now(), judged, anchors)["photos"].items():
+        if photo_id not in found and judged.said_yes(photo_id, row["situated"]):
+            found[photo_id] = _situation(row["situated"])
+    return found
 
 
 def _turned_down() -> set[str]:
@@ -1329,11 +1321,16 @@ def _check_setup(matcher: str, area: str, near_by: list[match.Panorama]) -> str:
     setup = f"{area}:{_scene_of(inside, (centre.x, centre.y), _code())}"
     if matcher == DISK:
         return setup
+    return f"{setup}:{_lomag_code()}"
+
+
+def _lomag_code() -> str:
+    """LoMa-G's own code and LoMa's revision, hashed."""
     from importlib import metadata
 
     code = Path(__file__).with_name("lomag.py").read_bytes()
     revision = metadata.distribution("lomatch").read_text("direct_url.json") or ""
-    return f"{setup}:{hashlib.sha1(code + revision.encode()).hexdigest()[:8]}"
+    return hashlib.sha1(code + revision.encode()).hexdigest()[:8]
 
 
 def _of_matcher(path: Path, matcher: str) -> Path:
@@ -1357,13 +1354,17 @@ MATCHERS = {  # tried in this order (see lomag); LoMa-G's descriptors are twice 
 }
 
 
+def _lomag_matcher() -> match.Matcher:
+    from flaneur import lomag  # torch: never with pycolmap
+
+    return lomag.LoMaGMatcher(DATA / "raw" / "models")
+
+
 def _views(kept: int | None = None, matcher: str = DISK) -> match.Views:
     """The panoramas' views' features as `matcher` finds them (`kept` panoramas' in memory:
     by default, the matcher's)."""
     if matcher == LOMAG:
-        from flaneur import lomag  # torch: never with pycolmap
-
-        found = lomag.LoMaGMatcher(DATA / "raw" / "models")
+        found = _lomag_matcher()
     else:
         with httpx.Client(timeout=300) as client:
             found = match.Matcher(match.fetch_models(client, DATA / "raw" / "models"))
@@ -1867,9 +1868,10 @@ def _match_with(matcher: str, photos: list[export.WalkPhoto], at: _Run) -> None:
 
 
 def _checked_in(near_by: list[match.Panorama]) -> dict[str, list[str]]:
-    """For each area, the matchers whose known-answer check passed there for its panoramas as
-    they are: how sure a placement of each is there (see placed.Matched), not whether it is
-    tried. Says which checks are still to make (with the command), and which failed."""
+    """For each area, the methods whose known-answer check passed there for its panoramas as
+    they are (the matchers; placed.CHAINED, the chaining's check for the code and data as they
+    are): how sure a placement of each is there (see placed.Matched), not whether it is tried.
+    Says which checks are still to make (with the command), and which failed."""
     checked: dict[str, list[str]] = {name: [] for name in pilot.AREAS}
     to_make, failed = defaultdict(list), []
     for name in pilot.AREAS:
@@ -1886,6 +1888,17 @@ def _checked_in(near_by: list[match.Panorama]) -> dict[str, list[str]]:
             f"{MATCHERS[m].label} pas encore contrôlé pour ces panoramas ({', '.join(areas)}) : "
             f"`flaneur match-check --perimes --matcher {m}`"
         )
+    check = register.load(CHAIN_CHECK)  # its setup read only if checked: then the chaining's too
+    if not check or check.get("setup") != (now := _chain_setup()):
+        typer.echo(
+            "enchaînement pas encore contrôlé pour ce code et ces données : `flaneur chain-check`"
+        )
+    elif register.load(CHAINS).get("setup") != now:  # the photos chained, as the check saw them
+        typer.echo("photos enchaînées par un autre code ou d'autres données : `flaneur chain`")
+    else:
+        for name, gate in check.get("areas", {}).items():
+            if gate["passed"] and name in checked:
+                checked[name].append(placed.CHAINED)
     if failed:
         typer.echo(f"contrôle non passé : {', '.join(failed)} (leurs placements le disent)")
     return checked
@@ -2062,7 +2075,7 @@ def _found_as_now(
     if judged.said_yes(photo_id, kept) and _image_of(kept["inputs"]) == _image_of(inputs):
         return True
     placed_from = _placed_inputs(inputs, kept.get("matcher"))
-    return _marks_aside(kept["inputs"]) == _marks_aside(placed_from)
+    return _marks_aside(_unchained(kept["inputs"])) == _marks_aside(placed_from)
 
 
 def _still_shown(photo_id: str, kept: dict | None, inputs: str, judged: "_Judged") -> bool:
@@ -2154,10 +2167,52 @@ class _Judged:
         )
 
 
+MERGE_PX = 1.5  # a photo's LoMa-G keypoint this near one of its DISK keypoints: that detail
+
+
 def _chain_setup() -> str:
-    """What chaining now depends on: what matching does, and chaining's own code."""
-    digest = hashlib.sha1(Path(chain.__file__).read_bytes()).hexdigest()[:8]
+    """What chaining and its check now depend on: what matching does, chaining's own code
+    (chain.py, and what of it lives here, with its numbers), LoMa-G's (its anchors are paired
+    through it) and the areas (the check's confidence is said for each)."""
+    here = [_Chaining, _merged, _rounds, _chain_passes, _inconsistent, _placed_from, _too_far]
+    here += [_moved, _rays_at, _kept_store, _features, _for_pages, _Judged, _is_chained]
+    here += [_situation, _keep_chained, _chained_wins]
+    check = [_degraded, _replay, _check_passed, chain_check, _check_fold, _off_row, _by_area]
+    numbers = (MERGE_PX, CHAIN_PASSES, CHECK_M, CHECK_DEG, CHECK_BLOCK_M, CHECK_FOLDS)
+    numbers += (CHECK_HALVINGS, CHECK_FEWEST_RAYS, DECOY_M, CHAIN_CHECK_LEAST, CHAIN_CHECK_WRONG)
+    code = [inspect.getsource(f) for f in here + check] + [repr(numbers), _lomag_code()]
+    areas = {name: square.wkt for name, square in pilot.AREAS.items()}
+    digest = _digest([Path(chain.__file__).read_text(), *code, areas])[:8]
     return f"{_setup()}:{digest}"
+
+
+def _rays_at(rays: match.Rays, rows: np.ndarray) -> match.Rays:
+    return match.Rays(*(getattr(rays, f.name)[rows] for f in fields(match.Rays)))
+
+
+def _merged(disk: np.ndarray, lomag: np.ndarray, offset: int) -> np.ndarray:
+    """The rows of a photo's details its LoMa-G keypoints are: a DISK keypoint's within
+    MERGE_PX (the same detail), else their own, after `offset`."""
+    own = offset + np.arange(len(lomag))
+    if not len(disk) or not len(lomag):
+        return own
+    pixels, nearest = cKDTree(disk).query(lomag)
+    return np.where(pixels <= MERGE_PX, nearest, own)
+
+
+class _LoadedWhenNeeded:
+    """A matcher made only when first asked for features or pairs (its model is loaded then):
+    those kept are read without it. `precision`: the made matcher's (lomag.LoMaGMatcher's
+    for LOMAG), which names the folder its pairs are kept in."""
+
+    def __init__(self, precision: str, make: Callable[[], match.Matcher]) -> None:
+        self.precision, self._matcher = precision, functools.cache(make)
+
+    def features(self, bgr: np.ndarray) -> match.Features:
+        return self._matcher().features(bgr)
+
+    def match(self, a: match.Features, b: match.Features) -> tuple[np.ndarray, np.ndarray]:
+        return self._matcher().match(a, b)
 
 
 CHAINED = ":from-"  # a chained placement's inputs: then its anchors' (see _placed_from)
@@ -2202,39 +2257,86 @@ class _Chaining:
         with closing(db.connect(DB_PATH)) as conn:
             walk = export.photos(conn, DATA / "pilot", REVIEWS)
             self.negatives = dedup.negatives(conn)
-        self.heights, near_by, then = _matching()
-        self.scenes = _scenes(walk, near_by)  # what each photo's own match is found from
+        self.heights, self.near_by, then = _matching()
+        self.scenes = _scenes(walk, self.near_by)  # what each photo's own match is found from
         # by year: the buildings of a year are built once (a few kept at a time)
         self.walk = sorted((me for me in walk if _exported(me.id).exists()), key=_then_year)
         self.where = {me.id: _where(me, self.heights, then(_then_year(me))) for me in self.walk}
         self.then = then
         self.store = chain.Store(DATA / "raw", _views().matcher)
+        self.lomag_store = chain.Store(
+            MATCHERS[LOMAG].photos, _LoadedWhenNeeded(LOMAG, _lomag_matcher)
+        )
         self.by_id = {me.id: me for me in self.walk}
         self.refused = set(_set_aside())  # judged wrong by eye: not placed so again
         self.turned_down = _turned_down()  # by the user: not chained at all
-        situated = _situated()
-        # placed through another matcher's features: neither anchors nor chained
-        self.elsewhere = _not_chained(_matches(), situated)
+        self.situated, matches = _situated(), _matches()
+        # proposed and said yes to: no points kept, neither anchors nor chained
+        self.elsewhere = {k for k, m in self.situated.items() if _is_proposal(m.inputs)}
+        self.by_lomag = {  # those paired through LoMa-G
+            k for k in self.situated if (matches.get(k) or {}).get("matcher") == LOMAG
+        } - self.elsewhere
+        self.cut: dict[str, match.Observed] = {}  # observations made for the check (_replay)
+        self._seen: dict[str, match.Observed | None] = {}  # each photo's, read once
+        self._lomag_keypoints: dict[str, np.ndarray] = {}
+        self._disk_keypoints: dict[str, int] = {}  # how many: an anchor's LoMa-G rows' start
+        self._rows_of: dict[str, np.ndarray] = {}
         self.round_zero: dict[str, chain.Anchor] = {}
         aside = _set_aside()  # by eye: neither an anchor nor a truth to check against
-        for photo_id, m in situated.items():
+        for photo_id, m in self.situated.items():
             if (
                 photo_id in self.by_id
                 and photo_id not in self.elsewhere
                 and (photo_id, m.inputs) not in aside
             ):
-                if (points := self.store.points(photo_id, m.inputs)) is not None:
+                if (kept := _kept_store(m, matches.get(photo_id))) is None:
+                    continue  # proposed: no points (left out as `elsewhere` already)
+                if (points := kept[0].points(photo_id, kept[1])) is not None:
                     view = m.view(self.heights.street(m.x, m.y))
                     self.round_zero[photo_id] = self.anchor(photo_id, view, points, m.inputs)
+        # the photos chained before the user said yes to, as placed: anchors, never redone
+        self.kept_chained: dict[str, dict] = {}
+        self.judged, store = _Judged(), chain.Store(CHAINED_POINTS, None)
+        for k, row in register.load(CHAINS).get("photos", {}).items():
+            c = row["situated"]
+            today = asdict(self.situated[k]) if k in self.round_zero else None
+            if (
+                k in self.by_id
+                and self.judged.holds(k, c)
+                and _chained_wins(self.judged, k, c, today)
+            ):
+                if (
+                    _is_chained(c["inputs"])
+                    and (points := store.points(k, c["inputs"])) is not None
+                ):
+                    m = _situation(c)
+                    view = m.view(self.heights.street(m.x, m.y))
+                    self.round_zero[k] = self.anchor(k, view, points, c["inputs"])
+                    self.kept_chained[k] = row
 
     def features(self, photo_id: str) -> match.Features:
         return _features(self.store, photo_id)
 
+    def lomag_features(self, photo_id: str) -> match.Features:
+        return _features(self.lomag_store, photo_id)
+
+    def lomag_keypoints(self, photo_id: str) -> np.ndarray:
+        if photo_id not in self._lomag_keypoints:
+            self._lomag_keypoints[photo_id] = self.lomag_features(photo_id).keypoints
+        return self._lomag_keypoints[photo_id]
+
     def anchor(
         self, photo_id: str, view: match.View, points: match.Points, inputs: str
     ) -> chain.Anchor:
-        features = self.features(photo_id)  # its keypoints only: descriptors stay in the store
-        return chain.Anchor(photo_id, view, features.keypoints, features.size, points, inputs)
+        """An old photo placed, as others are placed from: its keypoints (DISK's, then
+        LoMa-G's for one LoMa-G placed, paired through it; descriptors stay in the stores),
+        its camera and points."""
+        features = self.features(photo_id)
+        keypoints = features.keypoints
+        self._disk_keypoints[photo_id] = len(keypoints)
+        if photo_id in self.by_lomag:
+            keypoints = np.concatenate([keypoints, self.lomag_keypoints(photo_id)])
+        return chain.Anchor(photo_id, view, keypoints, features.size, points, inputs)
 
     def anchors(self, me: export.WalkPhoto, placed: dict[str, chain.Anchor]) -> list[chain.Anchor]:
         """The old photos placed near a photo's caption place, its own negative's left out."""
@@ -2249,7 +2351,63 @@ class _Chaining:
         ]
 
     def observed(self, me: export.WalkPhoto) -> match.Observed | None:
-        return self.store.observed(me.id, _inputs(self.scenes[me.id], me.id))
+        """A photo's details and their rays in today's panoramas (DISK's), its LoMa-G keypoints
+        after them (as a LoMa-G anchor's keypoints are); as cut for the check, if so."""
+        if me.id in self.cut:
+            return self.cut[me.id]
+        if me.id not in self._seen:
+            now = _inputs(self.scenes[me.id], me.id)
+            observed = self.store.observed(me.id, now)
+            if observed is not None:
+                pixels = np.concatenate([observed.pixels, self.lomag_keypoints(me.id)])
+                observed = replace(observed, pixels=pixels)
+            else:  # LoMa-G's only (it placed the photo): its rays on the same rows
+                placed = self.situated[me.id].inputs if me.id in self.situated else now
+                observed = self._lomag_observed(me.id, _found_inputs(placed, LOMAG))
+            self._seen[me.id] = observed
+        return self._seen[me.id]
+
+    def _lomag_observed(self, photo_id: str, inputs: str) -> match.Observed | None:
+        """A photo's observation by LoMa-G with its details as chaining has them (its DISK
+        keypoints, then its LoMa-G ones): the rays on its LoMa-G keypoints, on their rows
+        (see _merged); those on the bands zoomed on its landmarks left out."""
+        seen = self.lomag_store.observed(photo_id, inputs)
+        if seen is None:
+            return None
+        disk, lomag = self.features(photo_id).keypoints, self.lomag_keypoints(photo_id)
+        rays = _rays_at(seen.rays, np.flatnonzero(seen.rays.keys < len(lomag)))
+        rays = replace(rays, keys=self.rows_of(photo_id, len(disk) + len(lomag))[rays.keys])
+        return replace(seen, pixels=np.concatenate([disk, lomag]), rays=rays)
+
+    def rows_of(self, photo_id: str, details: int) -> np.ndarray:
+        """The rows of a photo's `details` its LoMa-G keypoints are: they come last (see
+        observed), those beside its DISK keypoints are theirs (see _merged)."""
+        if photo_id not in self._rows_of:
+            mine = self.lomag_keypoints(photo_id)
+            disk = self.features(photo_id).keypoints
+            self._rows_of[photo_id] = _merged(disk, mine, details - len(mine))
+        return self._rows_of[photo_id]
+
+    def paired(
+        self, me: export.WalkPhoto, observed: match.Observed
+    ) -> Callable[[chain.Anchor], tuple[np.ndarray, np.ndarray]]:
+        """How a photo's details pair with an anchor's (rows in the photo, rows in the
+        anchor): through the matcher that placed the anchor (LoMa-G's, by_lomag), else DISK."""
+        image = (me.id, _image(me.id))
+
+        def pairs(anchor: chain.Anchor) -> tuple[np.ndarray, np.ndarray]:
+            other = (anchor.id, _image(anchor.id))
+            if anchor.id not in self.by_lomag:
+                rows = self.store.pairs(image, other, self.features)
+                return rows[:, 0], rows[:, 1]
+            found = self.lomag_store.pairs(image, other, self.lomag_features)
+            rows_of = self.rows_of(me.id, len(observed.pixels))
+            after = self._disk_keypoints[anchor.id]  # its LoMa-G keypoints' rows (see anchor)
+            rows = np.column_stack([rows_of[found[:, 0]], after + found[:, 1]])
+            rows = rows[np.sort(np.unique(rows[:, 0], return_index=True)[1])]  # a detail once
+            return rows[:, 0], rows[:, 1]
+
+        return pairs
 
     def place(
         self,
@@ -2257,25 +2415,11 @@ class _Chaining:
         observed: match.Observed,
         anchors: list[chain.Anchor],
         trace: match.Trace,
-        where: match.Where | None = None,
     ) -> match.Found:
         """A photo's camera from what it was observed with and from its anchors, standing
-        where it could (`where`: elsewhere, for the check's decoys)."""
-
-        def pairs(anchor: chain.Anchor) -> tuple[np.ndarray, np.ndarray]:
-            rows = self.store.pairs(
-                (me.id, _image(me.id)), (anchor.id, _image(anchor.id)), self.features
-            )
-            return rows[:, 0], rows[:, 1]
-
-        rays, known = chain.from_anchors(anchors, pairs)
-        where = self.where[me.id] if where is None else where
-        return match.place(observed, where, trace, rays, known)
-
-
-def _bare(observed: match.Observed) -> match.Observed:
-    """An observation with its rays in today's panoramas left out."""
-    return replace(observed, rays=match.Rays.of([]))
+        where it could."""
+        rays, known = chain.from_anchors(anchors, self.paired(me, observed))
+        return match.place(observed, self.where[me.id], trace, rays, known)
 
 
 EYE_CHECKS = DATA / "pilot" / "eye_checks.jsonl"  # placements looked at while the user was away
@@ -2295,23 +2439,56 @@ def _set_aside() -> dict[tuple[str, str], str]:
 
 
 @app.command("chain")
-def chain_photos(
-    force: Annotated[bool, typer.Option(help="sans le contrôle à réponse connue")] = False,
-) -> None:
+def chain_photos() -> None:
     """Situe, tour après tour, les photos que les panoramas seuls n'ont pas situées, à partir
     des vieilles photos déjà situées près d'elles (leurs ancres) : au tour k, celles des
     tours précédents. Seules les caméras sûres sont gardées ; chacune garde son tour et ses
     ancres. Puis chaque photo est re-située avec les points des autres (pas de celles situées
     depuis elle) : la photo enchaînée qui bouge le plus est écartée et les tours refaits sans
-    elle ; celles du tour 0 qui bougent sont signalées, à juger. Écrit chains.json."""
+    elle ; celles du tour 0 qui bougent sont signalées, à juger. Écrit chains.json. Le contrôle
+    (`chain-check`) n'arrête rien : il dit, par quartier, la confiance des photos enchaînées."""
     work = _Chaining()
-    check = register.load(CHAIN_CHECK)
-    if not force and not (check.get("passed") and check.get("setup") == work.key):
-        raise typer.BadParameter(
-            "le contrôle de l'enchaînement n'est pas passé : lancer `flaneur chain-check` "
-            "d'abord (ou --force)"
-        )
     typer.echo(f"tour 0 : {len(work.round_zero)} photos situées contre les panoramas")
+    results, placed, doubts, set_aside = _chain_passes(work)
+    _for_pages(work, results, placed)
+    for photo_id, why in doubts.items():
+        if photo_id in work.round_zero:
+            typer.echo(f"{photo_id} : en désaccord avec les autres ({why})")
+    write_json(
+        CHAINS,
+        {
+            "setup": work.key,
+            "photos": work.kept_chained | results,
+            "doubts": {k: str(why) for k, why in doubts.items() if k in work.round_zero},
+            "set_aside": set_aside,
+        },
+    )
+    write_json(CHECKED_AREAS, _checked_in(work.near_by))  # what the list says of each area: now
+    typer.echo(
+        f"{len(results)} photos situées par enchaînement ; {len(set_aside)} écartées ; "
+        f"écrit dans {CHAINS}"
+    )
+
+
+def _for_pages(work: _Chaining, results: dict[str, dict], placed: dict[str, chain.Anchor]) -> None:
+    """What the pages show of the photos chained, once chaining is done: the points each was
+    placed from (kept apart: see _keep_chained) and how well the buildings then fit it."""
+    for photo_id, row in results.items():
+        anchor, me = placed[photo_id], work.by_id[photo_id]
+        _keep_chained(photo_id, anchor.inputs, anchor.points)
+        row["situated"]["outline"] = outlines.contrast(
+            _grey(cv2.imread(str(_exported(photo_id)))),
+            anchor.view,
+            work.then(_then_year(me)).blocks,
+        )
+
+
+def _chain_passes(
+    work: _Chaining,
+) -> tuple[dict[str, dict], dict[str, chain.Anchor], dict[str, "_Doubt"], dict[str, str]]:
+    """Chaining whole (see chain_photos): its rounds run again without the chained photo most
+    in doubt, at most CHAIN_PASSES times. The photos chained (their outline not yet
+    measured), all those placed, the doubts left and the photos set aside, with why."""
     set_aside: dict[str, str] = {}
     for _ in range(CHAIN_PASSES):
         results, placed = _rounds(work, set(set_aside))
@@ -2325,28 +2502,13 @@ def chain_photos(
     else:  # still in doubt after the last pass: none of them is kept
         set_aside |= {k: str(why) for k, why in chained.items()}
         results, placed = _rounds(work, set(set_aside))
-    for photo_id, why in doubts.items():
-        if photo_id in work.round_zero:
-            typer.echo(f"{photo_id} : en désaccord avec les autres ({why})")
-    write_json(
-        CHAINS,
-        {
-            "setup": work.key,
-            "photos": results,
-            "doubts": {k: str(why) for k, why in doubts.items() if k in work.round_zero},
-            "set_aside": set_aside,
-        },
-    )
-    typer.echo(
-        f"{len(results)} photos situées par enchaînement ; {len(set_aside)} écartées ; "
-        f"écrit dans {CHAINS}"
-    )
+    return results, placed, doubts, set_aside
 
 
 def _rounds(work: _Chaining, left_out: set[str]) -> tuple[dict[str, dict], dict[str, chain.Anchor]]:
     """The rounds of chaining from the photos placed against today (round 0), photos
-    `left_out` never placed: each photo chained (a Situated's fields, its round and
-    anchors), and all those placed."""
+    `left_out` never placed: each photo chained (a Situated's fields, its outline not yet
+    measured: NaN; its round and anchors), and all those placed."""
     placed, results = dict(work.round_zero), {}
     tried: dict[str, set[str]] = {}  # the anchors each photo was last tried with
     for k in range(1, chain.MOST_ROUNDS + 1):
@@ -2375,7 +2537,7 @@ def _rounds(work: _Chaining, left_out: set[str]) -> tuple[dict[str, dict], dict[
             why.append({"verdict": trace.verdict})
         typer.echo(f"tour {k} : {len(new)} photos situées ; les autres : {_funnel(why)}")
         for photo_id, (found, inputs) in new.items():
-            camera, me = found.camera, work.by_id[photo_id]
+            camera = found.camera
             x, y = work.where[photo_id].around
             situated = match.Situated.of(
                 camera,
@@ -2383,15 +2545,10 @@ def _rounds(work: _Chaining, left_out: set[str]) -> tuple[dict[str, dict], dict[
                 walls=found.walls,
                 moved_m=float(np.hypot(camera.x - x, camera.y - y)),
                 inputs=inputs,
-                outline=outlines.contrast(
-                    _grey(cv2.imread(str(_exported(photo_id)))),
-                    camera,
-                    work.then(_then_year(me)).blocks,
-                ),
+                outline=float("nan"),
             )
             parents = chain.provenance(found.points)
             results[photo_id] = {"situated": asdict(situated), "round": k, "from": parents}
-            _keep_chained(photo_id, inputs, found.points)
             typer.echo(f"{photo_id} : situé au tour {k} ({camera.agree} points), depuis {parents}")
             placed[photo_id] = work.anchor(photo_id, camera, found.points, inputs)
         if not new:
@@ -2405,6 +2562,11 @@ def _moved(camera: match.View, view: match.View) -> tuple[float, float]:
         float(np.hypot(camera.x - view.x, camera.y - view.y)),
         abs(float(angle(camera.heading, view.heading))),
     )
+
+
+def _too_far(metres: float, degrees: float) -> bool:
+    """Whether a camera found again stands or turns too far from where it was to be the same."""
+    return metres > CHECK_M or degrees > CHECK_DEG
 
 
 class _Doubt(NamedTuple):
@@ -2433,7 +2595,7 @@ def _inconsistent(
         camera = work.place(me, observed, others, trace).camera
         if camera is None:
             doubts[photo_id] = _Doubt(float("inf"), f"plus située : {trace.verdict}")
-        elif (off := _moved(camera, anchor.view))[0] > CHECK_M or off[1] > CHECK_DEG:
+        elif _too_far(*(off := _moved(camera, anchor.view))):
             doubts[photo_id] = _Doubt(off[0], f"bouge de {off[0]:.1f} m, {off[1]:.1f}°")
     return doubts
 
@@ -2447,58 +2609,196 @@ def _chained_from(results: dict[str, dict], photo_id: str) -> set[str]:
     return found - {photo_id}
 
 
+CHECK_BLOCK_M = 150  # the chaining's check: photos in a block this wide held out together
+CHECK_FOLDS = 5  # the blocks, in this many sets: one held out at a time
+CHECK_HALVINGS = 12  # a photo held out: its rays halved at most this often
+CHECK_FEWEST_RAYS = 8  # one matching still places from this few: left out of the check
+DECOY_M = (30, 150)  # a decoy: a photo confirmed this far from the one it is given for
+CHAIN_CHECK_LEAST = 10  # photos held out and placed again, for the check to tell anything
+CHAIN_CHECK_WRONG = 0.1  # of them, at most this share off by more than CHECK_M or CHECK_DEG
+
+
+def _check_fold(x: float, y: float) -> int:
+    """The set a camera's block falls in (see CHECK_BLOCK_M, CHECK_FOLDS)."""
+    return hash((int(x // CHECK_BLOCK_M), int(y // CHECK_BLOCK_M))) % CHECK_FOLDS
+
+
+def _degraded(
+    observed: match.Observed, where: match.Where, rng: np.random.Generator
+) -> match.Observed | None:
+    """A photo placed against today made like those chaining has to place: its rays drawn at
+    random and halved until matching alone no longer places it (at most CHECK_HALVINGS
+    times); none if it still does from CHECK_FEWEST_RAYS rays or fewer."""
+    rays = observed.rays
+    for _ in range(CHECK_HALVINGS + 1):
+        cut = replace(observed, rays=rays)
+        if match.place(cut, where, match.Trace()).camera is None:
+            return cut
+        if len(rays.keys) <= CHECK_FEWEST_RAYS:
+            return None
+        rays = _rays_at(rays, np.sort(rng.permutation(len(rays.keys))[: len(rays.keys) // 2]))
+    return None
+
+
+def _replay(
+    work: _Chaining,
+    held: dict[str, match.Observed],
+    decoys: dict[str, tuple[match.Observed, str]],
+) -> _Chaining:
+    """Chaining with confirmed photos held out of round 0: each `held` observed as cut (see
+    _degraded), each decoy as cut and given for being where another held photo stands
+    (`decoys`: its cut observation and that photo). What was read is shared with `work`."""
+    replay = shallow(work)
+    replay.cut = held | {d: seen for d, (seen, _) in decoys.items()}
+    replay.round_zero = {k: a for k, a in work.round_zero.items() if k not in replay.cut}
+    replay.where = work.where | {
+        d: replace(work.where[as_], sights=()) for d, (_, as_) in decoys.items()
+    }
+    return replay
+
+
+def _off_row(camera: match.View, truth: match.View) -> dict:
+    """How far a camera found again stands and turns from the truth, and whether too far."""
+    metres, degrees = _moved(camera, truth)
+    return {"off": [round(metres, 2), round(degrees, 1)], "wrong": _too_far(metres, degrees)}
+
+
+def _camera_row(view: match.View) -> list[float]:
+    """A camera as the check keeps it: east, north (metres), heading and width (degrees)."""
+    return [round(view.x, 2), round(view.y, 2), round(view.heading, 1), round(view.fov, 1)]
+
+
+class _Gate(NamedTuple):
+    passed: bool
+    wanting: list[str]
+    back: int  # photos held out and placed again
+    wrong: int  # of them, too far
+    fooled: int  # decoys taken
+
+
+def _check_passed(rows: list[dict]) -> _Gate:
+    """Whether the chaining's check passes, and what it lacks: enough photos held out placed
+    again (fewer tell nothing), few of them off, no decoy taken."""
+    back = [r for r in rows if r["kind"] == "vérité" and "off" in r]
+    wrong = sum(1 for r in back if r["wrong"])
+    fooled = sum(1 for r in rows if r["kind"] == "leurre" and r.get("wrong"))
+    wanting = [
+        need
+        for met, need in [
+            (len(back) >= CHAIN_CHECK_LEAST, f"au moins {CHAIN_CHECK_LEAST} photos revenues"),
+            (wrong <= CHAIN_CHECK_WRONG * len(back), f"au plus {CHAIN_CHECK_WRONG:.0%} fausses"),
+            (fooled == 0, "aucun leurre pris"),
+        ]
+        if not met
+    ]
+    return _Gate(not wanting, wanting, len(back), wrong, fooled)
+
+
+def _by_area(rows: list[dict]) -> dict[str, list[dict]]:
+    """The chaining's check's rows, by area (each its `area`)."""
+    by_area: dict[str, list[dict]] = defaultdict(list)
+    for r in sorted(rows, key=lambda r: r["area"]):
+        by_area[r["area"]].append(r)
+    return dict(by_area)
+
+
 @app.command("chain-check")
 def chain_check(seed: int = 0) -> None:
-    """Contrôle à réponse connue de l'enchaînement. Chaque photo du tour 0 est re-située à
-    partir des seules autres vieilles photos (sans ses propres appariements aux panoramas) et
-    comparée à sa caméra ; puis une photo prise à plus de FAR_M, donnée pour être là, ne doit
-    pas être située. La porte (aucune fausse, à CHECK_M et CHECK_DEG : plus stricte que pour
-    une photo seule, une erreur se propageant) est gardée : `chain` ne part que si elle passe."""
+    """Contrôle à réponse connue de l'enchaînement. Les photos du tour 0 dites justes par
+    l'utilisateur sont ôtées du tour 0 par blocs (CHECK_BLOCK_M, CHECK_FOLDS ensembles), rendues
+    semblables aux photos à enchaîner (leurs rayons réduits jusqu'à ce que les panoramas seuls
+    ne les situent plus), puis l'enchaînement entier tourne sans elles : chacune revenue est
+    comparée à sa place (juste à CHECK_M et CHECK_DEG). Un leurre par photo : une autre photo
+    confirmée à DECOY_M de là, donnée pour être à sa place, ne doit pas y être située. La porte
+    (assez de photos revenues, peu de fausses, aucun leurre pris), par quartier, est la
+    confiance des photos enchaînées (lue par la liste des photos placées) : elle n'arrête rien."""
     work = _Chaining()
     rng = np.random.default_rng(seed)
-    places = {me.id: np.array(work.where[me.id].around) for me in work.walk}
-    rows = []
-    for photo_id, truth in sorted(work.round_zero.items()):
-        me = work.by_id[photo_id]
-        others = work.anchors(me, work.round_zero)
-        if not others or (observed := work.observed(me)) is None:
-            continue
-        trace = match.Trace()
-        found = work.place(me, _bare(observed), others, trace)
-        row = {"photo": photo_id, "kind": "seule", "anchors": len(others), "verdict": trace.verdict}
-        if found.camera is not None:
-            metres, degrees = _moved(found.camera, truth.view)
-            row["off"] = [round(metres, 2), round(degrees, 1)]
-            row["wrong"] = metres > CHECK_M or degrees > CHECK_DEG
-        rows.append(row)
-        far = [o for o, at in places.items() if np.hypot(*(at - places[photo_id])) >= FAR_M]
-        decoy = work.by_id[far[rng.integers(len(far))]] if far else None
-        if decoy is not None and (seen := work.observed(decoy)) is not None:
-            trace = match.Trace()
-            where = replace(work.where[photo_id], sights=())
-            fooled = work.place(decoy, _bare(seen), others, trace, where).camera is not None
-            rows.append(
-                {
-                    "photo": decoy.id,
-                    "kind": "leurre",
-                    "as": photo_id,
-                    "wrong": fooled,
-                    "verdict": trace.verdict,
-                }
-            )
-    wrong = sum(1 for r in rows if r.get("wrong"))
-    alone = [r for r in rows if r["kind"] == "seule"]
-    placed_ = [r for r in alone if "off" in r]
-    passed = wrong == 0
-    write_json(CHAIN_CHECK, {"setup": work.key, "passed": passed, "rows": rows})
-    typer.echo(
-        f"re-situées par les seules autres : {len(placed_)} sur {len(alone)} "
-        f"(dont fausses : {sum(1 for r in placed_ if r['wrong'])}) ; "
-        f"leurres situés : {sum(1 for r in rows if r['kind'] == 'leurre' and r['wrong'])} "
-        f"sur {len(rows) - len(alone)} ; porte {'passée' if passed else 'NON passée'}"
+    truths = sorted(  # placed against today: the chaining is not checked against its own
+        k
+        for k in work.round_zero
+        if k not in work.kept_chained and work.judged.holds(k, asdict(work.situated[k]))
     )
-    for r in placed_:
-        typer.echo(f"  {r['photo']} : {r['off'][0]} m, {r['off'][1]}° ({r['anchors']} ancres)")
+    at = {k: np.array([work.round_zero[k].view.x, work.round_zero[k].view.y]) for k in truths}
+    area = {k: _area_of(tuple(at[k])) for k in truths}
+    cuts: dict[str, match.Observed | None] = {}  # each photo's, the same in every role
+
+    def cut(photo_id: str) -> match.Observed | None:
+        if photo_id not in cuts:
+            seen = work.observed(work.by_id[photo_id])
+            cuts[photo_id] = seen and _degraded(seen, work.where[photo_id], rng)
+        return cuts[photo_id]
+
+    rows: list[dict] = []
+    for fold in range(CHECK_FOLDS):
+        held: dict[str, match.Observed] = {}
+        for k in (k for k in truths if _check_fold(*at[k]) == fold):
+            if (seen := cut(k)) is None:
+                rows.append(
+                    {
+                        "photo": k,
+                        "kind": "vérité",
+                        "fold": fold,
+                        "area": area[k],
+                        "why": "hors test",
+                    }
+                )
+            else:
+                held[k] = seen
+        decoys: dict[str, tuple[match.Observed, str]] = {}
+        for k in held:
+            near = [
+                o
+                for o in truths
+                if o not in held
+                and o not in decoys
+                and DECOY_M[0] <= np.hypot(*(at[o] - at[k])) <= DECOY_M[1]
+            ]
+            for d in rng.permutation(near):  # the first that can be cut
+                if (seen := cut(str(d))) is not None:
+                    decoys[str(d)] = (seen, k)
+                    break
+        typer.echo(f"pli {fold} : {len(held)} photos ôtées, {len(decoys)} leurres")
+        if not held:
+            continue
+        replay = _replay(work, held, decoys)
+        results, placed, _, set_aside = _chain_passes(replay)
+        for k, seen in held.items():
+            row = {"photo": k, "kind": "vérité", "fold": fold, "rays": len(seen.rays.keys)}
+            row |= {"area": area[k], "truth": _camera_row(work.round_zero[k].view)}
+            row["lomag"] = k in work.by_lomag  # placed by LoMa-G
+            row["anchors"] = len(replay.anchors(work.by_id[k], replay.round_zero))
+            if k in results:
+                row |= _off_row(placed[k].view, work.round_zero[k].view)
+                row |= {"from": results[k]["from"], "agree": results[k]["situated"]["agree"]}
+                row["camera"] = _camera_row(placed[k].view)
+            else:
+                row["why"] = set_aside.get(k, "pas revenue")
+            rows.append(row)
+        for d, (_, k) in decoys.items():
+            row = {"photo": d, "kind": "leurre", "as": k, "fold": fold}
+            row["area"] = area[k]  # where it is given for being
+            if d in results:
+                row |= _off_row(placed[d].view, work.round_zero[d].view)
+                row["camera"] = _camera_row(placed[d].view)
+            rows.append(row)
+    by_area = _by_area(rows)
+    gates = {a: _check_passed(mine) for a, mine in by_area.items()}
+    areas = {a: gate._asdict() for a, gate in gates.items()}
+    write_json(CHAIN_CHECK, {"setup": work.key, "areas": areas, "rows": rows})
+    write_json(CHECKED_AREAS, _checked_in(work.near_by))  # what the list says of each area: now
+    for a, gate in gates.items():
+        mine = by_area[a]
+        tried = sum(1 for r in mine if r["kind"] == "vérité" and "rays" in r)
+        typer.echo(
+            f"{a} : {tried} photos confirmées testées : {gate.back} revenues (dont fausses : "
+            f"{gate.wrong}) ; leurres pris : {gate.fooled} sur "
+            f"{sum(1 for r in mine if r['kind'] == 'leurre')} ; "
+            + ("passé" if gate.passed else f"pas encore ({', '.join(gate.wanting)})")
+        )
+        for r in mine:
+            if r["kind"] == "vérité" and "off" in r:
+                typer.echo(f"  {r['photo']} : {r['off'][0]} m, {r['off'][1]}° (depuis {r['from']})")
 
 
 @app.command("match-check")
@@ -2987,24 +3287,58 @@ def match_sheet(per_page: int = 10) -> None:
     typer.echo(f"{len(rows)} photos situées ; planches dans {DATA / 'pilot'}/match_sheet_*.jpg")
 
 
-def _chained() -> dict:
-    """What the last chaining found (chains.json), if from the setup as it is now: the photos
-    it `photos` (each its `situated`, a Situated's fields; `round`; the photos it was placed
-    `from`), and the `doubts` (why each)."""
+def _anchoring(placements: dict[str, dict]) -> set[str]:
+    """The photos chaining anchors on among `placements` against today (id: fields, its
+    inputs among them) not turned down: neither proposed (no points) nor set aside by eye."""
+    aside = _set_aside()
+    return {
+        k
+        for k, p in placements.items()
+        if not _is_proposal(p["inputs"]) and (k, p["inputs"]) not in aside
+    }
+
+
+def _chained_wins(judged: "_Judged", photo_id: str, chained: dict, today: dict | None) -> bool:
+    """Whether a photo's chained placement is shown rather than its placement against `today`
+    (none: there is none): the user said yes to it, and not to that one."""
+    return judged.said_yes(photo_id, chained) and not (today and judged.said_yes(photo_id, today))
+
+
+def _chained(scenes: dict, judged: "_Judged", anchors: Set[str]) -> dict:
+    """What the last chaining found (chains.json): the photos it placed from others (`photos`,
+    each its `situated`, a Situated's fields; `round`; the photos it was placed `from`), those
+    still of the photo as it is now (`scenes`; see _found_as_now: others wait for the next
+    chaining, as match's wait for the next match) whose anchors are all still placed (`anchors`:
+    the placements against today now; then the photos kept, in round order), unless said yes to
+    (a yes holds); and the `doubts` (why each). One placed without anchors keeps no points of its
+    own (see _keep_chained): left out."""
     kept = register.load(CHAINS)
-    return kept if kept.get("setup") == _chain_setup() else {}
+    placed_now, photos = set(anchors), {}
+    for k, row in kept.get("photos", {}).items():
+        c = row["situated"]
+        if (
+            _is_chained(c["inputs"])
+            and k in scenes
+            and _exported(k).exists()
+            and _found_as_now(k, c, _inputs(scenes[k], k), judged, marks=False)
+            and (judged.said_yes(k, c) or placed_now.issuperset(row["from"]))
+        ):
+            photos[k] = row
+            placed_now.add(k)
+    return {**kept, "photos": photos}
 
 
 def _with_chained(
-    situated: dict[str, match.Situated], chained: dict, shown: set[str]
+    situated: dict[str, match.Situated], chained: dict, shown: set[str], judged: "_Judged"
 ) -> tuple[dict[str, match.Situated], dict[str, dict]]:
     """The photos `shown` placed against today (round 0) or else by the last chaining, and
     each one's round and the photos it was placed `from`: a placement against today wins over
-    a chaining made before it."""
+    a chaining, unless the user said yes to the chained one only (see _chained_wins)."""
     placed = {k: m for k, m in situated.items() if k in shown}
     rounds = {k: {"round": 0, "from": []} for k in placed}
     for k, row in chained.get("photos", {}).items():
-        if k in shown and k not in placed:
+        today = asdict(placed[k]) if k in placed else None
+        if k in shown and (today is None or _chained_wins(judged, k, row["situated"], today)):
             placed[k] = match.Situated(**row["situated"])
             rounds[k] = {"round": row["round"], "from": row["from"]}
     return placed, rounds
@@ -3260,10 +3594,11 @@ def _sure_panoramas() -> tuple[set[str], set[str]]:
 
 def _placed_photos(write: bool = False, answering: tuple | None = None) -> dict[str, placed.Placed]:
     """The photos placed now (see placed.build): the placing page's answers on the image each
-    has now; match's placements of each photo as it is now (see _found_as_now), and the yes
-    given to cameras matching turned down (as _situated), each with the user's word, whether
-    its matcher passes the check in the area its camera stands in, its landmarks' state (on
-    that image). `write`: kept in PLACED_PHOTOS too, when changed; `answering`: the placing
+    has now; match's placements of each photo as it is now (see _found_as_now), the yes
+    given to cameras matching turned down (as _situated), and the last chaining's placements of
+    the photos match did not place (from anchors: see _chained), each with the user's word,
+    whether its method passes the check in the area its camera stands in, its landmarks' state
+    (on that image). `write`: kept in PLACED_PHOTOS too, when changed; `answering`: the placing
     page's answers, already read (see _placing_answers)."""
     _, answers, far = answering or _placing_answers()
     scenes, judged, checked = _scenes_now(), _Judged(), register.load(CHECKED_AREAS)
@@ -3279,14 +3614,17 @@ def _placed_photos(write: bool = False, answering: tuple | None = None) -> dict[
         mark, marked_on = marks.get(k, (None, None))
         if _photo_of(m["inputs"]) != _photo_part(k):  # placed before these marks: not on them
             mark = None
-        area = checked.get(_area_of((m["x"], m["y"])), [])
+        chained = _is_chained(m["inputs"])
+        source = placed.CHAINED if chained else placed.MATCHED
+        method = source if chained else (m.get("matcher") or DISK)
         return placed.Matched(
             m,
             said and said["verdict"],
             image,
-            (m.get("matcher") or DISK) in area,
+            method in checked.get(_area_of((m["x"], m["y"])), []),
             mark if marked_on == image else None,
             unsure(k, m),
+            source,
         )
 
     matched = {
@@ -3299,6 +3637,11 @@ def _placed_photos(write: bool = False, answering: tuple | None = None) -> dict[
     for k, p in _proposed_now(scenes, judged, marks=False).items():
         if judged.said_yes(k, p) and not (k in matched and matched[k].verdict == "yes"):
             matched[k] = weighed(k, p)  # the user's yes wins over a placement not judged
+    anchors = _anchoring({k: m.placement for k, m in matched.items() if m.verdict in (None, "yes")})
+    for k, row in _chained(scenes, judged, anchors)["photos"].items():
+        c = row["situated"]  # where match has none as now, or this one is said yes to
+        if k not in matched or _chained_wins(judged, k, c, matched[k].placement):
+            matched[k] = weighed(k, c)
     found = placed.build(_on_image_now(answers), far, matched, _registrations)
     rows = {k: asdict(p) for k, p in found.items()}
     if write and rows != register.load(PLACED_PHOTOS):
@@ -3568,8 +3911,10 @@ def confirm_placed(port: int = 8768, open_browser: bool = True) -> None:
     today = then(date.today().year)
     walls = _ViewWalls(near_by, fixed, today.blocks)
     by_id = {p.id: p for p in near_by}
-    chained = _chained()
-    situated, rounds = _with_chained(_situated(marks=False), chained, set(titles))  # as shown
+    shown_now, judged_now = _situated(marks=False), _Judged()
+    anchors = _anchoring({k: asdict(m) for k, m in shown_now.items()})
+    chained = _chained(_scenes_now(), judged_now, anchors)
+    situated, rounds = _with_chained(shown_now, chained, set(titles), judged_now)  # as shown
     for k, why in chained.get("doubts", {}).items():
         if k in rounds:
             rounds[k]["doubt"] = why
@@ -3858,7 +4203,7 @@ def carry_placed() -> None:
     (data/pilot/carried.json) ; seules les photos répondues depuis la dernière fois sont
     refaites. Puis, pour les photos posées sur les murs chez elles, les copies aussi
     (data/pilot/carried_standing.json)."""
-    held = _shown_in_3d()  # placed by hand or by match, on the image each has now
+    held = _shown_in_3d()  # placed by hand, by match or by chaining, on the image each has now
     with closing(db.connect(DB_PATH)) as conn:
         pictures = _lined_up(panoramas.load(conn))  # refused when tilts were measured otherwise
     spheres = {p.id: p for p in _panoramas(pictures, lambda x, y: 0.0)}
@@ -4792,7 +5137,7 @@ NIGHT_STEPS = (  # each in its own process (one model in memory at a time), in t
     ("reperes-proposer", "--write"),
     *(("match-check", "--perimes", "--matcher", m) for m in MATCHERS),
     ("match",),
-    ("porter",),  # before chaining, which the hour cuts first: only the confirmation reads it
+    ("porter",),  # before chaining, which the hour cuts first: chained photos carried a night late
     ("chain-check",),
     ("chain",),
 )
