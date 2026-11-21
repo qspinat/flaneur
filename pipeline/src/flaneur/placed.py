@@ -26,8 +26,8 @@ class Placed:
     """A photo placed: how sure (`status`), by whom (`source`: "page", MATCHED, CHAINED), its
     registration in a panorama as the placing page writes them (none: on the map only), the
     image it was placed on (`inputs`, its hash), shown the other way round (`flipped`); for one
-    placed automatically and not seen yet, whether its method (its matcher, or the chaining)
-    does not pass the check in its area yet (`unchecked_area`),
+    placed automatically and not seen yet (match's: a chained one is listed once said yes to),
+    whether its matcher does not pass the check in its area yet (`unchecked_area`),
     whether it rests on landmarks only proposed (`proposed_marks`) and on panoramas nothing
     checks (`unsure_sources`: see TRUSTED_SHARE); the camera where the photographer stood, where
     the 3D walk lays it on the walls (`standing`, see registration.standing_to_json)."""
