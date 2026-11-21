@@ -84,3 +84,50 @@ def test_a_no_comes_back_with_its_reason():
     queue = {p["id"]: p for p in confirming.queue(placed, verdicts)}
 
     assert (queue["a"]["reason"], queue["b"]["reason"]) == ("mirrored", None)
+
+
+def test_the_last_mark_on_a_pair_holds_for_its_placement_only(tmp_path):
+    path = tmp_path / "wrong_pairs.jsonl"
+    confirming.mark_pair(path, "pm:1", "abc", 3, True)
+    confirming.mark_pair(path, "pm:1", "abc", 5, True)
+    confirming.mark_pair(path, "pm:1", "abc", 5, False)  # taken back
+    confirming.mark_pair(path, "pm:1", "other", 7, True)  # found again from other inputs
+
+    assert confirming.marked(path) == {("pm:1", "abc"): {3}, ("pm:1", "other"): {7}}
+
+
+@pytest.mark.parametrize(
+    ("index", "wrong"), [(-1, True), (1.5, True), (True, True), ("3", True), (None, True), (3, "1")]
+)
+def test_a_mark_on_no_pair_or_neither_wrong_nor_right_is_refused(tmp_path, index, wrong):
+    with pytest.raises(ValueError):
+        confirming.mark_pair(tmp_path / "wrong_pairs.jsonl", "pm:1", "abc", index, wrong)
+
+
+def test_the_pairs_shown_say_which_are_marked_wrong():
+    scene = {"pairs": [{"index": 3}, {"index": 4}], "plan": {}}
+
+    shown = confirming.with_marks(scene, {3})
+
+    assert [p["wrong"] for p in shown["pairs"]] == [True, False]
+    assert confirming.with_marks({"pairs": None}, {3}) == {"pairs": None}
+
+
+def test_a_pair_marked_on_the_page_comes_back_marked_and_judges_nothing(tmp_path, ask):
+    placed = [{"id": "pm:1", "inputs": "abc", "round": 0}]
+    anchors, marks = tmp_path / "anchors.jsonl", tmp_path / "wrong_pairs.jsonl"
+    scene = {"pairs": [{"index": 3}, {"index": 4}]}
+    server = confirming.serve(
+        placed, anchors, marks, dict, lambda *a, **k: None, lambda *a, **k: scene, 0
+    )
+
+    (marked, _), (refused, _), (_, shown) = ask(
+        server,
+        ("POST", "/api/pair", {"photo_id": "pm:1", "index": 4, "wrong": True}),
+        ("POST", "/api/pair", {"photo_id": "pm:2", "index": 4, "wrong": True}),
+        ("GET", "/scene/pm:1"),
+    )
+
+    assert (marked, refused) == (200, 400)
+    assert [p["wrong"] for p in json.loads(shown)["pairs"]] == [False, True]
+    assert not anchors.exists()  # a mark is not a verdict

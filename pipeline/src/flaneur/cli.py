@@ -918,6 +918,7 @@ PROPOSE_AGREE = 50
 PROPOSAL = "proposed"  # a proposed camera's "matcher": PROPOSAL-<the camera's fingerprint>
 PROPOSED_ABOVE_M = 1.6  # a proposed camera's height above the street when no placement gives one
 ANCHORS = DATA / "overrides" / "anchors.jsonl"  # the user's yes or no to photos placed
+WRONG_PAIRS = DATA / "overrides" / "wrong_pairs.jsonl"  # pairs the user marked wrong
 MATCH_RADIUS_M = 60  # a placement from a caption can be 25 m off
 MATCH_PANORAMAS = 16  # ranked by a quick first pass, the best views matched in full
 # every panorama a photo's match may be found from stands this near its caption's place: those
@@ -1726,11 +1727,15 @@ def _offer_of(
     """A placement of match, as the placing page opens it (see placing.Sources.offer): in the
     first of its panoramas (see _sources_first) where it has enough pairs of its own (see
     bridging.paired), up to OFFERED of them, the most spread, the photo's pixels at `size` (the
-    page's image of it); its camera as the starting pin. None without its points (kept for
-    other inputs) or pairs."""
+    page's image of it), none the user marked wrong; its camera as the starting pin. None
+    without its points (kept for other inputs) or pairs."""
     if (found := _found_from(photo_id, kept)) is None:
         return None
     m, points, observed = found
+    wrong = confirming.marked(WRONG_PAIRS).get((photo_id, kept["inputs"]), set())
+    if wrong:  # marked wrong on the confirmation page: never laid again
+        right = np.array([i not in wrong for i in range(len(points.pixels))], bool)
+        points = match.Points(points.pixels[right], points.world[right], points.seen[right])
     for sphere in _sources_first(points, by_id, m, fixed):
         if (paired := bridging.paired(points, observed, sphere, size)) is None:
             continue
@@ -4129,7 +4134,7 @@ def confirm_placed(port: int = 8768, open_browser: bool = True) -> None:
 
     _serve_page(
         lambda: confirming.serve(
-            placed, ANCHORS, functools.partial(_said_on, placed), frame, scene, port
+            placed, ANCHORS, WRONG_PAIRS, functools.partial(_said_on, placed), frame, scene, port
         ),
         f"photos situées ({len(placed)})",
         port,

@@ -12,7 +12,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, unquote
 
 from flaneur import localpage
-from flaneur.sources import append_row, seconds_taken
+from flaneur.sources import append_row, rows, seconds_taken
 
 PAGE = Path(__file__).with_name("confirming_page.html")
 VERDICTS = ("yes", "near", "no")
@@ -55,6 +55,36 @@ def record(
     return append_row(path, row)
 
 
+def mark_pair(path: Path, photo_id: str, inputs: str, index: object, wrong: object) -> dict:
+    """Append the user's mark on a pair shown (`index`: its row among the points of the
+    placement made from `inputs`): wrong (the two details are not the same thing), or that mark
+    taken back."""
+    if not isinstance(index, int) or isinstance(index, bool) or index < 0:
+        raise ValueError("une paire est désignée par son numéro de point")
+    if not isinstance(wrong, bool):
+        raise ValueError("une paire est marquée fausse ou ne l'est plus (vrai ou faux)")
+    return append_row(
+        path, {"photo_id": photo_id, "inputs": inputs, "index": index, "wrong": wrong}
+    )
+
+
+def marked(path: Path) -> dict[tuple[str, str], set[int]]:
+    """The pairs marked wrong, by placement (photo, inputs): the last mark on each holds."""
+    last = {(r["photo_id"], r["inputs"], r["index"]): r["wrong"] for r in rows(path)}
+    found: dict[tuple[str, str], set[int]] = {}
+    for (photo_id, inputs, index), wrong in last.items():
+        if wrong:
+            found.setdefault((photo_id, inputs), set()).add(index)
+    return found
+
+
+def with_marks(scene: dict, wrong: set[int]) -> dict:
+    """A scene's pairs, each saying whether it is marked wrong (`wrong`: their indices)."""
+    if scene.get("pairs") is None:
+        return scene
+    return {**scene, "pairs": [{**p, "wrong": p["index"] in wrong} for p in scene["pairs"]]}
+
+
 def queue(placed: list[dict], verdicts: dict[str, dict]) -> list[dict]:
     """The photos placed (`placed`: id, title, round, inputs, `doubt` if the others disagree
     with it, `by` the matcher that found it, why to `check` it closely…), those the user has not
@@ -78,6 +108,7 @@ def queue(placed: list[dict], verdicts: dict[str, dict]) -> list[dict]:
 def serve(
     placed: list[dict],
     path: Path,
+    marks: Path,
     verdicts: Callable[[], dict[str, dict]],
     frame: Callable[..., bytes | None],
     scene: Callable[..., dict | None],
@@ -89,7 +120,8 @@ def serve(
     cannot be drawn. `scene(photo_id)`: what the page draws over them (the pairs its camera was
     found from, the plan around it); None when there is none. Asked with `?from=source`, both
     are given `source=True`: today's view from the panorama the camera was found from, not the
-    one next to it."""
+    one next to it. The pairs it gives say which the user marked wrong (`marks`, read anew:
+    see mark_pair)."""
     by_id = {photo["id"]: photo for photo in placed}
 
     class Handler(localpage.Handler):
@@ -118,12 +150,15 @@ def serve(
                 and parts[1] in by_id
                 and (found := scene(parts[1], source=source)) is not None
             ):
-                self._json(found)
+                photo = by_id[parts[1]]
+                self._json(
+                    with_marks(found, marked(marks).get((photo["id"], photo["inputs"]), set()))
+                )
             else:
                 self._send(404, b"not found", "text/plain")
 
         def do_POST(self) -> None:  # noqa: N802
-            if self.path != "/api/verdict":
+            if self.path not in ("/api/verdict", "/api/pair"):
                 self._send(404, b"not found", "text/plain")
                 return
             try:
@@ -131,6 +166,17 @@ def serve(
                 photo = by_id.get(body.get("photo_id"))
                 if photo is None:
                     raise ValueError(f"photo inconnue : {body.get('photo_id')}")
+                if self.path == "/api/pair":
+                    self._json(
+                        mark_pair(
+                            marks,
+                            photo["id"],
+                            photo["inputs"],
+                            body.get("index"),
+                            body.get("wrong"),
+                        )
+                    )
+                    return
                 self._json(
                     record(
                         path,

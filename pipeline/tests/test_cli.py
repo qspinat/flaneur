@@ -3264,3 +3264,23 @@ def test_near_photos_come_first_on_the_placing_page_and_yes_ones_no_longer_come_
     ahead = cli._placing_ahead({"n"}, {"c": {}, "n": {}})
 
     assert ahead == {"n": "près", "c": "portée"}
+
+
+def test_points_marked_wrong_are_not_offered_on_the_placing_page(tmp_path, monkeypatch):
+    m = cli._situation(_kept())
+    points = cli.match.Points(
+        np.array([[1.0, 1.0], [2.0, 2.0], [3.0, 3.0]]),
+        np.zeros((3, 3)),
+        np.array([frozenset({"p"})] * 3, dtype=object),
+    )
+    monkeypatch.setattr(cli, "_found_from", lambda photo_id, kept: (m, points, "observed"))
+    monkeypatch.setattr(cli, "_sources_first", lambda *a: [SimpleNamespace(id="p")])
+    monkeypatch.setattr(cli, "WRONG_PAIRS", tmp_path / "wrong_pairs.jsonl")
+    cli.confirming.mark_pair(cli.WRONG_PAIRS, "pm:1", "c:img", 1, True)
+    cli.confirming.mark_pair(cli.WRONG_PAIRS, "pm:1", "c:old", 0, True)  # another placement's
+    given = []
+    monkeypatch.setattr(cli.bridging, "paired", lambda pts, *a: given.append(pts.pixels) or None)
+
+    cli._offer_of("pm:1", _kept(inputs="c:img"), {}, set(), (600, 800))
+
+    assert given[0].tolist() == [[1.0, 1.0], [3.0, 3.0]]
