@@ -8,9 +8,11 @@ import cv2
 import numpy as np
 import pytest
 import typer
+from shapely.geometry import Point
 from typer.testing import CliRunner
 
 from flaneur import (
+    bridging,
     chain,
     cli,
     confirming,
@@ -3174,3 +3176,49 @@ def test_only_chained_placements_said_yes_to_are_listed_the_others_proposed(tmp_
     scenes = dict.fromkeys(photos, "s")
 
     assert set(cli._chained_said_yes(scenes, cli._Judged())) == {"yes"}  # anchors gone: a yes holds
+
+
+def _paired_at(panorama: str, n: int) -> bridging.Paired:
+    photo_px = np.column_stack([np.arange(n) * 10.0, np.zeros(n)])
+    return bridging.Paired(panorama, registration.ViewOf(140.0), photo_px, photo_px + 5.0)
+
+
+def test_a_placement_said_near_is_offered_with_its_most_spread_pairs(monkeypatch):
+    m = cli._situation(_kept())
+    monkeypatch.setattr(cli, "_found_from", lambda photo_id, kept: (m, "points", "observed"))
+    spheres = [SimpleNamespace(id="few"), SimpleNamespace(id="many")]
+    monkeypatch.setattr(cli, "_sources_first", lambda points, by_id, m, fixed: spheres)
+    found = {"few": None, "many": _paired_at("many", 40)}  # too few pairs in the first
+    monkeypatch.setattr(cli.bridging, "paired", lambda points, obs, sphere, size: found[sphere.id])
+
+    offer = cli._offer_of("pm:1", _kept(), {}, set(), (600, 800))
+
+    assert offer["panorama"] == "many" and offer["view"]["heading"] == 140.0
+    assert len(offer["pairs"]["photo_px"]) == cli.OFFERED == len(offer["pairs"]["view_px"])
+    assert [0.0, 0.0] in offer["pairs"]["photo_px"] and [390.0, 0.0] in offer["pairs"]["photo_px"]
+    assert (offer["lon"], offer["lat"]) == pytest.approx(cli.to_degrees(Point(m.x, m.y)).coords[0])
+    json.dumps(offer, allow_nan=False)  # nothing the page could not read
+
+
+def test_a_placement_without_its_points_or_pairs_is_not_offered(monkeypatch):
+    monkeypatch.setattr(cli, "_found_from", lambda photo_id, kept: None)  # kept for other inputs
+
+    assert cli._offer_of("pm:1", _kept(), {}, set(), (600, 800)) is None
+
+
+def test_only_match_s_placements_said_near_are_offered(tmp_path, monkeypatch):
+    said = [("near", "near", "i"), ("yes", "yes", "i"), ("no", "no", "i")]
+    said += [("proposed", "near", "i:proposed-ab12cd34"), ("chained", "near", "i:from-ab12cd34")]
+    (tmp_path / "anchors.jsonl").write_text(
+        "".join(json.dumps({"photo_id": k, "verdict": v, "inputs": i}) + "\n" for k, v, i in said)
+    )
+    monkeypatch.setattr(cli, "ANCHORS", tmp_path / "anchors.jsonl")
+    kept = {k: _kept(inputs=i) for k, _, i in said} | {"unjudged": _kept()}
+
+    assert cli._said_near(kept, cli._Judged()) == {"near"}
+
+
+def test_near_photos_come_first_on_the_placing_page_and_yes_ones_no_longer_come_back():
+    ahead = cli._placing_ahead({"n"}, {"c": {}, "n": {}})
+
+    assert ahead == {"n": "près : à corriger", "c": "portée"}
