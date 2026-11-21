@@ -394,19 +394,27 @@ function sayMarked(pairs) {
 // the pair chosen marked wrong (the two details are not the same thing), or that mark taken
 // back: kept at once, for this placement (both of its views show the same points); never a
 // verdict, the photo stays shown and the pair chosen
+let marking = false;  // a mark on its way: F again waits for it (it would send the same)
 async function markChosen() {
-  const p = photos[at], n = chosen;
-  if (view !== 'pairs' || n == null) return;
-  const scene = await sceneOf(p), pair = scene?.pairs?.[n];
+  const p = photos[at], n = chosen, source = fromSource;
+  if (view !== 'pairs' || n == null || marking) return;
+  const scene = await sceneOf(p, source), pair = scene?.pairs?.[n];
   if (!pair) return;
-  const wrong = !pair.wrong;
-  if (!(await post('/api/pair', { photo_id: p.id, index: pair.index, wrong }))) return;
-  const mark = (s) => s?.pairs?.forEach((q) => { if (q.index === pair.index) q.wrong = wrong; });
+  const wrong = !pair.wrong, same = (q) => q.point[0] === pair.point[0] && q.point[1] === pair.point[1];
+  marking = true;
+  try {
+    if (!(await post('/api/pair', { photo_id: p.id, index: pair.index, wrong, source }))) return;
+  } finally { marking = false; }
+  // a mark names a point: every pair of it, in either view, is marked alike
+  const mark = (s) => s?.pairs?.forEach((q) => { if (same(q)) q.wrong = wrong; });
   mark(scene);
-  scenes[p.id + viewQuery(!fromSource)]?.then(mark);
-  if (photos[at] !== p || view !== 'pairs') return;
-  document.querySelectorAll(`#pictures [data-n="${n}"]`).forEach((e) => e.classList.toggle('wrong', wrong));
-  document.querySelector(`.loupe[data-n="${n}"]`)?.setAttribute('aria-label', LOUPE(n) + (wrong ? ', marquée fausse' : ''));
+  scenes[p.id + viewQuery(!source)]?.then(mark);
+  if (photos[at] !== p || view !== 'pairs' || fromSource !== source) return;  // drawn anew since
+  scene.pairs.forEach((q, i) => {
+    if (!same(q)) return;
+    document.querySelectorAll(`#pictures [data-n="${i}"]`).forEach((e) => e.classList.toggle('wrong', wrong));
+    document.querySelector(`.loupe[data-n="${i}"]`)?.setAttribute('aria-label', LOUPE(i) + (wrong ? ', marquée fausse' : ''));
+  });
   sayMarked(scene.pairs);
 }
 // one pair lit: its two ends ringed, joined by a line, the others dimmed (none: all plain)

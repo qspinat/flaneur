@@ -1696,10 +1696,15 @@ def _offers(
     set right), as the placing page opens them (see _offer_of): those made on the photo's image
     as it is now (its points' pixels are of it), with pairs of their own."""
     try:
-        kept, judged, wrong = _matches(), _Judged(), confirming.marked(WRONG_PAIRS)
+        kept, judged = _matches(), _Judged()
     except Exception as error:  # a file written wrong: no offer, the queue goes on
         typer.echo(f"pas de paires proposées ({error})", err=True)
         return {}
+    try:
+        wrong = confirming.marked(WRONG_PAIRS)
+    except (ValueError, KeyError, TypeError) as error:  # as the confirmation page: none marked
+        typer.echo(f"paires marquées fausses illisibles ({error})", err=True)
+        wrong = {}
     offers = {}
     for k in sorted(photos):
         m = kept.get(k)
@@ -1737,7 +1742,8 @@ def _offer_of(
         return None
     m, points, observed = found
     if wrong:  # marked so on the confirmation page: never laid again
-        right = np.array([tuple(xy) not in wrong for xy in np.round(points.pixels, 3).tolist()])
+        keys = (confirming.point_key(xy) for xy in points.pixels)
+        right = np.fromiter((k not in wrong for k in keys), bool, len(points.pixels))
         points = match.Points(points.pixels[right], points.world[right], points.seen[right])
     for sphere in _sources_first(points, by_id, m, fixed):
         if (paired := bridging.paired(points, observed, sphere, size)) is None:
@@ -1791,7 +1797,7 @@ def _pairs_shown(
     return [
         {
             "index": k,
-            "point": [round(float(v), 3) for v in points.pixels[k]],  # as kept: a mark's key
+            "point": list(confirming.point_key(points.pixels[k])),  # a mark's key
             "old": [round(float(v), 2) for v in old[k]],
             "today": [round(float(v), 2) for v in today[k]],
             "matched": bool(here[k]),

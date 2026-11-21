@@ -99,13 +99,15 @@ def test_the_last_mark_on_a_pair_holds_for_its_placement_only(tmp_path):
     }
 
 
-@pytest.mark.parametrize(
-    ("point", "wrong"),
-    [([1.0], True), ([1.0, "2"], True), (None, True), ([1.0, float("nan")], True), ([1, 2], "1")],
-)
-def test_a_mark_on_no_point_or_neither_wrong_nor_right_is_refused(tmp_path, point, wrong):
+@pytest.mark.parametrize("wrong", ["1", 1, None])
+def test_a_mark_neither_wrong_nor_right_is_refused(tmp_path, wrong):
     with pytest.raises(ValueError):
-        confirming.mark_pair(tmp_path / "wrong_pairs.jsonl", "pm:1", "abc", point, wrong)
+        confirming.mark_pair(tmp_path / "wrong_pairs.jsonl", "pm:1", "abc", (1.0, 2.0), wrong)
+
+
+def test_a_points_key_is_its_pixel_to_the_thousandth_the_same_wherever_made():
+    assert confirming.point_key([84.9015, 2.0]) == confirming.point_key((84.9015, 2.0))
+    assert confirming.point_key([1.00049, 2.0]) == (1.0, 2.0)
 
 
 def test_the_pairs_shown_say_which_are_marked_wrong():
@@ -121,19 +123,28 @@ def test_a_pair_marked_on_the_page_comes_back_marked_and_judges_nothing(tmp_path
     placed = [{"id": "pm:1", "inputs": "abc", "round": 0}]
     anchors, marks = tmp_path / "anchors.jsonl", tmp_path / "wrong_pairs.jsonl"
     scene = {"pairs": [{"index": 3, "point": [1.0, 2.0]}, {"index": 4, "point": [3.0, 4.0]}]}
+    asked = []
     server = confirming.serve(
-        placed, anchors, marks, dict, lambda *a, **k: None, lambda *a, **k: scene, 0
+        placed,
+        anchors,
+        marks,
+        dict,
+        lambda *a, **k: None,
+        lambda photo_id, source=False: asked.append(source) or scene,
+        0,
     )
 
-    (marked, _), (unshown, _), (unknown, _), (_, shown) = ask(
+    (marked, _), (unshown, _), (unknown, _), (not_a_number, _), (_, shown) = ask(
         server,
-        ("POST", "/api/pair", {"photo_id": "pm:1", "index": 4, "wrong": True}),
+        ("POST", "/api/pair", {"photo_id": "pm:1", "index": 4, "wrong": True, "source": True}),
         ("POST", "/api/pair", {"photo_id": "pm:1", "index": 99, "wrong": True}),  # not shown
         ("POST", "/api/pair", {"photo_id": "pm:2", "index": 4, "wrong": True}),
+        ("POST", "/api/pair", {"photo_id": "pm:1", "index": True, "wrong": True}),
         ("GET", "/scene/pm:1"),
     )
 
-    assert (marked, unshown, unknown) == (200, 400, 400)
+    assert (marked, unshown, unknown, not_a_number) == (200, 400, 400, 400)
+    assert asked[0] is True  # only the view the page showed
     assert [p["wrong"] for p in json.loads(shown)["pairs"]] == [False, True]
     assert confirming.marked(marks) == {("pm:1", "abc"): {(3.0, 4.0)}}  # by its point
     assert not anchors.exists()  # a mark is not a verdict

@@ -3300,6 +3300,20 @@ def test_the_marks_on_a_placement_go_to_its_offer_only(tmp_path, monkeypatch):
     assert given == {"pm:1": {(2.0, 2.0)}}
 
 
+def test_a_marks_file_written_wrong_leaves_the_offers_whole(tmp_path, monkeypatch):
+    cli.WRONG_PAIRS.parent.mkdir(parents=True, exist_ok=True)
+    cli.WRONG_PAIRS.write_text("{not json\n")
+    cli.confirming.record(cli.ANCHORS, "pm:1", "near", "c:img", 1)
+    monkeypatch.setattr(cli, "_matches", lambda: {"pm:1": _kept(inputs="c:img")})
+    image = tmp_path / "photo.jpg"
+    Image.new("RGB", (80, 60)).save(image)
+    monkeypatch.setattr(cli, "_offer_of", lambda *a: {"panorama": "p"})
+
+    assert cli._offers({"pm:1": {"image": image, "inputs": "img"}}, {}, set()) == {
+        "pm:1": {"panorama": "p"}
+    }
+
+
 def test_each_pair_shown_carries_its_point_as_kept(monkeypatch):
     points = cli.match.Points(
         np.array([[10.0, 20.0]]), np.array([[0.0, 5.0, 2.0]]), np.array([frozenset()], dtype=object)

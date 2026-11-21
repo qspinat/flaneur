@@ -2,10 +2,14 @@
 // back with F again; the mark shows on its loupe and both its points, is sent for this photo and
 // that pair's point, and is never a verdict (the photo stays shown). Against `flaneur confirmer`
 // running (its writes intercepted here: nothing is kept).
-// Usage: node tests/visual/confirming.mjs [page-url]
+// Usage: node tests/visual/confirming.mjs <page-url> (a trial confirmer: never the live one)
 import { chromium } from 'playwright';
 
-const [url = 'http://127.0.0.1:8768/'] = process.argv.slice(2);
+const [url] = process.argv.slice(2);
+if (!url) {
+  console.error('usage: node tests/visual/confirming.mjs <url of a trial `flaneur confirmer`>');
+  process.exit(2);
+}
 const browser = await chromium.launch();
 const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
 const sent = { pair: [], verdict: 0 };
@@ -35,8 +39,8 @@ const index = await page.evaluate(async () => (await sceneOf(photos[at])).pairs[
 await page.locator('.loupe').nth(1).click();
 await page.keyboard.press('f');
 await page.waitForFunction(() => document.querySelectorAll('.loupe.wrong').length === 1, null, { timeout: 5000 }).catch(() => {});
-check(sent.pair.length === 1 && sent.pair[0].photo_id === shownId && sent.pair[0].index === index && sent.pair[0].wrong === true,
-  `F marks the pair chosen wrong for this photo (${JSON.stringify(sent.pair[0])}, point ${index})`);
+check(sent.pair.length === 1 && sent.pair[0].photo_id === shownId && sent.pair[0].index === index && sent.pair[0].wrong === true && sent.pair[0].source === false,
+  `F marks the pair chosen wrong for this photo, in the view shown (${JSON.stringify(sent.pair[0])}, point ${index})`);
 const look = await page.evaluate(() => ({ loupes: document.querySelectorAll('.loupe.wrong').length,
   marks: document.querySelectorAll('#pairs .mark.wrong').length, n: document.querySelector('.loupe.wrong')?.dataset.n,
   help: document.getElementById('pairs-help').textContent, id: photos[at].id }));
