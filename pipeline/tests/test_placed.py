@@ -189,3 +189,12 @@ def test_points_bunched_on_one_part_of_the_photo_still_register_it_whole():
     r = placed.registered(points, observed, [HERE])
 
     assert r is not None and _off_in_view(r, HERE, world, pixels) < 1e-3
+
+
+def test_a_chained_placement_is_listed_as_the_chaining_s_not_seen_yet():
+    chained = placed.Matched({"x": 0.0}, None, "img", False, source=placed.CHAINED)
+
+    found = _build({"x": chained})["x"]
+
+    assert (found.status, found.source) == (placed.AUTOMATIC, "chain")
+    assert found.unchecked_area  # its area's chaining check not passed: said so

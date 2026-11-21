@@ -8,6 +8,7 @@ from typing import NamedTuple
 from flaneur import bridging, match, placing, registration
 
 CHECKED, NEAR, AUTOMATIC = "checked", "near", "automatic"  # said yes or placed by hand; near
+MATCHED, CHAINED = "match", "chain"  # placed against today's panoramas; from old photos placed
 TRUSTED_SHARE = 0.5  # of a placement's sightings by sure panoramas: under it, it says so
 NOTES = ("unchecked_area", "proposed_marks", "unsure_sources")  # what one not seen yet may say
 
@@ -22,7 +23,8 @@ def status_of(verdict: str | None) -> str | None:
 
 @dataclass(frozen=True)
 class Placed:
-    """A photo placed: how sure (`status`), by whom (`source`: "page", "match"), its registration
+    """A photo placed: how sure (`status`), by whom (`source`: "page", MATCHED, CHAINED), its
+    registration
     in a panorama as the placing page writes them (none: on the map only), the image it was
     placed on (`inputs`, its hash), shown the other way round (`flipped`); for one of match not
     seen yet, whether its matcher does not pass the check in its area yet (`unchecked_area`),
@@ -56,10 +58,11 @@ class Registered(NamedTuple):
 
 @dataclass(frozen=True)
 class Matched:
-    """A placement of match as the photo is now, as the list weighs it: as kept (`placement`),
-    the user's word on it (`verdict`, none yet), the photo's image now (its hash), whether its
-    matcher passes the check in its area, its landmarks' marks ("checked", "proposed", none),
-    whether it rests mostly on panoramas nothing checks (see unsure)."""
+    """A placement of match, or of the chaining (`source`), as the photo is now, as the list
+    weighs it: as kept (`placement`), the user's word on it (`verdict`, none yet), the photo's
+    image now (its hash), whether its method passes the check in its area (its matcher's, or the
+    chaining's), its landmarks' marks ("checked", "proposed", none), whether it rests mostly on
+    panoramas nothing checks (see unsure)."""
 
     placement: dict
     verdict: str | None
@@ -67,6 +70,7 @@ class Matched:
     area_checked: bool
     marks: str | None = None
     unsure_sources: bool = False
+    source: str = MATCHED
 
 
 def build(
@@ -95,7 +99,7 @@ def build(
         found[k] = Placed(
             k,
             status,
-            "match",
+            m.source,
             registrations[k].registration,
             m.image,
             unchecked_area=not (seen or m.area_checked),

@@ -2324,7 +2324,7 @@ def test_the_placed_list_is_written_from_the_answers_verdicts_and_matches(monkey
         "SIGHTS": tmp_path / "sights.jsonl",
         "ANCHORS": tmp_path / "anchors.jsonl",
         "_placing_answers": lambda: ({}, {"pa": answer}, set()),
-        "_scenes_now": lambda: {k: "s" for k in ("pm:1", "pm:2", "pm:3", "pm:4", "pp")},
+        "_scenes_now": lambda: {k: "s" for k in ("pm:1", "pm:2", "pm:3", "pm:4", "pp", "pc")},
         "_matches": lambda: {
             "pm:1": _kept(),
             "pm:2": _kept(inputs="before"),
@@ -2343,6 +2343,10 @@ def test_the_placed_list_is_written_from_the_answers_verdicts_and_matches(monkey
         },
         "_kept_store": lambda m, kept: (SimpleNamespace(points=lambda k, i: seen_by.get(k)), "i"),
         "_sure_panoramas": lambda: ({"sure"}, {"sure", "gps"}),  # sure of their pose, known
+        "_chained": lambda: {
+            "photos": {k: {"situated": _kept(inputs="i:from-ab12cd34")} for k in ("pc", "pm:1")}
+        },
+        "_chain_checked": lambda: set(),
     }.items():
         monkeypatch.setattr(cli, name, value)
     seen_by = {"pm:3": _seen_by({"sure"}, {"gps"}), "pm:4": _seen_by({"gps"}, {"gps", "photo:x"})}
@@ -2356,8 +2360,10 @@ def test_the_placed_list_is_written_from_the_answers_verdicts_and_matches(monkey
         "pm:3": ("automatic", "match", True),
         "pm:4": ("automatic", "match", False),  # its marks were made on another crop
         "pp": ("checked", "match", False),
+        "pc": ("automatic", "chain", False),  # pm:1 chained too: match's placement wins
     }
     assert {k for k, p in written.items() if p["unsure_sources"]} == {"pm:4"}  # gps only
+    assert written["pc"]["unchecked_area"]  # the chaining's check not passed in its area
 
 
 def test_only_the_photos_placed_with_a_registration_go_to_3d(monkeypatch):
@@ -3055,7 +3061,7 @@ class _Kept:
         return np.array(self.found[b[0]], int).reshape(-1, 2)
 
 
-def _two_matchers(monkeypatch, lomag: bool) -> cli._Chaining:
+def _two_matchers(monkeypatch) -> cli._Chaining:
     monkeypatch.setattr(cli, "_image", lambda photo_id: "img")
     work = object.__new__(cli._Chaining)
     work.store = _Kept(
@@ -3065,13 +3071,13 @@ def _two_matchers(monkeypatch, lomag: bool) -> cli._Chaining:
         {"me": [[10.5, 10], [50, 50], [10.2, 10]], "L": [[1, 1]] * 3, "D": [[2, 2]]},
         {"L": [[0, 0], [1, 2], [2, 1]]},
     )
-    work.lomag, work.by_lomag = lomag, {"L"} if lomag else set()
+    work.by_lomag = {"L"}
     work._lomag_keypoints, work._disk_keypoints, work._rows_of = {}, {}, {}
     return work
 
 
 def test_a_photo_pairs_with_each_anchor_through_the_matcher_that_placed_it(monkeypatch):
-    work = _two_matchers(monkeypatch, lomag=True)
+    work = _two_matchers(monkeypatch)
     anchor = lambda i: work.anchor(i, None, None, "")  # noqa: E731
     observed = match.Observed(np.zeros((6, 2)), (60, 80), _rays(0))  # 2 DISK, 1 band, 3 LoMa-G
 
@@ -3084,7 +3090,7 @@ def test_a_photo_pairs_with_each_anchor_through_the_matcher_that_placed_it(monke
 
 
 def test_only_an_anchor_lomag_placed_has_its_lomag_keypoints_after_its_disk_ones(monkeypatch):
-    work = _two_matchers(monkeypatch, lomag=True)
+    work = _two_matchers(monkeypatch)
     view = match.View(0.0, 0.0, 30.0, 0.0, 0.5, 60.0)
 
     anchor = work.anchor("me", view, None, "inputs")
@@ -3095,7 +3101,7 @@ def test_only_an_anchor_lomag_placed_has_its_lomag_keypoints_after_its_disk_ones
 
 
 def test_a_photo_only_lomag_observed_has_its_rays_on_its_lomag_keypoints_rows(monkeypatch):
-    work = _two_matchers(monkeypatch, lomag=True)
+    work = _two_matchers(monkeypatch)
     monkeypatch.setattr(cli, "_inputs", lambda scene, photo_id: "now")
     rays = _rays(4)  # on its LoMa-G keypoints 0, 1, 2, and on a band zoomed on a landmark (3)
     lomag_seen = match.Observed(np.zeros((4, 2)), (60, 80), rays, 2)
@@ -3110,3 +3116,25 @@ def test_a_photo_only_lomag_observed_has_its_rays_on_its_lomag_keypoints_rows(mo
     # second); the ray on the band left out
     assert len(seen.pixels) == 5 and seen.size == (60, 80) and seen.views == 2
     assert seen.rays.keys.tolist() == [1, 2 + 1, 1]
+
+
+def test_the_chaining_check_says_for_each_area_whether_it_passes():
+    back = {"kind": "vérité", "off": [0.2, 0.1], "wrong": False}
+    rows = [back | {"area": "cite"}] * 10 + [back | {"area": "saint-severin"}] * 3
+
+    gates = cli._gates_by_area(rows)
+
+    assert gates["cite"].passed and not gates["saint-severin"].passed
+
+
+def test_a_chained_placement_is_trusted_where_the_chaining_check_passed(tmp_path, monkeypatch):
+    monkeypatch.setattr(cli, "CHAIN_CHECK", tmp_path / "check.json")
+    monkeypatch.setattr(cli, "_chain_setup", lambda: "now")
+    gate = lambda passed: {"passed": passed}  # noqa: E731
+    cli.write_json(
+        cli.CHAIN_CHECK, {"setup": "now", "areas": {"cite": gate(True), "x": gate(False)}}
+    )
+
+    assert cli._chain_checked() == {"cite"}
+    cli.write_json(cli.CHAIN_CHECK, {"setup": "before", "areas": {"cite": gate(True)}})
+    assert cli._chain_checked() == set()  # for other code or data: nothing
