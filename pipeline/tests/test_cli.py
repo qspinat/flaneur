@@ -112,7 +112,9 @@ def test_a_chained_photo_keeps_its_points_apart_from_match_s(tmp_path, monkeypat
         where={"b": SimpleNamespace(around=(0.0, 0.0))},
         heights=SimpleNamespace(street=lambda x, y: 0.0),
         then=lambda year: SimpleNamespace(blocks=None),
-        anchor=lambda photo_id, camera, points, inputs: SimpleNamespace(id=photo_id),
+        anchor=lambda photo_id, camera, points, inputs: chain.Anchor(
+            photo_id, camera, None, None, points, inputs
+        ),
         store=SimpleNamespace(),  # match's DISK store: never written by chaining
     )
     for name, value in {
@@ -126,10 +128,13 @@ def test_a_chained_photo_keeps_its_points_apart_from_match_s(tmp_path, monkeypat
     monkeypatch.setattr(cli.outlines, "contrast", lambda *args: 0.1)
     monkeypatch.setattr(cli, "CHAINED_POINTS", tmp_path)
 
-    results, _ = cli._rounds(work, set())
+    results, placed = cli._rounds(work, set())
+    assert not any(tmp_path.iterdir())  # not while chaining: a pass may set it aside
+    cli._for_pages(work, results, placed)
 
     inputs = results["b"]["situated"]["inputs"]
     assert cli.chain.Store(tmp_path, None).points("b", inputs).pixels.tolist() == [[0.0, 0.0]]
+    assert results["b"]["situated"]["outline"] == 0.1
 
 
 def test_a_photo_placed_without_anchors_keeps_nothing_of_its_own(tmp_path, monkeypatch):
@@ -632,7 +637,8 @@ def test_only_current_placements_by_lomag_are_left_out_of_chaining():
     situated = {k: SimpleNamespace(inputs="i") for k in ("a", "b", "c")}
     situated["d"] = SimpleNamespace(inputs="i:proposed-abc")  # said yes to: no points to chain by
 
-    assert cli._not_chained(matches, situated) == {"c", "d"}
+    assert cli._not_chained(matches, situated, {"disk"}) == {"c", "d"}
+    assert cli._not_chained(matches, situated, {"disk", "lomag"}) == {"d"}  # proposed: never
 
 
 def test_a_photo_placed_against_today_is_shown_so_rather_than_as_last_chained():
@@ -2996,22 +3002,19 @@ def test_photos_checked_together_stand_in_the_same_block():
 def test_the_check_hides_its_photos_and_sets_each_decoy_where_another_stands():
     view = lambda x: match.View(x, 0.0, 30.0, 0.0, 0.5, 60.0)  # noqa: E731
     anchor = lambda i, x: SimpleNamespace(id=i, view=view(x))  # noqa: E731
-
-    class Work(SimpleNamespace):
-        def observed(self, me):
-            return "as matched"
-
-    work = Work(
-        round_zero={"h": anchor("h", 0.0), "d": anchor("d", 100.0), "a": anchor("a", 10.0)},
-        where={i: match.Where(None, around=(x, 0.0)) for i, x in (("h", 0), ("d", 100), ("a", 10))},
-        negatives={},
-    )
+    work = object.__new__(cli._Chaining)
+    work.round_zero = {"h": anchor("h", 0.0), "d": anchor("d", 100.0), "a": anchor("a", 10.0)}
+    work.where = {
+        i: match.Where(None, around=(x, 0.0)) for i, x in (("h", 0), ("d", 100), ("a", 10))
+    }
+    work.negatives, work.cut, work._seen = {}, {}, {"a": "as matched"}
     me = lambda i: SimpleNamespace(id=i)  # noqa: E731
 
-    replay = cli._Replay(work, {"h": "cut h"}, {"d": ("cut d", "h")})
+    replay = cli._replay(work, {"h": "cut h"}, {"d": ("cut d", "h")})
 
-    assert set(replay.round_zero) == {"a"}
+    assert set(replay.round_zero) == {"a"} and set(work.round_zero) == {"h", "d", "a"}
     assert replay.observed(me("h")) == "cut h" and replay.observed(me("a")) == "as matched"
+    assert work.observed(me("a")) == "as matched" and not work.cut
     assert replay.where["d"].around == (0, 0.0)  # the decoy is said to be where h stands
     assert [a.id for a in replay.anchors(me("d"), replay.round_zero)] == ["a"]
 
@@ -3025,7 +3028,7 @@ def test_the_check_passes_on_enough_answers_few_wrong_and_no_decoy_taken(
 ):
     rows = [{"kind": "vérité", "off": [0.2, 0.1], "wrong": i < wrong} for i in range(answered)]
     rows += [{"kind": "vérité", "why": "sans réponse"}] * 30  # no answer: no evidence either way
-    rows += [{"kind": "leurre", "fooled": i < fooled} for i in range(3)]
+    rows += [{"kind": "leurre", "wrong": i < fooled} for i in range(3)] + [{"kind": "leurre"}]
 
     assert cli._check_passed(rows)[0] is passed
 
@@ -3059,16 +3062,17 @@ def _two_matchers(monkeypatch, lomag: bool) -> cli._Chaining:
         {"me": [[0, 0], [10, 10]], "L": [[0, 0]] * 4, "D": [[0, 0]] * 4}, {"D": [[0, 3]]}
     )
     work.lomag_store = _Kept(
-        {"me": [[10.5, 10], [50, 50], [10.2, 10]], "L": [[1, 1]] * 3},
+        {"me": [[10.5, 10], [50, 50], [10.2, 10]], "L": [[1, 1]] * 3, "D": [[2, 2]]},
         {"L": [[0, 0], [1, 2], [2, 1]]},
     )
     work.lomag, work.by_lomag = lomag, {"L"} if lomag else set()
+    work._lomag_keypoints, work._disk_keypoints = {}, {}
     return work
 
 
 def test_a_photo_pairs_with_each_anchor_through_the_matcher_that_placed_it(monkeypatch):
     work = _two_matchers(monkeypatch, lomag=True)
-    anchor = lambda i: chain.Anchor(i, None, None, (60, 80), None, "")  # noqa: E731
+    anchor = lambda i: work.anchor(i, None, None, "")  # noqa: E731
     observed = match.Observed(np.zeros((6, 2)), (60, 80), _rays(0))  # 2 DISK, 1 band, 3 LoMa-G
 
     pairs = work.paired(SimpleNamespace(id="me"), observed)
