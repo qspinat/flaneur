@@ -3127,8 +3127,10 @@ def test_photos_said_near_on_the_image_as_it_is_come_first_with_or_without_pairs
     kept = {k: _kept(inputs="c:img") for k in said if k != "proposed"}
     kept |= {"unjudged": _kept(inputs="c:img"), "unplaced": {"inputs": "c:img"}}
     proposed = {"proposed": _proposal("c:img"), "no": _proposal("c:img")}
+    proposed["yes"] = _proposal("c:img", x=40.0)  # said near once, match's placement yes since
     placed = kept | {"proposed": proposed["proposed"]}
-    rows = ({"photo_id": k, "verdict": v, "inputs": placed[k]["inputs"]} for k, v in said.items())
+    rows = [{"photo_id": "yes", "verdict": "near", "inputs": proposed["yes"]["inputs"]}]
+    rows += [{"photo_id": k, "verdict": v, "inputs": placed[k]["inputs"]} for k, v in said.items()]
     (tmp_path / "anchors.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows))
     (tmp_path / "proposed.json").write_text(json.dumps(proposed))
     monkeypatch.setattr(cli, "ANCHORS", tmp_path / "anchors.jsonl")

@@ -1623,24 +1623,29 @@ OFFERED = 24  # pairs of a placement said near laid on the placing page, the mos
 def _said_near(photos: dict[str, dict]) -> dict[str, dict]:
     """The photos the user's last word on is near (the right place, the camera to set right),
     on the image as it is now (`photos`: the placing page's), with the placement said near:
-    match's, else a camera once proposed (`presque`); the placing page puts them first."""
+    match's, once judged its word is the photo's (it came after any camera proposed); else a
+    camera once proposed (`presque`). The placing page puts them first."""
     try:
-        kept, judged, proposed = _matches(), _Judged(), register.load(PROPOSED_CAMERAS)
+        kept, judged = _matches(), _Judged()
     except Exception as error:  # a file written wrong: none first, the queue goes on
         typer.echo(f"photos jugées « près » illisibles ({error})", err=True)
         return {}
+    try:
+        proposed = register.load(PROPOSED_CAMERAS)
+    except Exception as error:  # match's placements said near come first all the same
+        typer.echo(f"caméras proposées illisibles ({error})", err=True)
+        proposed = {}
+
+    def said_on(k: str, m: dict | None) -> str | None:
+        if m and "x" in m and _image_of(m["inputs"]) == photos[k]["inputs"]:
+            return (judged.on(k, m) or {}).get("verdict")
+        return None
+
     near = {}
     for k in sorted(photos):
-        for m in (kept.get(k), proposed.get(k)):
-            if (
-                m
-                and "x" in m
-                and _image_of(m["inputs"]) == photos[k]["inputs"]
-                and (said := judged.on(k, m))
-                and said["verdict"] == "near"
-            ):
-                near[k] = m
-                break
+        word = said_on(k, kept.get(k))
+        if word == "near" or (word is None and said_on(k, proposed.get(k)) == "near"):
+            near[k] = kept[k] if word else proposed[k]
     return near
 
 
@@ -1654,6 +1659,8 @@ def _offers(
     _offer_of): those with pairs of their own (a camera proposed kept no points)."""
     offers = {}
     for k, m in near.items():
+        if _is_proposal(m["inputs"]):
+            continue
         try:
             found = _offer_of(k, m, by_id, fixed, _size_of(photos[k]["image"]))
         except Exception as error:  # this one opens as any other photo: the others go on
@@ -4898,18 +4905,21 @@ def place_photos(
         return found and {"registration": found, "carried_from": None}
 
     @functools.lru_cache(maxsize=1)
-    def near_at(_: tuple) -> tuple[dict[str, dict], dict[str, dict]]:  # again on a new verdict
-        near = _said_near(photos)
-        return near, _offers(near, photos, by_id, fixed)
+    def near_at(_: tuple) -> dict[str, dict]:  # made again on a new verdict or match
+        return _said_near(photos)
 
-    def near_now() -> tuple[dict[str, dict], dict[str, dict]]:
-        return near_at(_stamp([MATCHES, ANCHORS]))
+    @functools.lru_cache(maxsize=1)
+    def offers_at(stamp: tuple) -> dict[str, dict]:  # only for the photo opened: pairs are slow
+        return _offers(near_at(stamp), photos, by_id, fixed)
+
+    def stamp() -> tuple:
+        return _stamp([MATCHES, ANCHORS, PROPOSED_CAMERAS])
 
     def ahead() -> dict[str, str]:  # near verdicts, then photos carried from placed ones
-        return _placing_ahead(near_now()[0], carried_now())
+        return _placing_ahead(near_at(stamp()), carried_now())
 
     def offer(photo_id: str) -> dict | None:
-        return near_now()[1].get(photo_id)
+        return offers_at(stamp()).get(photo_id)
 
     def full(panorama: str) -> np.ndarray | None:
         """The panorama's picture at most placing.FULL_WIDTH px around, from its original
