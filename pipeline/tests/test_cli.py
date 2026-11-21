@@ -3066,7 +3066,7 @@ def _two_matchers(monkeypatch, lomag: bool) -> cli._Chaining:
         {"L": [[0, 0], [1, 2], [2, 1]]},
     )
     work.lomag, work.by_lomag = lomag, {"L"} if lomag else set()
-    work._lomag_keypoints, work._disk_keypoints = {}, {}
+    work._lomag_keypoints, work._disk_keypoints, work._rows_of = {}, {}, {}
     return work
 
 
@@ -3083,11 +3083,30 @@ def test_a_photo_pairs_with_each_anchor_through_the_matcher_that_placed_it(monke
     assert [r.tolist() for r in pairs(anchor("L"))] == [[1, 4], [4, 6]]
 
 
-def test_with_lomag_anchors_a_photo_s_lomag_keypoints_follow_its_disk_ones(monkeypatch):
+def test_only_an_anchor_lomag_placed_has_its_lomag_keypoints_after_its_disk_ones(monkeypatch):
     work = _two_matchers(monkeypatch, lomag=True)
     view = match.View(0.0, 0.0, 30.0, 0.0, 0.5, 60.0)
 
     anchor = work.anchor("me", view, None, "inputs")
 
-    assert anchor.keypoints.tolist() == [[0, 0], [10, 10], [10.5, 10], [50, 50], [10.2, 10]]
-    assert len(_two_matchers(monkeypatch, lomag=False).anchor("me", view, None, "").keypoints) == 2
+    assert anchor.keypoints.tolist() == [[0, 0], [10, 10]]  # paired through DISK: its rows
+    lomag_placed = work.anchor("L", view, None, "inputs")  # paired through LoMa-G: after them
+    assert lomag_placed.keypoints.tolist() == [[0, 0]] * 4 + [[1, 1]] * 3
+
+
+def test_a_photo_only_lomag_observed_has_its_rays_on_its_lomag_keypoints_rows(monkeypatch):
+    work = _two_matchers(monkeypatch, lomag=True)
+    monkeypatch.setattr(cli, "_inputs", lambda scene, photo_id: "now")
+    rays = _rays(4)  # on its LoMa-G keypoints 0, 1, 2, and on a band zoomed on a landmark (3)
+    lomag_seen = match.Observed(np.zeros((4, 2)), (60, 80), rays, 2)
+    work.store.observed = lambda photo_id, inputs: None  # DISK: never observed it
+    work.lomag_store.observed = lambda photo_id, inputs: lomag_seen if inputs == "then" else None
+    work.scenes, work.cut, work._seen = {"me": None}, {}, {}
+    work.situated = {"me": SimpleNamespace(inputs="then:lomag")}
+
+    seen = work.observed(SimpleNamespace(id="me"))
+
+    # its details: 2 DISK keypoints, then its 3 LoMa-G ones (the first and last are DISK's
+    # second); the ray on the band left out
+    assert len(seen.pixels) == 5 and seen.size == (60, 80) and seen.views == 2
+    assert seen.rays.keys.tolist() == [1, 2 + 1, 1]

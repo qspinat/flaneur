@@ -2168,10 +2168,20 @@ MERGE_PX = 1.5  # a photo's LoMa-G keypoint this near one of its DISK keypoints:
 
 
 def _chain_setup() -> str:
-    """What chaining now depends on: what matching does, chaining's own code, and whether
-    LoMa-G's placements anchor it."""
-    digest = hashlib.sha1(Path(chain.__file__).read_bytes()).hexdigest()[:8]
+    """What chaining and its check now depend on: what matching does, chaining's own code
+    (chain.py, and what of it lives here, with its numbers), and whether LoMa-G's placements
+    anchor it."""
+    here = [_Chaining, _merged, _rounds, _chain_passes, _inconsistent, _placed_from, _too_far]
+    check = [_degraded, _replay, _check_passed, chain_check, _check_fold]
+    numbers = (MERGE_PX, CHAIN_PASSES, CHECK_M, CHECK_DEG, CHECK_BLOCK_M, CHECK_FOLDS)
+    numbers += (CHECK_HALVINGS, CHECK_FEWEST_RAYS, DECOY_M, CHAIN_CHECK_LEAST, CHAIN_CHECK_WRONG)
+    code = [inspect.getsource(f) for f in here + check] + [repr(numbers)]
+    digest = _digest([Path(chain.__file__).read_text(), *code])[:8]
     return f"{_setup()}:{digest}" + (f":{LOMAG}" if CHAIN_LOMAG else "")
+
+
+def _rays_at(rays: match.Rays, rows: np.ndarray) -> match.Rays:
+    return match.Rays(*(getattr(rays, f.name)[rows] for f in fields(match.Rays)))
 
 
 def _merged(disk: np.ndarray, lomag: np.ndarray, offset: int) -> np.ndarray:
@@ -2266,6 +2276,7 @@ class _Chaining:
         self._seen: dict[str, match.Observed | None] = {}  # each photo's, read once
         self._lomag_keypoints: dict[str, np.ndarray] = {}
         self._disk_keypoints: dict[str, int] = {}  # how many: an anchor's LoMa-G rows' start
+        self._rows_of: dict[str, np.ndarray] = {}
         self.round_zero: dict[str, chain.Anchor] = {}
         aside = _set_aside()  # by eye: neither an anchor nor a truth to check against
         for photo_id, m in self.situated.items():
@@ -2274,8 +2285,9 @@ class _Chaining:
                 and photo_id not in self.elsewhere
                 and (photo_id, m.inputs) not in aside
             ):
-                store, inputs = _kept_store(m, matches.get(photo_id))
-                if (points := store.points(photo_id, inputs)) is not None:
+                if (kept := _kept_store(m, matches.get(photo_id))) is None:
+                    continue  # proposed: no points (left out by _not_chained already)
+                if (points := kept[0].points(photo_id, kept[1])) is not None:
                     view = m.view(self.heights.street(m.x, m.y))
                     self.round_zero[photo_id] = self.anchor(photo_id, view, points, m.inputs)
 
@@ -2294,11 +2306,12 @@ class _Chaining:
         self, photo_id: str, view: match.View, points: match.Points, inputs: str
     ) -> chain.Anchor:
         """An old photo placed, as others are placed from: its keypoints (DISK's, then
-        LoMa-G's with `lomag`; descriptors stay in the stores), its camera and points."""
+        LoMa-G's for one LoMa-G placed, paired through it; descriptors stay in the stores),
+        its camera and points."""
         features = self.features(photo_id)
         keypoints = features.keypoints
         self._disk_keypoints[photo_id] = len(keypoints)
-        if self.lomag:
+        if photo_id in self.by_lomag:
             keypoints = np.concatenate([keypoints, self.lomag_keypoints(photo_id)])
         return chain.Anchor(photo_id, view, keypoints, features.size, points, inputs)
 
@@ -2320,12 +2333,37 @@ class _Chaining:
         if me.id in self.cut:
             return self.cut[me.id]
         if me.id not in self._seen:
-            observed = self.store.observed(me.id, _inputs(self.scenes[me.id], me.id))
-            if observed is not None and self.lomag:
+            now = _inputs(self.scenes[me.id], me.id)
+            observed = self.store.observed(me.id, now)
+            if self.lomag and observed is not None:
                 pixels = np.concatenate([observed.pixels, self.lomag_keypoints(me.id)])
                 observed = replace(observed, pixels=pixels)
+            elif self.lomag:  # LoMa-G's only (it placed the photo): its rays on the same rows
+                placed = self.situated[me.id].inputs if me.id in self.situated else now
+                observed = self._lomag_observed(me.id, _found_inputs(placed, LOMAG))
             self._seen[me.id] = observed
         return self._seen[me.id]
+
+    def _lomag_observed(self, photo_id: str, inputs: str) -> match.Observed | None:
+        """A photo's observation by LoMa-G with its details as chaining has them (its DISK
+        keypoints, then its LoMa-G ones): the rays on its LoMa-G keypoints, on their rows
+        (see _merged); those on the bands zoomed on its landmarks left out."""
+        seen = self.lomag_store.observed(photo_id, inputs)
+        if seen is None:
+            return None
+        disk, lomag = self.features(photo_id).keypoints, self.lomag_keypoints(photo_id)
+        rays = _rays_at(seen.rays, np.flatnonzero(seen.rays.keys < len(lomag)))
+        rays = replace(rays, keys=self.rows_of(photo_id, len(disk) + len(lomag))[rays.keys])
+        return replace(seen, pixels=np.concatenate([disk, lomag]), rays=rays)
+
+    def rows_of(self, photo_id: str, details: int) -> np.ndarray:
+        """The rows of a photo's `details` its LoMa-G keypoints are: they come last (see
+        observed), those beside its DISK keypoints are theirs (see _merged)."""
+        if photo_id not in self._rows_of:
+            mine = self.lomag_keypoints(photo_id)
+            disk = self.features(photo_id).keypoints
+            self._rows_of[photo_id] = _merged(disk, mine, details - len(mine))
+        return self._rows_of[photo_id]
 
     def paired(
         self, me: export.WalkPhoto, observed: match.Observed
@@ -2333,11 +2371,6 @@ class _Chaining:
         """How a photo's details pair with an anchor's (rows in the photo, rows in the
         anchor): through the matcher that placed the anchor (LoMa-G's, by_lomag), else DISK."""
         image = (me.id, _image(me.id))
-        rows_of = None
-        if self.by_lomag:  # its LoMa-G keypoints, after its details (see observed)
-            mine = self.lomag_keypoints(me.id)
-            disk = self.features(me.id).keypoints
-            rows_of = _merged(disk, mine, len(observed.pixels) - len(mine))
 
         def pairs(anchor: chain.Anchor) -> tuple[np.ndarray, np.ndarray]:
             other = (anchor.id, _image(anchor.id))
@@ -2345,6 +2378,7 @@ class _Chaining:
                 rows = self.store.pairs(image, other, self.features)
                 return rows[:, 0], rows[:, 1]
             found = self.lomag_store.pairs(image, other, self.lomag_features)
+            rows_of = self.rows_of(me.id, len(observed.pixels))
             after = self._disk_keypoints[anchor.id]  # its LoMa-G keypoints' rows (see anchor)
             rows = np.column_stack([rows_of[found[:, 0]], after + found[:, 1]])
             rows = rows[np.sort(np.unique(rows[:, 0], return_index=True)[1])]  # a detail once
@@ -2585,8 +2619,7 @@ def _degraded(
             return cut
         if len(rays.keys) <= CHECK_FEWEST_RAYS:
             return None
-        kept = np.sort(rng.permutation(len(rays.keys))[: len(rays.keys) // 2])
-        rays = match.Rays(*(getattr(rays, f.name)[kept] for f in fields(match.Rays)))
+        rays = _rays_at(rays, np.sort(rng.permutation(len(rays.keys))[: len(rays.keys) // 2]))
     return None
 
 
@@ -2679,8 +2712,10 @@ def chain_check(seed: int = 0) -> None:
                 and o not in decoys
                 and DECOY_M[0] <= np.hypot(*(at[o] - at[k])) <= DECOY_M[1]
             ]
-            if near and (seen := cut(d := near[rng.integers(len(near))])) is not None:
-                decoys[d] = (seen, k)
+            for d in rng.permutation(near):  # the first that can be cut
+                if (seen := cut(str(d))) is not None:
+                    decoys[str(d)] = (seen, k)
+                    break
         typer.echo(f"pli {fold} : {len(held)} photos ôtées, {len(decoys)} leurres")
         if not held:
             continue
