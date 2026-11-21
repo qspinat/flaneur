@@ -1223,10 +1223,8 @@ def _confirmed() -> dict[str, match.Situated]:
     judged = _Judged()
     situated = _situated(marks=False)  # shown: marks aside
     found = {k: m for k, m in situated.items() if judged.said_yes(k, asdict(m))}
-    anchors = _anchoring({k: asdict(m) for k, m in situated.items()})
-    for photo_id, row in _chained(_scenes_now(), judged, anchors)["photos"].items():
-        if photo_id not in found and judged.said_yes(photo_id, row["situated"]):
-            found[photo_id] = _situation(row["situated"])
+    for photo_id, c in _chained_said_yes(_scenes_now(), judged).items():
+        found.setdefault(photo_id, _situation(c))  # where match has none said yes to
     return found
 
 
@@ -1868,10 +1866,9 @@ def _match_with(matcher: str, photos: list[export.WalkPhoto], at: _Run) -> None:
 
 
 def _checked_in(near_by: list[match.Panorama]) -> dict[str, list[str]]:
-    """For each area, the methods whose known-answer check passed there for its panoramas as
-    they are (the matchers; placed.CHAINED, the chaining's check for the code and data as they
-    are: a measure only, the chained photos listed being those said yes to): how sure a
-    placement of each is there (see placed.Matched), not whether it is tried.
+    """For each area, the matchers whose known-answer check passed there for its panoramas as
+    they are: how sure a placement of each is there (see placed.Matched), not whether it is
+    tried (the chaining's check is a measure only: the chained photos listed are said yes to).
     Says which checks are still to make (with the command), and which failed."""
     checked: dict[str, list[str]] = {name: [] for name in pilot.AREAS}
     to_make, failed = defaultdict(list), []
@@ -1889,17 +1886,6 @@ def _checked_in(near_by: list[match.Panorama]) -> dict[str, list[str]]:
             f"{MATCHERS[m].label} pas encore contrôlé pour ces panoramas ({', '.join(areas)}) : "
             f"`flaneur match-check --perimes --matcher {m}`"
         )
-    check = register.load(CHAIN_CHECK)  # its setup read only if checked: then the chaining's too
-    if not check or check.get("setup") != (now := _chain_setup()):
-        typer.echo(
-            "enchaînement pas encore contrôlé pour ce code et ces données : `flaneur chain-check`"
-        )
-    elif register.load(CHAINS).get("setup") != now:  # the photos chained, as the check saw them
-        typer.echo("photos enchaînées par un autre code ou d'autres données : `flaneur chain`")
-    else:
-        for name, gate in check.get("areas", {}).items():
-            if gate["passed"] and name in checked:
-                checked[name].append(placed.CHAINED)
     if failed:
         typer.echo(f"contrôle non passé : {', '.join(failed)} (leurs placements le disent)")
     return checked
@@ -2712,7 +2698,7 @@ def chain_check(seed: int = 0) -> None:
     comparée à sa place (juste à CHECK_M et CHECK_DEG). Un leurre par photo : une autre photo
     confirmée à DECOY_M de là, donnée pour être à sa place, ne doit pas y être située. La porte
     (assez de photos revenues, peu de fausses, aucun leurre pris), par quartier, est la
-    confiance des photos enchaînées, une mesure : elle n'arrête rien, et seules les photos
+    mesure de l'enchaînement (chain_check.json) : elle n'arrête rien, et seules les photos
     enchaînées dites justes entrent dans la liste des photos placées."""
     work = _Chaining()
     rng = np.random.default_rng(seed)
@@ -3306,6 +3292,25 @@ def _chained_wins(judged: "_Judged", photo_id: str, chained: dict, today: dict |
     return judged.said_yes(photo_id, chained) and not (today and judged.said_yes(photo_id, today))
 
 
+def _chained_said_yes(scenes: dict, judged: "_Judged") -> dict[str, dict]:
+    """The last chaining's placements the user said yes to, of the photo as it is now (see
+    _found_as_now): the only chained placements listed and walked. The others are proposals, on
+    the confirmation page; a near would not last there (the next chaining leaves photos turned
+    down aside and keeps only those said yes), unlike match's near placements."""
+    said = {}
+    for k, row in register.load(CHAINS).get("photos", {}).items():
+        c = row["situated"]
+        if (
+            judged.said_yes(k, c)
+            and _is_chained(c["inputs"])
+            and k in scenes
+            and _exported(k).exists()
+            and _found_as_now(k, c, _inputs(scenes[k], k), judged, marks=False)
+        ):
+            said[k] = c
+    return said
+
+
 def _chained(scenes: dict, judged: "_Judged", anchors: Set[str]) -> dict:
     """What the last chaining found (chains.json): the photos it placed from others (`photos`,
     each its `situated`, a Situated's fields; `round`; the photos it was placed `from`), those
@@ -3640,14 +3645,9 @@ def _placed_photos(write: bool = False, answering: tuple | None = None) -> dict[
     for k, p in _proposed_now(scenes, judged, marks=False).items():
         if judged.said_yes(k, p) and not (k in matched and matched[k].verdict == "yes"):
             matched[k] = weighed(k, p)  # the user's yes wins over a placement not judged
-    # the chained photos said yes to (their anchors then do not matter: see _chained); the
-    # others are only proposed, on the confirmation page
-    for k, row in _chained(scenes, judged, set())["photos"].items():
-        c = row["situated"]
-        if not judged.said_yes(k, c):
-            continue
-        if k not in matched or _chained_wins(judged, k, c, matched[k].placement):
-            matched[k] = weighed(k, c)
+    for k, c in _chained_said_yes(scenes, judged).items():  # the others: proposed only
+        if k not in matched or matched[k].verdict != "yes":  # a yes wins over a placement not
+            matched[k] = weighed(k, c)  # said yes to (see _chained_wins)
     found = placed.build(_on_image_now(answers), far, matched, _registrations)
     rows = {k: asdict(p) for k, p in found.items()}
     if write and rows != register.load(PLACED_PHOTOS):

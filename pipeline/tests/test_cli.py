@@ -2291,7 +2291,6 @@ def test_the_placed_list_is_written_from_the_answers_verdicts_and_matches(monkey
     said = [("pm:1", "near", "i"), ("pp", "yes", "i:proposed-ab12cd34")]  # pp: a camera refused
     said.append(("pm:3", "yes", "i:from-ab12cd34"))  # its chained camera said yes to
     said.append(("pm:1", "yes", "i:from-ab12cd34"))  # match's said near, the chained one yes
-    said.append(("pn", "near", "i:from-ab12cd34"))  # a chained one said near: not listed
     (tmp_path / "anchors.jsonl").write_text(
         "".join(json.dumps({"photo_id": k, "verdict": v, "inputs": i}) + "\n" for k, v, i in said)
     )
@@ -2311,7 +2310,7 @@ def test_the_placed_list_is_written_from_the_answers_verdicts_and_matches(monkey
         "SIGHTS": tmp_path / "sights.jsonl",
         "ANCHORS": tmp_path / "anchors.jsonl",
         "_placing_answers": lambda: ({}, {"pa": answer}, set()),
-        "_scenes_now": lambda: {k: "s" for k in ("pm:1", "pm:2", "pm:3", "pm:4", "pp", "pc", "pn")},
+        "_scenes_now": lambda: {k: "s" for k in ("pm:1", "pm:2", "pm:3", "pm:4", "pp")},
         "_matches": lambda: {
             "pm:1": _kept(),
             "pm:2": _kept(inputs="before"),
@@ -2330,11 +2329,8 @@ def test_the_placed_list_is_written_from_the_answers_verdicts_and_matches(monkey
         },
         "_kept_store": lambda m, kept: (SimpleNamespace(points=lambda k, i: seen_by.get(k)), "i"),
         "_sure_panoramas": lambda: ({"sure"}, {"sure", "gps"}),  # sure of their pose, known
-        "_chained": lambda scenes, judged, anchors: {
-            "photos": {
-                k: {"situated": _kept(inputs="i:from-ab12cd34")}
-                for k in ("pc", "pm:1", "pm:3", "pn")
-            }
+        "_chained_said_yes": lambda scenes, judged: {
+            k: _kept(inputs="i:from-ab12cd34") for k in ("pm:1", "pm:3")
         },
     }.items():
         monkeypatch.setattr(cli, name, value)
@@ -2349,7 +2345,6 @@ def test_the_placed_list_is_written_from_the_answers_verdicts_and_matches(monkey
         "pm:3": ("checked", "chain", False),  # a yes wins over match's not judged
         "pm:4": ("automatic", "match", False),  # its marks were made on another crop
         "pp": ("checked", "match", False),
-        # pc (not judged) and pn (said near): chained, proposed on the confirmation page only
     }
     assert {k for k, p in written.items() if p["unsure_sources"]} == {"pm:4"}  # gps only
 
@@ -3116,26 +3111,6 @@ def test_the_chaining_check_says_for_each_area_whether_it_passes():
     assert not cli._check_passed(by_area["saint-severin"]).passed
 
 
-def test_an_area_trusts_the_chaining_where_its_check_passed_for_things_as_they_are(
-    tmp_path, monkeypatch
-):
-    monkeypatch.setattr(cli, "CHAIN_CHECK", tmp_path / "check.json")
-    monkeypatch.setattr(cli, "CHAINS", tmp_path / "chains.json")
-    monkeypatch.setattr(cli, "_chain_setup", lambda: "now")
-    monkeypatch.setattr(cli, "_per_area", lambda path, matcher: {})
-    monkeypatch.setattr(cli, "_check_current", lambda check, m, name, near_by: False)
-    gate = lambda passed: {"passed": passed}  # noqa: E731
-    areas = {"cite": gate(True), "saint-severin": gate(False)}
-    cli.write_json(cli.CHAIN_CHECK, {"setup": "now", "areas": areas})
-    cli.write_json(cli.CHAINS, {"setup": "now", "photos": {}})
-
-    assert cli._checked_in([]) == {"saint-severin": [], "cite": [placed.CHAINED]}
-    cli.write_json(cli.CHAINS, {"setup": "before", "photos": {}})
-    assert cli._checked_in([]) == {"saint-severin": [], "cite": []}  # chained by other code
-    cli.write_json(cli.CHAIN_CHECK, {"setup": "before", "areas": areas})
-    assert cli._checked_in([]) == {"saint-severin": [], "cite": []}  # checked with other code
-
-
 def test_a_chained_placement_stays_while_of_the_photo_now_and_its_anchors_placed(
     tmp_path, monkeypatch
 ):
@@ -3173,3 +3148,29 @@ def test_a_chained_placement_stays_while_of_the_photo_now_and_its_anchors_placed
     chained = cli._chained(cli._scenes_now(), cli._Judged(), {"placed"})
 
     assert set(chained["photos"]) == {"same", "kept-yes", "after"}
+
+
+def test_only_chained_placements_said_yes_to_are_listed_the_others_proposed(tmp_path, monkeypatch):
+    exported = tmp_path / "old.jpg"
+    exported.touch()
+    said = [("yes", "yes"), ("near", "near"), ("cropped", "yes")]
+    (tmp_path / "anchors.jsonl").write_text(
+        "".join(
+            json.dumps({"photo_id": k, "verdict": v, "inputs": "i:from-ab12cd34"}) + "\n"
+            for k, v in said
+        )
+    )
+    row = lambda inputs: {"situated": _kept(inputs=inputs), "from": ["gone"]}  # noqa: E731
+    photos = {k: row("i:from-ab12cd34") for k in ("yes", "near", "unjudged")}
+    photos["cropped"] = row("j:from-ab12cd34")  # said yes, the photo cropped since
+    cli.write_json(tmp_path / "chains.json", {"photos": photos})
+    for name, value in {
+        "CHAINS": tmp_path / "chains.json",
+        "ANCHORS": tmp_path / "anchors.jsonl",
+        "_inputs": lambda scene, photo_id: "i",
+        "_exported": lambda photo_id: exported,
+    }.items():
+        monkeypatch.setattr(cli, name, value)
+    scenes = dict.fromkeys(photos, "s")
+
+    assert set(cli._chained_said_yes(scenes, cli._Judged())) == {"yes"}  # anchors gone: a yes holds
