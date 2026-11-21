@@ -625,19 +625,19 @@ def test_a_photo_is_matched_again_only_by_the_matchers_left_to_try(kept, refused
     assert cli._left_to_try(kept, "i", refused) == left
 
 
-def test_a_photo_placed_against_today_is_shown_so_rather_than_as_last_chained():
-    situated = {"a": "placed now"}
-    chained = {
-        "photos": {
-            "a": {"situated": _kept(), "round": 2, "from": ["b"]},
-            "c": {"situated": _kept(), "round": 1, "from": ["a"]},
-        }
-    }
+def test_a_photo_placed_against_today_is_shown_so_unless_only_its_chained_camera_is_said_yes():
+    today = match.Situated(**_kept(inputs="i"))
+    situated = {"a": today, "d": today}
+    row = lambda frm: {"situated": _kept(inputs="i:from-ab12cd34"), "round": 1, "from": frm}  # noqa: E731
+    chained = {"photos": {"a": row(["b"]), "c": row(["a"]), "d": row(["b"])}}
+    judged = SimpleNamespace(said_yes=lambda k, p: k == "d" and p["inputs"] == "i:from-ab12cd34")
 
-    shown, rounds = cli._with_chained(situated, chained, {"a", "c"})
+    shown, rounds = cli._with_chained(situated, chained, {"a", "c", "d"}, judged)
 
-    assert shown["a"] == "placed now" and rounds["a"] == {"round": 0, "from": []}
-    assert shown["c"] == match.Situated(**_kept()) and rounds["c"] == {"round": 1, "from": ["a"]}
+    assert shown["a"] == today and rounds["a"] == {"round": 0, "from": []}
+    assert shown["c"] == match.Situated(**_kept(inputs="i:from-ab12cd34"))
+    assert rounds["c"] == {"round": 1, "from": ["a"]}
+    assert rounds["d"]["round"] == 1  # its chained camera said yes to, not today's
 
 
 def test_each_matcher_has_its_own_known_answer_check(tmp_path):
@@ -2290,6 +2290,7 @@ def test_the_placed_list_is_written_from_the_answers_verdicts_and_matches(monkey
     answer = {"registration": {"panorama": "q"}, "inputs": "h", "flipped": False}
     said = [("pm:1", "near", "i"), ("pp", "yes", "i:proposed-ab12cd34")]  # pp: a camera refused
     said.append(("pm:3", "yes", "i:from-ab12cd34"))  # its chained camera said yes to
+    said.append(("pm:1", "yes", "i:from-ab12cd34"))  # match's said near, the chained one yes
     (tmp_path / "anchors.jsonl").write_text(
         "".join(json.dumps({"photo_id": k, "verdict": v, "inputs": i}) + "\n" for k, v, i in said)
     )
@@ -2342,11 +2343,11 @@ def test_the_placed_list_is_written_from_the_answers_verdicts_and_matches(monkey
     written = json.loads((tmp_path / "placed.json").read_text())
     assert {k: (p["status"], p["source"], p["proposed_marks"]) for k, p in written.items()} == {
         "pa": ("checked", "page", False),
-        "pm:1": ("near", "match", False),  # pm:2 was placed from what the photo no longer is
+        "pm:1": ("checked", "chain", False),  # pm:2 was placed from what the photo no longer is
         "pm:3": ("checked", "chain", False),  # a yes wins over match's not judged
         "pm:4": ("automatic", "match", False),  # its marks were made on another crop
         "pp": ("checked", "match", False),
-        "pc": ("automatic", "chain", False),  # pm:1 chained too: match's placement wins
+        "pc": ("automatic", "chain", False),
     }
     assert {k for k, p in written.items() if p["unsure_sources"]} == {"pm:4"}  # gps only
     assert written["pc"]["unchecked_area"]  # the chaining's check not passed in its area

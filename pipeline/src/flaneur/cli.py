@@ -1223,7 +1223,8 @@ def _confirmed() -> dict[str, match.Situated]:
     judged = _Judged()
     situated = _situated(marks=False)  # shown: marks aside
     found = {k: m for k, m in situated.items() if judged.said_yes(k, asdict(m))}
-    for photo_id, row in _chained(_scenes_now(), judged, set(situated))["photos"].items():
+    anchors = _anchoring({k: asdict(m) for k, m in situated.items()})
+    for photo_id, row in _chained(_scenes_now(), judged, anchors)["photos"].items():
         if photo_id not in found and judged.said_yes(photo_id, row["situated"]):
             found[photo_id] = _situation(row["situated"])
     return found
@@ -2174,7 +2175,8 @@ def _chain_setup() -> str:
     (chain.py, and what of it lives here, with its numbers), LoMa-G's (its anchors are paired
     through it) and the areas (the check's confidence is said for each)."""
     here = [_Chaining, _merged, _rounds, _chain_passes, _inconsistent, _placed_from, _too_far]
-    here += [_moved, _rays_at, _kept_store, _features, _for_pages]
+    here += [_moved, _rays_at, _kept_store, _features, _for_pages, _Judged, _is_chained]
+    here += [_situation, _keep_chained, _chained_wins]
     check = [_degraded, _replay, _check_passed, chain_check, _check_fold, _off_row, _by_area]
     numbers = (MERGE_PX, CHAIN_PASSES, CHECK_M, CHECK_DEG, CHECK_BLOCK_M, CHECK_FOLDS)
     numbers += (CHECK_HALVINGS, CHECK_FEWEST_RAYS, DECOY_M, CHAIN_CHECK_LEAST, CHAIN_CHECK_WRONG)
@@ -2294,10 +2296,15 @@ class _Chaining:
                     self.round_zero[photo_id] = self.anchor(photo_id, view, points, m.inputs)
         # the photos chained before the user said yes to, as placed: anchors, never redone
         self.kept_chained: dict[str, dict] = {}
-        judged, store = _Judged(), chain.Store(CHAINED_POINTS, None)
+        self.judged, store = _Judged(), chain.Store(CHAINED_POINTS, None)
         for k, row in register.load(CHAINS).get("photos", {}).items():
             c = row["situated"]
-            if k in self.by_id and k not in self.round_zero and judged.holds(k, c):
+            today = asdict(self.situated[k]) if k in self.round_zero else None
+            if (
+                k in self.by_id
+                and self.judged.holds(k, c)
+                and _chained_wins(self.judged, k, c, today)
+            ):
                 if (
                     _is_chained(c["inputs"])
                     and (points := store.points(k, c["inputs"])) is not None
@@ -2707,10 +2714,11 @@ def chain_check(seed: int = 0) -> None:
     confiance des photos enchaînées (lue par la liste des photos placées) : elle n'arrête rien."""
     work = _Chaining()
     rng = np.random.default_rng(seed)
-    judged = _Judged()
-    placements = {k: asdict(m) for k, m in work.situated.items()}
-    placements |= {k: row["situated"] for k, row in work.kept_chained.items()}
-    truths = sorted(k for k in work.round_zero if judged.holds(k, placements[k]))
+    truths = sorted(  # placed against today: the chaining is not checked against its own
+        k
+        for k in work.round_zero
+        if k not in work.kept_chained and work.judged.holds(k, asdict(work.situated[k]))
+    )
     at = {k: np.array([work.round_zero[k].view.x, work.round_zero[k].view.y]) for k in truths}
     area = {k: _area_of(tuple(at[k])) for k in truths}
     cuts: dict[str, match.Observed | None] = {}  # each photo's, the same in every role
@@ -3279,6 +3287,23 @@ def match_sheet(per_page: int = 10) -> None:
     typer.echo(f"{len(rows)} photos situées ; planches dans {DATA / 'pilot'}/match_sheet_*.jpg")
 
 
+def _anchoring(placements: dict[str, dict]) -> set[str]:
+    """The photos chaining anchors on among `placements` against today (id: fields, its
+    inputs among them) not turned down: neither proposed (no points) nor set aside by eye."""
+    aside = _set_aside()
+    return {
+        k
+        for k, p in placements.items()
+        if not _is_proposal(p["inputs"]) and (k, p["inputs"]) not in aside
+    }
+
+
+def _chained_wins(judged: "_Judged", photo_id: str, chained: dict, today: dict | None) -> bool:
+    """Whether a photo's chained placement is shown rather than its placement against `today`
+    (none: there is none): the user said yes to it, and not to that one."""
+    return judged.said_yes(photo_id, chained) and not (today and judged.said_yes(photo_id, today))
+
+
 def _chained(scenes: dict, judged: "_Judged", anchors: Set[str]) -> dict:
     """What the last chaining found (chains.json): the photos it placed from others (`photos`,
     each its `situated`, a Situated's fields; `round`; the photos it was placed `from`), those
@@ -3304,15 +3329,16 @@ def _chained(scenes: dict, judged: "_Judged", anchors: Set[str]) -> dict:
 
 
 def _with_chained(
-    situated: dict[str, match.Situated], chained: dict, shown: set[str]
+    situated: dict[str, match.Situated], chained: dict, shown: set[str], judged: "_Judged"
 ) -> tuple[dict[str, match.Situated], dict[str, dict]]:
     """The photos `shown` placed against today (round 0) or else by the last chaining, and
     each one's round and the photos it was placed `from`: a placement against today wins over
-    a chaining made before it."""
+    a chaining, unless the user said yes to the chained one only (see _chained_wins)."""
     placed = {k: m for k, m in situated.items() if k in shown}
     rounds = {k: {"round": 0, "from": []} for k in placed}
     for k, row in chained.get("photos", {}).items():
-        if k in shown and k not in placed:
+        today = asdict(placed[k]) if k in placed else None
+        if k in shown and (today is None or _chained_wins(judged, k, row["situated"], today)):
             placed[k] = match.Situated(**row["situated"])
             rounds[k] = {"round": row["round"], "from": row["from"]}
     return placed, rounds
@@ -3590,7 +3616,7 @@ def _placed_photos(write: bool = False, answering: tuple | None = None) -> dict[
             mark = None
         chained = _is_chained(m["inputs"])
         source = placed.CHAINED if chained else placed.MATCHED
-        method = placed.CHAINED if chained else (m.get("matcher") or DISK)
+        method = source if chained else (m.get("matcher") or DISK)
         return placed.Matched(
             m,
             said and said["verdict"],
@@ -3611,10 +3637,10 @@ def _placed_photos(write: bool = False, answering: tuple | None = None) -> dict[
     for k, p in _proposed_now(scenes, judged, marks=False).items():
         if judged.said_yes(k, p) and not (k in matched and matched[k].verdict == "yes"):
             matched[k] = weighed(k, p)  # the user's yes wins over a placement not judged
-    anchors = {k for k, m in matched.items() if m.verdict in (None, "yes")}  # as chaining takes
+    anchors = _anchoring({k: m.placement for k, m in matched.items() if m.verdict in (None, "yes")})
     for k, row in _chained(scenes, judged, anchors)["photos"].items():
-        c = row["situated"]  # where match has none as now, or none said yes to and this is
-        if k not in matched or (matched[k].verdict is None and judged.said_yes(k, c)):
+        c = row["situated"]  # where match has none as now, or this one is said yes to
+        if k not in matched or _chained_wins(judged, k, c, matched[k].placement):
             matched[k] = weighed(k, c)
     found = placed.build(_on_image_now(answers), far, matched, _registrations)
     rows = {k: asdict(p) for k, p in found.items()}
@@ -3885,9 +3911,10 @@ def confirm_placed(port: int = 8768, open_browser: bool = True) -> None:
     today = then(date.today().year)
     walls = _ViewWalls(near_by, fixed, today.blocks)
     by_id = {p.id: p for p in near_by}
-    shown_now = _situated(marks=False)
-    chained = _chained(_scenes_now(), _Judged(), set(shown_now))
-    situated, rounds = _with_chained(shown_now, chained, set(titles))  # as shown
+    shown_now, judged_now = _situated(marks=False), _Judged()
+    anchors = _anchoring({k: asdict(m) for k, m in shown_now.items()})
+    chained = _chained(_scenes_now(), judged_now, anchors)
+    situated, rounds = _with_chained(shown_now, chained, set(titles), judged_now)  # as shown
     for k, why in chained.get("doubts", {}).items():
         if k in rounds:
             rounds[k]["doubt"] = why
@@ -5110,9 +5137,9 @@ NIGHT_STEPS = (  # each in its own process (one model in memory at a time), in t
     ("reperes-proposer", "--write"),
     *(("match-check", "--perimes", "--matcher", m) for m in MATCHERS),
     ("match",),
+    ("porter",),  # before chaining, which the hour cuts first: chained photos carried a night late
     ("chain-check",),
     ("chain",),
-    ("porter",),  # last: it carries the photos placed by match and by chaining
 )
 
 
