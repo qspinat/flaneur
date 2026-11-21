@@ -12,7 +12,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, unquote
 
 from flaneur import localpage
-from flaneur.sources import append_row, seconds_taken
+from flaneur.sources import append_row, rows, seconds_taken
 
 PAGE = Path(__file__).with_name("confirming_page.html")
 VERDICTS = ("yes", "near", "no")
@@ -55,6 +55,48 @@ def record(
     return append_row(path, row)
 
 
+Point = tuple[float, float]
+
+
+def point_key(xy) -> Point:
+    """A point's pixel on the photo to the thousandth, as kept (chain.Store): what a mark names,
+    the same wherever it is made."""
+    return round(float(xy[0]), 3), round(float(xy[1]), 3)
+
+
+def mark_pair(path: Path, photo_id: str, inputs: str, point: Point, wrong: object) -> dict:
+    """Append the user's mark on a pair shown (`point`: its point's pixel on the photo, as the
+    placement made from `inputs` keeps it — a mark follows its detail, whatever rows a new
+    match gives it): wrong (the two details are not the same thing), or that mark taken back."""
+    if not isinstance(wrong, bool):
+        raise ValueError("une paire est marquée fausse ou ne l'est plus (vrai ou faux)")
+    return append_row(
+        path,
+        {"photo_id": photo_id, "inputs": inputs, "point": list(point_key(point)), "wrong": wrong},
+    )
+
+
+def marked(path: Path) -> dict[tuple[str, str], set[Point]]:
+    """The points whose pairs are marked wrong, by placement (photo, inputs): the last mark on
+    each holds."""
+    last = {(r["photo_id"], r["inputs"], point_key(r["point"])): r["wrong"] for r in rows(path)}
+    found: dict[tuple[str, str], set[Point]] = {}
+    for (photo_id, inputs, point), wrong in last.items():
+        if wrong:
+            found.setdefault((photo_id, inputs), set()).add(point)
+    return found
+
+
+def with_marks(scene: dict, wrong: set[Point]) -> dict:
+    """A scene's pairs, each saying whether it is marked wrong (`wrong`: their points)."""
+    if scene.get("pairs") is None:
+        return scene
+    return {
+        **scene,
+        "pairs": [{**p, "wrong": point_key(p["point"]) in wrong} for p in scene["pairs"]],
+    }
+
+
 def queue(placed: list[dict], verdicts: dict[str, dict]) -> list[dict]:
     """The photos placed (`placed`: id, title, round, inputs, `doubt` if the others disagree
     with it, `by` the matcher that found it, why to `check` it closely…), those the user has not
@@ -78,6 +120,7 @@ def queue(placed: list[dict], verdicts: dict[str, dict]) -> list[dict]:
 def serve(
     placed: list[dict],
     path: Path,
+    marks: Path,
     verdicts: Callable[[], dict[str, dict]],
     frame: Callable[..., bytes | None],
     scene: Callable[..., dict | None],
@@ -89,8 +132,43 @@ def serve(
     cannot be drawn. `scene(photo_id)`: what the page draws over them (the pairs its camera was
     found from, the plan around it); None when there is none. Asked with `?from=source`, both
     are given `source=True`: today's view from the panorama the camera was found from, not the
-    one next to it."""
+    one next to it. The pairs it gives say which the user marked wrong (`marks`, read anew:
+    see mark_pair)."""
     by_id = {photo["id"]: photo for photo in placed}
+
+    def marks_on(photo: dict) -> set[Point]:
+        try:
+            return marked(marks).get((photo["id"], photo["inputs"]), set())
+        except (ValueError, KeyError, TypeError):  # the file written wrong: none shown
+            return set()
+
+    def pair_shown(photo: dict, index: object, source: object) -> dict:
+        """The pair the page showed as `index` in the view it showed (`source`: see scene)."""
+        if type(index) is not int:
+            raise ValueError("une paire est désignée par son numéro")
+        for pair in (scene(photo["id"], source=source is True) or {}).get("pairs") or []:
+            if pair["index"] == index:
+                return pair
+        raise ValueError(f"paire inconnue : {index}")
+
+    writes = {  # a verdict on the photo, or a mark on one of its pairs (not a verdict)
+        "/api/verdict": lambda photo, body: record(
+            path,
+            photo["id"],
+            body.get("verdict"),
+            photo["inputs"],
+            body.get("seconds", 0),
+            photo.get("camera"),
+            body.get("reason"),
+        ),
+        "/api/pair": lambda photo, body: mark_pair(
+            marks,
+            photo["id"],
+            photo["inputs"],
+            pair_shown(photo, body.get("index"), body.get("source"))["point"],
+            body.get("wrong"),
+        ),
+    }
 
     class Handler(localpage.Handler):
         def do_GET(self) -> None:  # noqa: N802 (http.server's naming)
@@ -118,12 +196,12 @@ def serve(
                 and parts[1] in by_id
                 and (found := scene(parts[1], source=source)) is not None
             ):
-                self._json(found)
+                self._json(with_marks(found, marks_on(by_id[parts[1]])))
             else:
                 self._send(404, b"not found", "text/plain")
 
         def do_POST(self) -> None:  # noqa: N802
-            if self.path != "/api/verdict":
+            if self.path not in writes:
                 self._send(404, b"not found", "text/plain")
                 return
             try:
@@ -131,17 +209,7 @@ def serve(
                 photo = by_id.get(body.get("photo_id"))
                 if photo is None:
                     raise ValueError(f"photo inconnue : {body.get('photo_id')}")
-                self._json(
-                    record(
-                        path,
-                        photo["id"],
-                        body.get("verdict"),
-                        photo["inputs"],
-                        body.get("seconds", 0),
-                        photo.get("camera"),
-                        body.get("reason"),
-                    )
-                )
+                self._json(writes[self.path](photo, body))
             except (ValueError, KeyError, TypeError, AttributeError) as error:
                 self._send(400, str(error).encode(), "text/plain; charset=utf-8")
 

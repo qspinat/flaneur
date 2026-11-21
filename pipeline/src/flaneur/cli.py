@@ -916,6 +916,7 @@ CHAIN_CHECK = DATA / "pilot" / "chain_check.json"  # the chaining's known-answer
 PROPOSED_CAMERAS = DATA / "pilot" / "proposed_cameras.json"
 PROPOSAL = "proposed"  # a proposed camera's "matcher": PROPOSAL-<where it stood, hashed>
 ANCHORS = DATA / "overrides" / "anchors.jsonl"  # the user's yes or no to photos placed
+WRONG_PAIRS = DATA / "overrides" / "wrong_pairs.jsonl"  # pairs the user marked wrong
 MATCH_RADIUS_M = 60  # a placement from a caption can be 25 m off
 MATCH_PANORAMAS = 16  # ranked by a quick first pass, the best views matched in full
 # every panorama a photo's match may be found from stands this near its caption's place: those
@@ -1656,13 +1657,21 @@ def _offers(
     fixed: Set[str],
 ) -> dict[str, dict]:
     """The placements said near (see _said_near) as the placing page opens them (see
-    _offer_of): those with pairs of their own (a camera proposed kept no points)."""
+    _offer_of): those with pairs of their own (a camera proposed kept no points), none of the
+    points the user marked wrong (see confirming.marked)."""
+    try:
+        wrong = confirming.marked(WRONG_PAIRS)
+    except (ValueError, KeyError, TypeError) as error:  # as the confirmation page: none marked
+        typer.echo(f"paires marquées fausses illisibles ({error})", err=True)
+        wrong = {}
     offers = {}
     for k, m in near.items():
         if _is_proposal(m["inputs"]):
             continue
         try:
-            found = _offer_of(k, m, by_id, fixed, _size_of(photos[k]["image"]))
+            found = _offer_of(
+                k, m, by_id, fixed, _size_of(photos[k]["image"]), wrong.get((k, m["inputs"]), set())
+            )
         except Exception as error:  # this one opens as any other photo: the others go on
             typer.echo(f"{k} : pas de paires proposées ({error})", err=True)
             continue
@@ -1677,15 +1686,21 @@ def _offer_of(
     by_id: dict[str, match.Panorama],
     fixed: Set[str],
     size: tuple[int, int],
+    wrong: Set[tuple[float, float]] = frozenset(),
 ) -> dict | None:
     """A placement of match, as the placing page opens it (see placing.Sources.offer): in the
     first of its panoramas (see _sources_first) where it has enough pairs of its own (see
     bridging.paired), up to OFFERED of them, the most spread, the photo's pixels at `size` (the
-    page's image of it); its camera as the starting pin. None without its points (kept for
-    other inputs) or pairs."""
+    page's image of it), none of the points at the pixels `wrong` (marked so by the user, see
+    confirming.marked); its camera as the starting pin. None
+    without its points (kept for other inputs) or pairs."""
     if (found := _found_from(photo_id, kept)) is None:
         return None
     m, points, observed = found
+    if wrong:  # marked so on the confirmation page: never laid again
+        keys = (confirming.point_key(xy) for xy in points.pixels)
+        right = np.fromiter((k not in wrong for k in keys), bool, len(points.pixels))
+        points = match.Points(points.pixels[right], points.world[right], points.seen[right])
     for sphere in _sources_first(points, by_id, m, fixed):
         if (paired := bridging.paired(points, observed, sphere, size)) is None:
             continue
@@ -1738,6 +1753,7 @@ def _pairs_shown(
     return [
         {
             "index": k,
+            "point": list(confirming.point_key(points.pixels[k])),  # a mark's key
             "old": [round(float(v), 2) for v in old[k]],
             "today": [round(float(v), 2) for v in today[k]],
             "matched": bool(here[k]),
@@ -4084,7 +4100,7 @@ def confirm_placed(port: int = 8768, open_browser: bool = True) -> None:
 
     _serve_page(
         lambda: confirming.serve(
-            placed, ANCHORS, functools.partial(_said_on, placed), frame, scene, port
+            placed, ANCHORS, WRONG_PAIRS, functools.partial(_said_on, placed), frame, scene, port
         ),
         f"photos situées ({len(placed)})",
         port,
@@ -4913,7 +4929,7 @@ def place_photos(
         return _offers(near_at(stamp), photos, by_id, fixed)
 
     def stamp() -> tuple:
-        return _stamp([MATCHES, ANCHORS, PROPOSED_CAMERAS])
+        return _stamp([MATCHES, ANCHORS, PROPOSED_CAMERAS, WRONG_PAIRS])
 
     def ahead() -> dict[str, str]:  # near verdicts, then photos carried from placed ones
         return _placing_ahead(near_at(stamp()), carried_now())

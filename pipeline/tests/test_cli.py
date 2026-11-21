@@ -3154,7 +3154,7 @@ def test_near_placements_are_offered_with_their_pairs_one_failing_leaving_the_ot
     photos = dict.fromkeys(["near", "bare", "broken"], {"image": image, "inputs": "img"})
     sizes = {}
 
-    def offer_of(photo_id, kept, by_id, fixed, size):
+    def offer_of(photo_id, kept, by_id, fixed, size, wrong):
         sizes[photo_id] = size
         if photo_id == "broken":
             raise ValueError("points illisibles")
@@ -3197,3 +3197,57 @@ def test_near_photos_come_first_on_the_placing_page_and_yes_ones_no_longer_come_
     ahead = cli._placing_ahead({"n"}, {"c": {}, "n": {}})
 
     assert ahead == {"n": "près", "c": "portée"}
+
+
+def test_points_marked_wrong_are_not_offered_on_the_placing_page(monkeypatch):
+    m = cli._situation(_kept())
+    points = cli.match.Points(
+        np.array([[1.0, 1.0], [2.0, 2.0], [3.0, 3.0]]),
+        np.zeros((3, 3)),
+        np.array([frozenset({"p"})] * 3, dtype=object),
+    )
+    monkeypatch.setattr(cli, "_found_from", lambda photo_id, kept: (m, points, "observed"))
+    monkeypatch.setattr(cli, "_sources_first", lambda *a: [SimpleNamespace(id="p")])
+    given = []
+    monkeypatch.setattr(cli.bridging, "paired", lambda pts, *a: given.append(pts.pixels) or None)
+
+    cli._offer_of("pm:1", _kept(inputs="c:img"), {}, set(), (600, 800), {(2.0, 2.0)})
+
+    assert given[0].tolist() == [[1.0, 1.0], [3.0, 3.0]]
+
+
+def test_the_marks_on_a_placement_go_to_its_offer_only(tmp_path, monkeypatch):
+    cli.confirming.mark_pair(cli.WRONG_PAIRS, "pm:1", "c:img", [2.0, 2.0], True)
+    cli.confirming.mark_pair(cli.WRONG_PAIRS, "pm:1", "c:old", [1.0, 1.0], True)  # another's
+    image = tmp_path / "photo.jpg"
+    Image.new("RGB", (80, 60)).save(image)
+    given = {}
+    monkeypatch.setattr(
+        cli, "_offer_of", lambda k, m, by_id, fixed, size, wrong: given.update({k: wrong})
+    )
+
+    cli._offers({"pm:1": _kept(inputs="c:img")}, {"pm:1": {"image": image}}, {}, set())
+
+    assert given == {"pm:1": {(2.0, 2.0)}}
+
+
+def test_a_marks_file_written_wrong_leaves_the_offers_whole(tmp_path, monkeypatch):
+    cli.WRONG_PAIRS.parent.mkdir(parents=True, exist_ok=True)
+    cli.WRONG_PAIRS.write_text("{not json\n")
+    image = tmp_path / "photo.jpg"
+    Image.new("RGB", (80, 60)).save(image)
+    monkeypatch.setattr(cli, "_offer_of", lambda *a: {"panorama": "p"})
+
+    near = {"pm:1": _kept(inputs="c:img")}
+    assert cli._offers(near, {"pm:1": {"image": image}}, {}, set()) == {"pm:1": {"panorama": "p"}}
+
+
+def test_each_pair_shown_carries_its_point_as_kept(monkeypatch):
+    points = cli.match.Points(
+        np.array([[10.0, 20.0]]), np.array([[0.0, 5.0, 2.0]]), np.array([frozenset()], dtype=object)
+    )
+    monkeypatch.setattr(cli.match, "project", lambda view, world, size: np.array([[50.0, 60.0]]))
+
+    pairs = cli._pairs_shown(points, (100, 100, 3), (100, 100), "view")
+
+    assert pairs and pairs[0]["point"] == [10.0, 20.0]

@@ -23,6 +23,7 @@ def _confirming(tmp_path, photo_id="pm:1"):
     server = confirming.serve(
         placed,
         tmp_path / "anchors.jsonl",
+        tmp_path / "wrong_pairs.jsonl",
         dict,
         lambda _, part, source=False: b"S" + frames[part] if source else frames[part],
         lambda k, source=False: {**scenes[k], "source": True} if source else scenes.get(k),
