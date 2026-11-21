@@ -2289,6 +2289,7 @@ def test_the_placed_list_is_written_from_the_answers_verdicts_and_matches(monkey
     exported.touch()
     answer = {"registration": {"panorama": "q"}, "inputs": "h", "flipped": False}
     said = [("pm:1", "near", "i"), ("pp", "yes", "i:proposed-ab12cd34")]  # pp: a camera refused
+    said.append(("pm:3", "yes", "i:from-ab12cd34"))  # its chained camera said yes to
     (tmp_path / "anchors.jsonl").write_text(
         "".join(json.dumps({"photo_id": k, "verdict": v, "inputs": i}) + "\n" for k, v, i in said)
     )
@@ -2327,8 +2328,10 @@ def test_the_placed_list_is_written_from_the_answers_verdicts_and_matches(monkey
         },
         "_kept_store": lambda m, kept: (SimpleNamespace(points=lambda k, i: seen_by.get(k)), "i"),
         "_sure_panoramas": lambda: ({"sure"}, {"sure", "gps"}),  # sure of their pose, known
-        "_chained": lambda scenes, judged: {
-            "photos": {k: {"situated": _kept(inputs="i:from-ab12cd34")} for k in ("pc", "pm:1")}
+        "_chained": lambda scenes, judged, anchors: {
+            "photos": {
+                k: {"situated": _kept(inputs="i:from-ab12cd34")} for k in ("pc", "pm:1", "pm:3")
+            }
         },
     }.items():
         monkeypatch.setattr(cli, name, value)
@@ -2340,7 +2343,7 @@ def test_the_placed_list_is_written_from_the_answers_verdicts_and_matches(monkey
     assert {k: (p["status"], p["source"], p["proposed_marks"]) for k, p in written.items()} == {
         "pa": ("checked", "page", False),
         "pm:1": ("near", "match", False),  # pm:2 was placed from what the photo no longer is
-        "pm:3": ("automatic", "match", True),
+        "pm:3": ("checked", "chain", False),  # a yes wins over match's not judged
         "pm:4": ("automatic", "match", False),  # its marks were made on another crop
         "pp": ("checked", "match", False),
         "pc": ("automatic", "chain", False),  # pm:1 chained too: match's placement wins
@@ -3131,35 +3134,40 @@ def test_an_area_trusts_the_chaining_where_its_check_passed_for_things_as_they_a
     assert cli._checked_in([]) == {"saint-severin": [], "cite": []}  # checked with other code
 
 
-def test_a_chained_placement_stays_while_of_the_photo_now_and_of_anchors_not_turned_down(
+def test_a_chained_placement_stays_while_of_the_photo_now_and_its_anchors_placed(
     tmp_path, monkeypatch
 ):
     exported = tmp_path / "old.jpg"
     exported.touch()
-    refused = {"photo_id": "anchor", "verdict": "no", "inputs": "a"}
-    (tmp_path / "anchors.jsonl").write_text(json.dumps(refused) + "\n")
+    said_yes = {"photo_id": "kept-yes", "verdict": "yes", "inputs": "i:from-ab12cd34"}
+    (tmp_path / "anchors.jsonl").write_text(json.dumps(said_yes) + "\n")
     row = lambda inputs, *from_: {"situated": _kept(inputs=inputs), "from": list(from_)}  # noqa: E731
     cli.write_json(
         tmp_path / "chains.json",
         {
             "setup": "chaining's code and panoramas then",
             "photos": {
-                "same": row("i:from-ab12cd34", "kept"),
-                "cropped": row("j:from-ab12cd34", "kept"),
-                "child": row("i:from-ab12cd34", "anchor"),  # from a photo turned down since
+                "same": row("i:from-ab12cd34", "placed"),
+                "cropped": row("j:from-ab12cd34", "placed"),
+                "child": row("i:from-ab12cd34", "gone"),  # its anchor no longer placed
                 "grandchild": row("i:from-ab12cd34", "child"),
+                "kept-yes": row("i:from-ab12cd34", "gone"),  # said yes to: holds
+                "after": row("i:from-ab12cd34", "same"),  # from one chained before it
+                "alone": row("i", "placed"),  # placed without anchors: no points of its own
             },
         },
     )
     for name, value in {
         "CHAINS": tmp_path / "chains.json",
         "ANCHORS": tmp_path / "anchors.jsonl",
-        "_scenes_now": lambda: {k: "s" for k in ("same", "cropped", "child", "grandchild")},
+        "_scenes_now": lambda: {
+            k: "s" for k in ("same", "cropped", "child", "grandchild", "kept-yes", "after", "alone")
+        },
         "_inputs": lambda scene, photo_id: "i",  # each photo as it is now
         "_exported": lambda photo_id: exported,
     }.items():
         monkeypatch.setattr(cli, name, value)
 
-    chained = cli._chained(cli._scenes_now(), cli._Judged())
+    chained = cli._chained(cli._scenes_now(), cli._Judged(), {"placed"})
 
-    assert set(chained["photos"]) == {"same"}  # cropped since; placed from a "no", directly or not
+    assert set(chained["photos"]) == {"same", "kept-yes", "after"}
