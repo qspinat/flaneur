@@ -6,6 +6,7 @@ import type { Viewer } from '@photo-sphere-viewer/core';
 import * as THREE from 'three';
 import { HIDDEN, NEAREST_M, ROOFS_PAST_M, STREET_REACH_M, STRETCHED, lensTurn, reach, standingAt, type Standing, type WallRow } from './standing';
 import { drawn, framing, type Framed } from '../plate';
+import { FilledLayer } from './fill';
 import { cameraAxes, yawOf, type OldPhoto, type Panorama, type Shown } from './walk3d';
 
 const DISTANCE = 5; // inside the viewer's sphere (radius 10)
@@ -55,6 +56,8 @@ const MARGIN = 0.15; // and that frame widened by this share each way: a ray bet
 // over the roofs to the wall under them, else the sky), seen by the photographer's camera;
 // each wall given by an end and its span (ends[i]: x0, y0, x1 - x0, y1 - y0)
 const standingShader = `
+layout(location = 0) out highp vec4 weighed; // the photo times what each pixel is worth, and that
+layout(location = 1) out highp float reached; // where the photo is at all (see fill.ts)
 uniform sampler2D photo;
 uniform mat3 toWorld;
 uniform mat3 lensTurn;
@@ -67,7 +70,6 @@ uniform float tops[${MOST_WALLS}];
 uniform float spanInverse[${MOST_WALLS}]; // 1 / each wall's length
 uniform int count;
 uniform float ground;
-uniform float strength;
 uniform bool flipped;
 ${PLATE}
 varying vec3 here;
@@ -114,7 +116,7 @@ void main() {
   if (metres < NONE) seen += fromCamera / metres;
   vec2 px = seen.xy / seen.z;
   // how little of the photo one pixel of the screen spans (as standing.squeezed), the way it is most squeezed, against
-  // the photo laid as a whole (registration._stretched): where the photographer saw a wall or the
+  // the photo laid as a whole (the pipeline's drawing.stretch_kept): where the photographer saw a wall or the
   // street edge on, the photo would be smeared in streaks; it fades out to today there (worked
   // out before any pixel is left out: the derivatives need all four of a block)
   vec2 dx = dFdx(px), dy = dFdy(px);
@@ -124,16 +126,18 @@ void main() {
   // (not the sky: where two walls' backdrops meet, the photo folds there, a line, not a smear)
   float spread = length(dFdx(d));  // before choosing: derivatives need all four of a block
   float kept = sky ? 1.0 : smoothstep(0.5, 1.0, least * ${STRETCHED.toFixed(1)} / (density * spread));
-  if (seen.z <= 0.0 || kept <= 0.0) discard;
+  if (seen.z <= 0.0) discard;
   vec2 uv = px / size.yx;
   if (flipped) uv.x = 1.0 - uv.x;
-  if (framedOut(uv)) discard;  // before the walls are walked: none of it drawn
-  if (metres < NONE) {  // hidden from the photographer by a wall nearer to them
+  if (framedOut(uv)) discard;  // not the photo at all (beyond its plate, on its label)
+  if (metres < NONE && kept > 0.0) {  // hidden from the photographer by a wall nearer to them
     vec3 away = d * metres - camera;
     float far = length(away) / ${HIDDEN.toFixed(2)};
-    if (toWall(camera, normalize(away), false, far, true) < far) discard;
+    if (toWall(camera, normalize(away), false, far, true) < far) kept = 0.0;
   }
-  gl_FragColor = vec4(texture2D(photo, vec2(uv.x, 1.0 - uv.y)).rgb, strength * kept);
+  // nothing cut: what a pixel is worth, the fill makes the rest (fill.ts)
+  weighed = vec4(texture2D(photo, vec2(uv.x, 1.0 - uv.y)).rgb * kept, kept);
+  reached = 1.0;
 }`;
 
 /** A 3×3 matrix given row by row. */
@@ -151,6 +155,7 @@ type Kind = 'flat' | 'standing';
 
 interface Drawn {
   photo: OldPhoto;
+  kind: Kind; // standing: drawn after the viewer's scene, filled (see the constructor)
   mesh: THREE.Mesh;
   material: THREE.ShaderMaterial;
   strength: number;
@@ -166,15 +171,30 @@ export class PhotoLayer {
   private textures = new Map<string, THREE.Texture>();
   private loader = new THREE.TextureLoader();
   private fade: number;
+  private filled = new FilledLayer();
 
-  /** `imageOf`: the image of a photo to draw (its size chosen for the screen). */
+  /** `imageOf`: the image of a photo to draw (its size chosen for the screen). Standing photos
+   *  are drawn after the viewer's scene, filled (see fill.ts). */
   constructor(viewer: Viewer, imageOf: (photo: OldPhoto) => string, fade: number) {
     this.viewer = viewer;
     this.imageOf = imageOf;
     this.fade = fade;
+    viewer.renderer.setCustomRenderer((renderer) => ({
+      render: (scene, camera) => {
+        const seeing = camera as THREE.PerspectiveCamera;
+        const standing = this.drawn.filter(
+          (d) => d.kind === 'standing' && d.mesh.visible && d.strength * this.fade > 0 && this.filled.inView(d.mesh, seeing),
+        );
+        standing.forEach((d, n) => this.filled.prepare(renderer, n, d.mesh, seeing)); // apart first
+        this.filled.keep(standing.length); // those no longer needed let go
+        renderer.render(scene, camera);
+        standing.forEach((d, n) => this.filled.lay(renderer, n, d.mesh, seeing, d.strength * this.fade));
+      },
+    }));
   }
 
-  /** Stand in panorama `p`: the photos shown there, each at its strength, the last on top;
+  /** Stand in panorama `p`: the photos shown there, each at its strength, the last on top (but
+   *  standing photos are laid after the flat ones, filled: see the constructor);
    *  one whose camera stood off the panorama laid on its walls, if it has them. */
   stand(p: Panorama, photos: [OldPhoto, Shown][]): void {
     this.clear();
@@ -192,7 +212,7 @@ export class PhotoLayer {
         geometry = quad(laid.map((d) => d.clone().applyMatrix3(fromWorld)), MARGIN) ?? around();
         const across = density(laid, standing);
         uniforms = { ...standingUniforms(standing, kr, walls, ground, toWorld), density: { value: across } };
-        at = (direction) => standingAt(direction.clone().applyMatrix3(toWorld).normalize().toArray(), standing, walls, ground, across);
+        at = (direction) => standingAt(direction.clone().applyMatrix3(toWorld).normalize().toArray(), standing, walls, ground);
       } else {
         // from the photo's [0, 1]² to the viewer's frame, and back
         const fromPhoto = fromWorld.clone().multiply(rows(a.flat()).transpose()).multiply(rows(registration.m));
@@ -211,14 +231,14 @@ export class PhotoLayer {
       const material = kept[order] ?? (kept[order] = newMaterial(kind));
       Object.assign(material.uniforms, uniforms, {
         photo: { value: this.texture(photo) },
-        strength: { value: strength * this.fade },
+        ...(kind === 'flat' ? { strength: { value: strength * this.fade } } : {}),
         flipped: { value: photo.flipped },
         ...framedUniforms(photo),
       });
       const mesh = new THREE.Mesh(geometry, material);
-      mesh.renderOrder = 10 + order;
-      this.viewer.renderer.addObject(mesh);
-      this.drawn.push({ photo, mesh, material, strength, at });
+      if (kind === 'flat') mesh.renderOrder = 10 + order;
+      if (kind === 'flat') this.viewer.renderer.addObject(mesh);
+      this.drawn.push({ photo, kind, mesh, material, strength, at });
     });
     this.viewer.needsUpdate();
   }
@@ -232,13 +252,15 @@ export class PhotoLayer {
   /** How strongly the old photos show against today (0 to 1). */
   setFade(fade: number): void {
     this.fade = fade;
-    for (const d of this.drawn) d.material.uniforms.strength.value = d.strength * fade;
+    for (const d of this.drawn) if (d.kind === 'flat') d.material.uniforms.strength.value = d.strength * fade;
     this.viewer.needsUpdate();
   }
 
-  /** The photo shown on top in a direction of the viewer's frame, if any. */
+  /** The photo shown on top in a direction of the viewer's frame, if any: standing photos
+   *  first (laid above the flat ones), the last first. */
   at(direction: THREE.Vector3): OldPhoto | null {
-    for (const d of [...this.drawn].reverse()) {
+    const onTop = [...this.drawn].reverse().sort((a, b) => Number(b.kind === 'standing') - Number(a.kind === 'standing'));
+    for (const d of onTop) {
       if (!d.mesh.visible || d.strength * this.fade < UNSEEN) continue;
       const uv = d.at(direction);
       if (uv && drawn(d.photo, d.photo.flipped ? 1 - uv[0] : uv[0], uv[1])) return d.photo;
@@ -253,7 +275,7 @@ export class PhotoLayer {
 
   clear(): void {
     for (const d of this.drawn) {
-      this.viewer.renderer.removeObject(d.mesh);
+      if (d.kind === 'flat') this.viewer.renderer.removeObject(d.mesh);
       d.mesh.geometry.dispose();
     }
     this.drawn = [];
@@ -284,13 +306,16 @@ function framedUniforms(photo: Framed): Record<string, { value: THREE.Vector4 }>
 }
 
 function newMaterial(kind: Kind): THREE.ShaderMaterial {
-  const shown = { photo: { value: null }, strength: { value: 1 }, flipped: { value: false }, ...framedUniforms({}) };
+  const shown = { photo: { value: null }, flipped: { value: false }, ...framedUniforms({}) };
+  const standing = kind === 'standing';
   return new THREE.ShaderMaterial({
-    uniforms: kind === 'flat' ? { ...shown, toPhoto: { value: new THREE.Matrix3() } } : shown,
+    // a flat photo's strength is its shader's; a standing one's, the fill's (fill.ts)
+    uniforms: standing ? shown : { ...shown, strength: { value: 1 }, toPhoto: { value: new THREE.Matrix3() } },
     vertexShader,
-    fragmentShader: kind === 'flat' ? fragmentShader : standingShader,
+    fragmentShader: standing ? standingShader : fragmentShader,
+    // a standing photo is drawn apart, written as it is (fill.ts lays it): two outputs, GLSL 3
+    ...(standing ? { glslVersion: THREE.GLSL3, blending: THREE.NoBlending } : { transparent: true }),
     side: THREE.DoubleSide,
-    transparent: true,
     depthTest: false,
     depthWrite: false,
   });

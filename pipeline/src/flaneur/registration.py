@@ -31,7 +31,6 @@ LEAST_STANDING = 4  # the fewest a camera kept is made from (its 7 unknowns, the
 STANDING_OFF = 0.01  # a pair this far (share of the photo's diagonal: 10 px of 1000) counts less
 STANDING_FOCAL = (0.2, 5.0)  # times the photo's longer side, as the flat fit's: beyond, the
 # camera slid along its axis (a longer lens traded for a farther stand)
-HIDDEN = 1.1  # a point this much farther from the camera than the nearest it sees there
 TRIPOD_M = 1.5  # a standing camera is first looked for this high above the street
 MIN_FRAME = 0.10  # share of the view the warped photo covers (Blanc, Produit, Ingensand 2018)
 MIN_MATCHED = 15  # matched automatically: as many agreeing (match.MIN_MATCHES for a view)
@@ -248,9 +247,14 @@ class Standing:
         cx, cy = _centre(self.shift, self.size)
         return np.array([[self.focal, 0.0, cx], [0.0, self.focal, cy], [0.0, 0.0, 1.0]])
 
+    def lens_turn(self) -> np.ndarray:
+        """From world directions to the photo's homogeneous pixels: its lens times its turn (the
+        3D walk's lensTurn, standing.ts)."""
+        return self._lens() @ cv2.Rodrigues(np.array(self.turn))[0]
+
     def project(self, world: np.ndarray) -> np.ndarray:
         """Where points of the world fall in the photo (pixels; behind it, NaN)."""
-        seen = (world - self.position) @ cv2.Rodrigues(np.array(self.turn))[0].T @ self._lens().T
+        seen = (world - self.position) @ self.lens_turn().T
         with np.errstate(divide="ignore", invalid="ignore"):
             return np.where(seen[:, 2:] > 0, seen[:, :2] / seen[:, 2:], np.nan)
 
@@ -513,88 +517,6 @@ def composite(
     laid = view_bgr.copy()
     cv2.copyTo(warped, lands, laid)
     return laid
-
-
-STRETCHED = 6.0  # a part of the photo laid this many times larger than the photo as a whole
-
-
-def _stretched(at: np.ndarray, inside: np.ndarray) -> np.ndarray:
-    """Where the photo laid in a view (`at`: each view pixel's place in the photo, side × side
-    × 2; `inside`: those it reaches) would cover STRETCHED times more of the view than it does
-    as a whole: a wall the photographer saw edge on, its few pixels smeared into streaks."""
-    with np.errstate(invalid="ignore"):
-        du_dy, du_dx = np.gradient(np.where(inside, at[..., 0], np.nan))
-        dv_dy, dv_dx = np.gradient(np.where(inside, at[..., 1], np.nan))
-        # how little of the photo one view pixel spans, the way it is most squeezed: the lesser
-        # singular value of the map's local derivative (a streak is squeezed one way only)
-        square = du_dx**2 + du_dy**2 + dv_dx**2 + dv_dy**2
-        det = du_dx * dv_dy - du_dy * dv_dx
-        least = np.sqrt(np.maximum(square - np.sqrt(np.maximum(square**2 - 4 * det**2, 0)), 0) / 2)
-        scale = np.sqrt(np.abs(det))  # the photo's scale there, both ways
-    known = np.isfinite(least) & (scale > 0)
-    if not known.any():
-        return np.zeros_like(inside)
-    return known & (least < np.median(scale[known]) / STRETCHED)
-
-
-def _hatched(view: np.ndarray) -> np.ndarray:
-    """A view darkened in diagonal stripes, still seen through."""
-    rows, cols = np.indices(view.shape[:2])
-    shade = np.where((rows + cols) // 6 % 2 == 0, 0.45, 0.85)
-    return (view * shade.reshape(*shade.shape, *[1] * (view.ndim - 2))).astype(view.dtype)
-
-
-def composite_standing(
-    view_bgr: np.ndarray,
-    photo_bgr: np.ndarray,
-    s: Standing,
-    origin: np.ndarray,
-    view: ViewOf,
-    metres: np.ndarray,
-) -> np.ndarray:
-    """The view (square, cut from the panorama at `origin`) with the photo laid in through
-    depth: each pixel's point of today (`metres` along its ray; the sky infinitely far) seen by
-    the standing camera, unless a nearer point hides it from the camera (HIDDEN times farther
-    than the nearest seen in that part of the photo, as wide as a pixel of the view). Where the
-    photo does not reach, or the depth is unknown (NaN), the view as it was; where the photo
-    would be stretched thin (see _stretched), the view hatched: the photo has nothing to show
-    there (a wall the photographer saw edge on — or a wall misplaced)."""
-    side = view_bgr.shape[0]
-    if view_bgr.shape[1] != side:
-        raise ValueError("une vue est carrée")
-    h, w = s.size
-    pixels = match.pixels_of((side, side))
-    world = match.view_directions(pixels, view.heading, view.fov, side, view.pitch)
-    world = world.astype(np.float32)
-    lens = (s._lens() @ cv2.Rodrigues(np.array(s.turn))[0]).astype(np.float32)
-    step = np.asarray(origin, float) - s.position  # from the camera to the panorama
-    far = np.asarray(metres, float).ravel()
-    with np.errstate(divide="ignore"):
-        nearness = (1 / far).astype(np.float32)  # the sky 0, unknown NaN
-    # each pixel's point, from the camera, its distance along the panorama's ray divided out
-    seen = world @ lens.T + nearness[:, None] * (lens @ step).astype(np.float32)
-    with np.errstate(divide="ignore", invalid="ignore"):
-        at = seen[:, :2] / seen[:, 2:]
-    inside = (seen[:, 2] > 0) & np.all((at >= 0) & (at < [w, h]), axis=1)
-    # what the camera sees in each part of its photo is the nearest point there
-    away = np.full(len(far), np.inf)
-    finite = np.isfinite(far)
-    away[finite] = np.linalg.norm(world[finite] * far[finite, None] + step, axis=1)
-    cell = max(1, int(np.ceil(s.focal / match.focal(view.fov, side))))  # a view pixel, in it
-    part = np.where(inside[:, None], at // cell, 0).astype(int)
-    key = part[:, 1] * (w // cell + 1) + part[:, 0]
-    nearest = np.full((h // cell + 1) * (w // cell + 1), np.inf)
-    np.minimum.at(nearest, key[inside], away[inside])
-    inside &= ~(away > HIDDEN * nearest[key])
-    thin = _stretched(at.reshape(side, side, 2), inside.reshape(side, side)).ravel()
-    inside &= ~thin
-    maps = np.where(inside[:, None], at - 0.5, -1.0).astype(np.float32).reshape(side, side, 2)
-    warped = cv2.remap(
-        photo_bgr, maps[..., 0], maps[..., 1], cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE
-    )
-    shape = (side, side, *[1] * (view_bgr.ndim - 2))
-    base = np.where(thin.reshape(shape), _hatched(view_bgr), view_bgr) if thin.any() else view_bgr
-    return np.where(inside.reshape(shape), warped, base)
 
 
 def carried(

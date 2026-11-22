@@ -30,6 +30,7 @@ NOTHING = -2  # nothing known: the sky, or beyond the walls
 
 GROUND_BAND_M = 0.3  # details this close above the street are the street
 STREET_REACH_M = 50.0  # a ray meets the street this far at most (beyond: nearly level, unsure)
+ROOFS_PAST_M = 2.0  # over the roofs, a wall is met this far past its ends (standing.ts)
 MOST_POINTS = 12000  # the details a fit is made from, at most (fewer: its draws vary)
 SAMPLES = 300  # pairs of details proposing a line
 PAIR_M = (1.0, 20.0)  # how far apart a pair's details stand
@@ -541,6 +542,30 @@ def in_view(
     )
     metres = cast(scene, rays)[0] if along is None else along(rays)
     return np.where(np.isnan(metres), np.inf, metres).reshape(side, side)
+
+
+def background(scene: Scene, directions: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """How far along world unit `directions` a photo laid from the scene's camera is drawn, as the
+    3D walk draws it (web/src/sphere/standing.ts, reachOrSky): the nearest wall, else the street
+    (see cast), else, for a ray going up, the wall under it past the roofs (its ends ROOFS_PAST_M
+    farther), else infinitely far; and whether it is the sky (neither a wall nor the street)."""
+    d = np.asarray(directions, float)
+    metres, met = cast(scene, d)
+    sky = met == NOTHING
+    metres = np.where(sky, np.inf, metres)
+    up = sky & (d[:, 2] > 0)
+    if up.any() and scene.walls:
+        longer = []
+        for w in scene.walls:
+            a, b = np.array(w.a, float), np.array(w.b, float)
+            along = (b - a) / max(float(np.linalg.norm(b - a)), 1e-9)
+            longer.append(
+                replace(w, a=tuple(a - ROOFS_PAST_M * along), b=tuple(b + ROOFS_PAST_M * along))
+            )
+        origin = np.asarray(scene.origin, float)
+        points, hit = _prisms(longer, scene.ground, [np.inf] * len(longer)).hit(origin, d[up])
+        metres[up] = np.where(hit >= 0, np.linalg.norm(points - origin, axis=1), np.inf)
+    return metres, sky
 
 
 def with_drawn(

@@ -1,6 +1,6 @@
 // A photo laid on today's walls from where it was taken: each direction from the panorama goes
 // out to the walls around it (or the street, or past the roofs), and that point is seen by the
-// camera that took the photo (the pipeline's registration.Standing, composite_standing). The
+// camera that took the photo (the pipeline's registration.Standing, drawing.composite_standing). The
 // shader in photo.ts does the same per pixel; this one answers a click and is tested.
 
 /** The camera where the photographer stood, placed from its panorama (metres east, north,
@@ -21,8 +21,6 @@ export const NEAREST_M = 0.5; // a wall nearer than this along a ray is not met 
 export const STREET_REACH_M = 50; // the street met this far at most (facades.STREET_REACH_M)
 export const HIDDEN = 1.1; // a point this much farther than a wall in its way is hidden
 export const STRETCHED = 6; // a part of the photo laid this many times larger than the photo as a whole: smeared
-const STEP_RAD = 1e-4; // how far a direction is moved to see how the photo stretches there
-const FAINT = 0.05; // a part of the photo faded this much catches no click (photo.ts: UNSEEN)
 export const ROOFS_PAST_M = 2; // over the roofs, walls are met this far past their ends: the sky
 // does not tear between two walls (their corners are joined, not the gaps between blocks)
 
@@ -103,44 +101,13 @@ export function photoPixel(d: number[], metres: number, s: Standing, kr = lensTu
   return seen[2] > 0 ? [seen[0] / seen[2], seen[1] / seen[2]] : [NaN, NaN];
 }
 
-const cross = (a: number[], b: number[]) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
-const unit = (v: number[]) => v.map((x) => x / Math.hypot(...v));
-
-/** How little of the photo a small turn of the direction `d` spans (`here`: where `d` falls in
- *  it), the way it is most squeezed: the lesser singular value of the photo's pixels per radian
- *  there (as the shader in photo.ts works it out per pixel of the screen). */
-function squeezed(d: number[], here: number[], s: Standing, walls: WallRow[], ground: number, kr: number[][]): number {
-  const e1 = unit(cross(d, Math.abs(d[2]) < 0.9 ? [0, 0, 1] : [1, 0, 0]));
-  const [a, b] = [e1, cross(d, e1)].map((e) => {
-    const v = unit(d.map((x, i) => x + STEP_RAD * e[i]));
-    const there = photoPixel(v, depthAlong(v, walls, ground), s, kr);
-    return [(there[0] - here[0]) / STEP_RAD, (there[1] - here[1]) / STEP_RAD];
-  });
-  const square = a[0] ** 2 + a[1] ** 2 + b[0] ** 2 + b[1] ** 2;
-  const det = a[0] * b[1] - a[1] * b[0];
-  return Math.sqrt(Math.max(square - Math.sqrt(Math.max(square ** 2 - 4 * det ** 2, 0)), 0) / 2);
-}
 
 /** Where a direction from the panorama shows in the photo ([0, 1]², y down), or null: behind
- *  the camera, off the photo, hidden from the photographer by a wall nearer to them, or (the
- *  photo's pixels per radian as laid, `density`, given) where the photo fades out, smeared,
- *  but in the sky (see the shader in photo.ts). */
-export function standingAt(d: number[], s: Standing, walls: WallRow[], ground: number, density?: number): [number, number] | null {
-  const [metres, sky] = reachOrSky([0, 0, 0], d, walls, ground);
-  const kr = lensTurn(s);
-  const [x, y] = photoPixel(d, metres, s, kr);
+ *  the camera, or off the photo. A point hidden from the photographer or smeared is still the
+ *  photo's: the fill draws it (see fill.ts), and a click there opens it. */
+export function standingAt(d: number[], s: Standing, walls: WallRow[], ground: number): [number, number] | null {
+  const [metres] = reachOrSky([0, 0, 0], d, walls, ground);
+  const [x, y] = photoPixel(d, metres, s, lensTurn(s));
   const [u, v] = [x / s.size[1], y / s.size[0]];
-  if (!(u >= 0 && u <= 1 && v >= 0 && v <= 1)) return null;
-  if (metres < Infinity) {
-    const away = d.map((v, i) => v * metres - s.position[i]);
-    const length = Math.hypot(...away);
-    const toward = away.map((v) => v / length);
-    if (toWall(s.position, toward, walls, ground, false, length / HIDDEN) < length / HIDDEN) return null;
-  }
-  if (density !== undefined && !sky) {
-    const ratio = (squeezed(d, [x, y], s, walls, ground, kr) * STRETCHED) / density;
-    const t = Math.min(1, Math.max(0, (ratio - 0.5) / 0.5));
-    if (t * t * (3 - 2 * t) < FAINT) return null; // the shader's smoothstep(0.5, 1.0, ratio)
-  }
-  return [u, v];
+  return u >= 0 && u <= 1 && v >= 0 && v <= 1 ? [u, v] : null;
 }

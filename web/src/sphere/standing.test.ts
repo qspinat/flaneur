@@ -62,21 +62,10 @@ describe('a photo laid on the walls from where it was taken', () => {
     expect(standingAt(seen[1][0], standing, walls, ground)).toBeNull(); // left of it
   });
 
-  it('draws nothing the photographer could not see, a wall standing between', () => {
+  it('takes a click where the photographer could not see: the fill draws the photo there', () => {
     const between: WallRow = [0.5, 10, 2.0, 10, 5];
 
+    expect(standingAt([0, 1, 0], standing, [...walls, between], ground)).toEqual(standingAt([0, 1, 0], standing, walls, ground));
     expect(standingAt([0, 1, 0], standing, walls, ground)).not.toBeNull();
-    expect(standingAt([0, 1, 0], standing, [...walls, between], ground)).toBeNull();
-  });
-
-  it('catches no click where the photo fades out, smeared on a wall the photographer saw edge on', () => {
-    const north: Standing = { position: [3.9, -1, 0], turn: [Math.PI / 2, 0, 0], focal: 700, shift: [0, 0], size: [600, 800] };
-    const unit = (v: number[]) => v.map((x) => x / Math.hypot(...v));
-    const edgeOn = unit([4, 15, 0.5]); // on the right wall, which the camera grazes
-    const ahead = unit([0, 30, 0.5]); // on the end wall, seen straight on
-
-    expect(standingAt(edgeOn, north, walls, ground)).not.toBeNull(); // drawn, were it not smeared
-    expect(standingAt(edgeOn, north, walls, ground, 700)).toBeNull();
-    expect(standingAt(ahead, north, walls, ground, 700)).not.toBeNull();
   });
 });

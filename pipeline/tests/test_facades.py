@@ -99,6 +99,28 @@ def test_a_ray_meets_the_nearest_wall_then_the_ground_then_nothing():
     assert np.isnan(metres[2]) and met[2] == facades.NOTHING
 
 
+def test_beyond_the_walls_a_ray_going_up_meets_the_wall_under_it_as_the_walk_draws_it():
+    walls = [facades.Wall((-5.0, 10.0), (5.0, 10.0), 6.0, "fitted")]  # its top 6 m up
+    rays = np.array(
+        [
+            [0.0, 1.0, 1.0],  # over its roof
+            [0.6, 1.0, 1.0],  # over it, 1 m past its end: still its backdrop
+            [0.8, 1.0, 1.0],  # 3 m past its end: the sky
+            [0.0, 1.0, -0.5],  # the street, 5 m before the wall
+            [0.0, -1.0, 0.1],  # away from it: the sky
+        ]
+    )
+    rays /= np.linalg.norm(rays, axis=1, keepdims=True)
+
+    metres, sky = facades.background(_scene(walls), rays)
+
+    assert sky.tolist() == [True, True, True, False, True]  # neither a wall nor the street
+    assert metres[0] == pytest.approx(np.hypot(10, 10))
+    assert metres[1] == pytest.approx(np.linalg.norm([6, 10, 10]))
+    assert np.isinf(metres[2]) and np.isinf(metres[4])
+    assert metres[3] == pytest.approx(np.hypot(5, 2.5))
+
+
 def test_the_sky_of_a_view_is_infinitely_far():
     walls = [facades.Wall((-4.0, 0.0), (-4.0, 60.0), 12.0, "fitted")]
 
