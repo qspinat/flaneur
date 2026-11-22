@@ -1,6 +1,6 @@
 """Makes what tests/visual/walk3d.mjs checks a photo laid on the walls against: a checkerboard
 taken by a camera standing 2 m off a leaning panorama of the pilot, on a wall across the street,
-and the pipeline's own drawing of it (registration.composite_standing) in a view; written to the
+and the pipeline's own drawing of it (drawing.composite_standing) in a view; written to the
 folder given (nothing in the site's data). Run with the pipeline's environment:
     cd pipeline && uv run python ../web/tests/visual/standing_fixture.py <folder> [fov]"""
 
@@ -13,7 +13,7 @@ import cv2
 import numpy as np
 from fixture_common import OPENING_FOV, pilot
 
-from flaneur import facades, match, registration, scene
+from flaneur import drawing, facades, match, registration, scene
 
 GROUND = -2.5  # the street, from the panorama
 out = Path(sys.argv[1])
@@ -45,8 +45,8 @@ s = registration.Standing(tuple(position), tuple(turn), 1200.0, (0.02, -0.04), (
 side = 640
 seen = registration.ViewOf(heading=heading, pitch=0.0, fov=fov)  # as "En 3D" opens it
 view = match.perspective(equirect, axes, seen.heading, seen.fov, side, seen.pitch)
-metres = facades.in_view(around, seen, side).astype(np.float32)
-drawn = registration.composite_standing(view, board, s, np.zeros(3), seen, metres)
+
+drawn = drawing.composite_standing(view, board, s, around, seen)
 cv2.imwrite(str(out / "expected.png"), drawn)
 # the flat fit the page opens on (where "En 3D" faces), through points of the board on the wall
 spread = np.array([[0.2, 0.2], [0.8, 0.2], [0.8, 0.8], [0.2, 0.8], [0.5, 0.5], [0.3, 0.6]]) * [

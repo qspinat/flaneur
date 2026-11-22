@@ -4838,6 +4838,8 @@ def place_photos(
         walk = _walk(conn, _placing_answers(answers)[0])
         copies = dedup.negatives(conn)
         fixed = _fixed_by_colmap(panoramas.load(conn), register.load(FIXES))  # trusted first
+    site = WEB_DATA / "walk.json"
+    framed = {p["id"]: p for p in json.loads(site.read_text())["photos"]} if site.exists() else {}
     photos = {
         me.id: {
             "title": me.title,
@@ -4847,6 +4849,8 @@ def place_photos(
             "heading": me.heading,
             "image": _exported(me.id),
             "inputs": _image(me.id),  # answers say which image they were made on
+            # an Albert-Kahn plate and the museum's label, as the export found them
+            **{k: framed[me.id][k] for k in ("plate", "label") if k in framed.get(me.id, {})},
         }
         for me in walk
         if _exported(me.id).exists()

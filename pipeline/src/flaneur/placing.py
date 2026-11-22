@@ -19,7 +19,17 @@ import cv2
 import numpy as np
 from shapely.geometry import Point
 
-from flaneur import depth, facades, localpage, match, placings, poses, queueing, registration
+from flaneur import (
+    depth,
+    drawing,
+    facades,
+    localpage,
+    match,
+    placings,
+    poses,
+    queueing,
+    registration,
+)
 from flaneur.gazetteer import to_degrees, to_metres
 from flaneur.panoramas import PANORAMA_HEIGHT_M
 from flaneur.registration import ViewOf
@@ -601,6 +611,14 @@ def _pixels_in(points: np.ndarray, sphere: match.Panorama, view: ViewOf) -> np.n
     return registration.view_pixels(rays @ sphere.axes.T, view, sphere.axes, SHOWN)
 
 
+def _mirrored(box: list[float] | None, flipped: bool) -> tuple[float, ...] | None:
+    """A box of shares of a photo (see plates), on the photo turned the right way round."""
+    if box is None:
+        return None
+    x0, y0, x1, y1 = box
+    return (1 - x1, y0, 1 - x0, y1) if flipped else (x0, y0, x1, y1)
+
+
 def _walls_in_view(scene: facades.Scene, sphere: match.Panorama, view: ViewOf) -> list[dict]:
     """Each wall's foot (on the street) and top as a view of the panorama shows them: points of
     a view SHOWN square along it (none where behind the camera)."""
@@ -950,20 +968,31 @@ def serve(sources: Sources, port: int) -> HTTPServer:
 
     @lru_cache(maxsize=KEPT_VIEWS)
     def metres_in(scene: facades.Scene, view: ViewOf) -> np.ndarray:
-        # the same view and walls, refitted: made once (walls drawn since: another scene); the
-        # model where no wall is met, as for the pairs
-        fill = fill_of(scene)
-        along = None if fill is None else (lambda rays: _depth(scene, rays, fill)[0])
-        return facades.in_view(scene, view, SHOWN, along).astype(np.float32)
+        # the same view and walls, refitted: made once (walls drawn since: another scene); beyond
+        # the walls and street, as the 3D walk draws it (facades.background)
+        return facades.in_view(
+            scene, view, SHOWN, lambda rays: facades.background(scene, rays)
+        ).astype(np.float32)
 
-    def laid_standing(body: dict, image: np.ndarray, sphere: match.Panorama) -> np.ndarray:
-        """The view with the photo laid by its standing camera, through the walls there."""
+    def laid_standing(
+        body: dict, photo_id: str, flipped: bool, sphere: match.Panorama
+    ) -> np.ndarray:
+        """The view with the photo laid by its standing camera, through the walls there, as the
+        3D walk draws it (an Albert-Kahn photo: its plate, never its label)."""
         view = ViewOf(**body["view"])
         camera = registration.standing_from_json(body["standing"])
-        origin = _at(sphere)
-        metres = metres_in(scene_of(sphere, body), view)
-        return registration.composite_standing(
-            cut(sphere.id, view), image, camera, origin, view, metres
+        scene = scene_of(sphere, body)
+        about = sources.photos[photo_id]
+        plate, label = (_mirrored(about.get(k), flipped) for k in ("plate", "label"))
+        return drawing.composite_standing(
+            cut(sphere.id, view),
+            photo_image(photo_id, flipped),
+            camera,
+            scene,
+            view,
+            metres_in(scene, view),
+            plate,
+            label,
         )
 
     def answered_in_parallax(body: dict, photo_id: str, sphere: match.Panorama) -> dict:
@@ -1132,8 +1161,8 @@ def serve(sources: Sources, port: int) -> HTTPServer:
                         )
                     )
                 elif self.path == "/api/composite" and body.get("standing") is not None:
-                    image = photo_image(photo_id, bool(body.get("flipped")))
-                    self._send(200, _jpeg(laid_standing(body, image, here(sphere))), "image/jpeg")
+                    laid = laid_standing(body, photo_id, bool(body.get("flipped")), here(sphere))
+                    self._send(200, _jpeg(laid), "image/jpeg")
                 elif self.path == "/api/composite":
                     laid = registration.from_json(body["registration"])
                     image = photo_image(photo_id, bool(body.get("flipped")))
