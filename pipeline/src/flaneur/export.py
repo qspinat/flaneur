@@ -17,18 +17,19 @@ import re
 import sqlite3
 from collections.abc import Collection
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, astuple, dataclass, field
 from pathlib import Path
 
 import httpx
 from PIL import Image
 from shapely.geometry import Point
 
-from flaneur import crop, dedup, panoramax, placements, review
+from flaneur import crop, dedup, panoramax, placements, plates, review
 from flaneur.gazetteer import angle, bearing, to_metres
 from flaneur.pilot import DOWNLOADS_AT_ONCE, cached_image, safe_name, save_image
 from flaneur.sources import cached_json, write_json
 
+ALBERT_KAHN = "albert_kahn:"  # its plates framed and labelled (see plates)
 DIRECTIONS = ("forward", "back", "left", "right")
 FORWARD_M = (8, 250)
 AHEAD_DEG = 25
@@ -107,6 +108,10 @@ class WalkPhoto:
     # each size's width as written, by its side
     widths: dict[int, int] = field(default_factory=dict)
     aspect: float | None = None  # height over width, as exported (the site fits it to its frame)
+    # an Albert-Kahn plate: what of its scan is the plate, and the museum's label on it (see
+    # plates), shares of the image (x0, y0, x1, y1); the image itself left as it is
+    plate: crop.Crop | None = None
+    label: crop.Crop | None = None
     today: Today | None = None
     links: dict[str, Link | None] = field(default_factory=dict)
     eras: list[str] = field(default_factory=list)
@@ -134,6 +139,8 @@ class WalkPhoto:
                 str(self.widths.get(PHOTO_SIDE, PHOTO_SIDE)): self.image,
             },
             "aspect": self.aspect,
+            **({"plate": self.plate} if self.plate else {}),
+            **({"label": self.label} if self.label else {}),
             "today": self.today
             and {
                 "image": self.today.image,
@@ -397,6 +404,8 @@ def _write_one(me: WalkPhoto, client: httpx.Client, cache_dir: Path, out_dir: Pa
         framed = _framed(me, client, cache_dir)
         me.image = image_name(me.id)
         me.aspect = round(framed.height / framed.width, 4)
+        if me.id.startswith(ALBERT_KAHN):
+            me.plate, me.label = astuple(plates.albert_kahn(framed))
         me.widths = {PHOTO_SIDE: _save(framed, PHOTO_SIDE, out_dir / me.image)}
         for side in SIZES:
             me.widths[side] = _save(framed, side, out_dir / sized(me.image, side))

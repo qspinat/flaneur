@@ -1,3 +1,5 @@
+import type { Framed } from './plate';
+
 /** The walk's data, as written by `flaneur export`, and what the screen derives from it. */
 
 export interface Link {
@@ -14,7 +16,8 @@ export interface Today {
   url: string;
 }
 
-export interface Photo {
+/** An Albert-Kahn plate is shown cut to its frame (Framed: see plate.ts). */
+export interface Photo extends Framed {
   id: string;
   title: string;
   caption: string | null;
