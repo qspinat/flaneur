@@ -28,11 +28,10 @@ export function level(degrees: number, pixelDeg: number): number {
 
 const MOST_LEVELS = 14; // a loop's bound (a screen of 16 384 pixels)
 
+// on the photo's own quad (only where it may lie), seen as the viewer sees it
 const vertexShader = `
-out vec2 at;
 void main() {
-  at = uv;
-  gl_Position = vec4(position.xy, 0.0, 1.0);
+  gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
 }`;
 
 // fill.laid, one pixel: every level read here (bilinearly), pulled back from the coarsest
@@ -43,21 +42,28 @@ uniform int depth;
 uniform int smoothest; // the level the coverage is read at (two under the coarsest)
 uniform int edgiest; // and the photo's reach (about EDGE_DEG)
 uniform float strength;
-in vec2 at;
+uniform vec2 screen; // the drawing's size, pixels
 out highp vec4 laid;
 void main() {
+  vec2 at = gl_FragCoord.xy / screen;
   float top = float(depth - 1);
   vec4 pulled = textureLod(layer, at, top);
   float reached = textureLod(reach, at, top).r;
   float covered = pulled.a, edge = reached;
+  if (pulled.a >= 1.0 && reached >= 1.0) {  // even the coarsest level full: nothing finer is missing
+    laid = vec4(textureLod(layer, at, 0.0).rgb, strength);
+    return;
+  }
   for (int k = ${MOST_LEVELS}; k >= 0; k--) {
     if (k > depth - 2) continue;
     vec4 here = textureLod(layer, at, float(k));
-    float there = textureLod(reach, at, float(k)).r;
     pulled = here + (1.0 - here.a) * pulled;
-    reached = there + (1.0 - there) * reached;
+    if (k >= edgiest) {  // the reach is needed down to its level only
+      float there = textureLod(reach, at, float(k)).r;
+      reached = there + (1.0 - there) * reached;
+      if (k == edgiest) edge = reached;
+    }
     if (k == smoothest) covered = pulled.a;
-    if (k == edgiest) edge = reached;
   }
   float shown = smoothstep(0.2, 0.8, covered) * smoothstep(0.5, 1.0, edge);
   if (shown <= 0.0) discard;
@@ -70,7 +76,7 @@ export class FilledLayer {
   private target: THREE.WebGLRenderTarget | null = null;
   private apart = new THREE.Scene();
   private screen = new THREE.Scene();
-  private flat = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+  private quad: THREE.Mesh;
   private material: THREE.ShaderMaterial;
   private size = new THREE.Vector2();
   private clearColour = new THREE.Color();
@@ -85,14 +91,17 @@ export class FilledLayer {
         smoothest: { value: 0 },
         edgiest: { value: 0 },
         strength: { value: 1 },
+        screen: { value: new THREE.Vector2() },
       },
       vertexShader,
       fragmentShader,
       transparent: true,
+      side: THREE.DoubleSide,
       depthTest: false,
       depthWrite: false,
     });
-    this.screen.add(new THREE.Mesh(new THREE.PlaneGeometry(2, 2), this.material));
+    this.quad = new THREE.Mesh(undefined, this.material);
+    this.screen.add(this.quad);
   }
 
   /** Lay `mesh` (a standing photo) filled over the screen, at `strength`, seen by `camera`. */
@@ -119,10 +128,14 @@ export class FilledLayer {
       smoothest: { value: Math.max(0, depth - 2) },
       edgiest: { value: Math.min(level(EDGE_DEG, pixelDeg), depth - 1) },
       strength: { value: strength },
+      screen: { value: this.size },
     });
+    this.quad.geometry = mesh.geometry; // the pass over the photo's quad only
+    this.quad.matrixWorld.copy(mesh.matrixWorld);
+    this.quad.matrixAutoUpdate = false;
     renderer.setClearColor(this.clearColour, clearAlpha);
     renderer.autoClear = false;
-    renderer.render(this.screen, this.flat);
+    renderer.render(this.screen, camera);
     renderer.autoClear = autoClear;
   }
 
