@@ -242,18 +242,3 @@ def test_a_copy_standing_where_its_panorama_has_no_walls_keeps_its_matrix():
     built, _ = _build({"pm:1": _row()}, copies)
 
     assert "standing" not in built["photos"][0]["shown"][1]
-
-
-def test_an_albert_kahn_plate_comes_with_its_frame_and_label_the_others_without():
-    pictures = [_picture("p1", 2.35), _picture("p2", 2.3501)]
-    walk = [_photo("pm:1"), _photo("pm:2")]
-    walk[0].plate, walk[0].label = [0.1, 0.0, 0.9, 0.95], [0.1, 0.8, 0.3, 0.9]
-
-    built, _ = scene.build3d(pictures, {"pm:1": _row(), "pm:2": _row()}, {}, walk, lambda p: None)
-
-    by_id = {p["id"]: p for p in built["photos"]}
-    assert (by_id["pm:1"]["plate"], by_id["pm:1"]["label"]) == (
-        [0.1, 0.0, 0.9, 0.95],
-        [0.1, 0.8, 0.3, 0.9],
-    )
-    assert "plate" not in by_id["pm:2"] and "label" not in by_id["pm:2"]

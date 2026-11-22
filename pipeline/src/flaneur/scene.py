@@ -228,8 +228,6 @@ def build3d(
                 "credit": credit,
                 "image": image_name(me.id),
                 "flipped": row["flipped"],
-                **({"plate": me.plate} if me.plate else {}),  # an Albert-Kahn plate's frame
-                **({"label": me.label} if me.label else {}),  # and the museum's label: not drawn
                 "shown": where,
                 **{k: row[k] for k in ("status", *placed.NOTES)},
             }

@@ -5,7 +5,7 @@
 import type { Viewer } from '@photo-sphere-viewer/core';
 import * as THREE from 'three';
 import { HIDDEN, NEAREST_M, ROOFS_PAST_M, STREET_REACH_M, STRETCHED, lensTurn, reach, standingAt, type Standing, type WallRow } from './standing';
-import { framing, type Framed } from '../plate';
+import { drawn, framing, type Framed } from '../plate';
 import { cameraAxes, yawOf, type OldPhoto, type Panorama, type Shown } from './walk3d';
 
 const DISTANCE = 5; // inside the viewer's sphere (radius 10)
@@ -19,8 +19,9 @@ void main() {
   gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
 }`;
 
-// an Albert-Kahn plate: its frame (the scan's black border and number) and the museum's label
-// on it are never drawn (see plate.ts: else the whole photo, nothing left out)
+// what of a photo is drawn (uv: shares of its image, as plate.drawn): an Albert-Kahn plate
+// without its frame (the scan's black border and number) and the museum's label on it (see
+// plate.ts: else the whole photo, nothing left out)
 const PLATE = `
 uniform vec4 plate;
 uniform vec4 label;
@@ -40,7 +41,6 @@ void main() {
   vec3 q = toPhoto * here;
   if (q.z <= 0.0) discard;
   vec2 uv = q.xy / q.z;
-  if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) discard;
   if (flipped) uv.x = 1.0 - uv.x;
   if (framedOut(uv)) discard;
   gl_FragColor = vec4(texture2D(photo, vec2(uv.x, 1.0 - uv.y)).rgb, strength);
@@ -126,14 +126,13 @@ void main() {
   float kept = sky ? 1.0 : smoothstep(0.5, 1.0, least * ${STRETCHED.toFixed(1)} / (density * spread));
   if (seen.z <= 0.0 || kept <= 0.0) discard;
   vec2 uv = px / size.yx;
-  if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) discard;
+  if (flipped) uv.x = 1.0 - uv.x;
+  if (framedOut(uv)) discard;  // before the walls are walked: none of it drawn
   if (metres < NONE) {  // hidden from the photographer by a wall nearer to them
     vec3 away = d * metres - camera;
     float far = length(away) / ${HIDDEN.toFixed(2)};
     if (toWall(camera, normalize(away), false, far, true) < far) discard;
   }
-  if (flipped) uv.x = 1.0 - uv.x;
-  if (framedOut(uv)) discard;
   gl_FragColor = vec4(texture2D(photo, vec2(uv.x, 1.0 - uv.y)).rgb, strength * kept);
 }`;
 
@@ -241,7 +240,8 @@ export class PhotoLayer {
   at(direction: THREE.Vector3): OldPhoto | null {
     for (const d of [...this.drawn].reverse()) {
       if (!d.mesh.visible || d.strength * this.fade < UNSEEN) continue;
-      if (d.at(direction)) return d.photo;
+      const uv = d.at(direction);
+      if (uv && drawn(d.photo, d.photo.flipped ? 1 - uv[0] : uv[0], uv[1])) return d.photo;
     }
     return null;
   }

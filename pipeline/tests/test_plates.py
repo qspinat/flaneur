@@ -35,8 +35,8 @@ def test_the_plate_is_shown_without_its_frame_and_strip_and_its_label_hidden():
 
     found = plates.albert_kahn(scan)
 
-    assert found.shown == pytest.approx(plate, abs=0.01)
-    assert found.hidden == pytest.approx(label, abs=0.01)
+    assert found.plate == pytest.approx(plate, abs=0.01)
+    assert found.label == pytest.approx(label, abs=0.01)
 
 
 def test_a_plate_reaching_the_scan_s_edges_is_shown_whole():
@@ -44,12 +44,12 @@ def test_a_plate_reaching_the_scan_s_edges_is_shown_whole():
 
     found = plates.albert_kahn(scan)
 
-    assert found.shown == pytest.approx((0.0, 0.0, 1.0, 1.0), abs=0.01)
-    assert found.hidden == pytest.approx(label, abs=0.01)
+    assert found.plate == pytest.approx((0.0, 0.0, 1.0, 1.0), abs=0.01)
+    assert found.label == pytest.approx(label, abs=0.01)
 
 
 def test_a_scan_without_the_museum_s_label_hides_nothing():
     rng = np.random.default_rng(2)
     plain = Image.fromarray(rng.integers(60, 200, (600, 800, 3), dtype=np.uint8))
 
-    assert plates.albert_kahn(plain).hidden is None
+    assert plates.albert_kahn(plain).label is None

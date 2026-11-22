@@ -170,8 +170,8 @@ def test_an_albert_kahn_photo_says_its_plate_and_label_the_others_none(tmp_path,
     for me in (kahn, other):
         export._write_one(me, client=None, cache_dir=tmp_path / "cache", out_dir=tmp_path)
 
-    assert kahn.for_site()["plate"] == [0.1, 0.0, 0.9, 0.95]
-    assert kahn.for_site()["label"] == [0.1, 0.8, 0.3, 0.9]
+    assert kahn.for_site()["plate"] == (0.1, 0.0, 0.9, 0.95)
+    assert kahn.for_site()["label"] == (0.1, 0.8, 0.3, 0.9)
     assert "plate" not in other.for_site() and "label" not in other.for_site()
 
 

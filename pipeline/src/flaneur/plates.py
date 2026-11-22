@@ -7,9 +7,13 @@ image; the image itself is left as it is (match reads it: its hash names the pla
 The plate's edge is a straight line across the scan, between the frame or the strip and the
 picture: on each side, the strongest line within its outer BAND, none when no line stands out
 (the plate reaches that side). The label is the same picture on every scan: found by its
-template (LABEL), at a few scales. Measured 22/11: the edges right on 16 scans looked at; the
-label found on all 104 scans on disk (normalised correlation ≥ 0.76, median 0.93)."""
+template (LABEL), at a few scales. Measured 22/11: the label found on all 104 scans on disk
+(normalised correlation ≥ 0.76, median 0.93) and on 62 of the 63 images exported (the last cut
+in half by its crop); the edges, by eye on the 167: within 12 %, 5 cut away a strip of picture
+where a side has no frame (a building's straight edge taken for it); within 6 %, 2 still do
+(less), and 2 thin strips of frame are shown instead (IF40133's top, IF50586's bottom)."""
 
+import functools
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -17,28 +21,34 @@ import cv2
 import numpy as np
 from PIL import Image
 
+from flaneur.crop import Crop
+
 LABEL = Path(__file__).with_name("albert_kahn_label.png")  # cut from IF40077's scan
-BAND = 0.12  # a side's plate edge is looked for this far in from the scan's edge, at most
+BAND = 0.06  # a side's plate edge is looked for this far in from the scan's edge, at most
 STRONG = 3.0  # a line this many times the scan's typical gradient, at least: an edge
 LABEL_CORNER = (0.35, 0.25)  # the label is looked for in this share of the width and height
 LABEL_SCALES = (0.8, 0.9, 1.0, 1.1, 1.25)
 LABEL_SCORE = 0.6  # found when the template matches this well at least
-Box = tuple[float, float, float, float]  # x0, y0, x1, y1: shares of the width and height
 
 
 @dataclass(frozen=True)
 class Plate:
-    shown: Box
-    hidden: Box | None  # the museum's label, never drawn (none found: nothing hidden)
+    plate: Crop  # what of the scan is the plate: shown
+    label: Crop | None  # the museum's label on it: never drawn (none found: nothing hidden)
 
 
 def albert_kahn(image: Image.Image) -> Plate:
     """What of an Albert-Kahn scan is the plate, and where the museum's label lies on it."""
     grey = np.asarray(image.convert("L"), float)
-    return Plate(_plate(grey), _label(grey.astype(np.uint8)))
+    label = _label(grey.astype(np.uint8))
+    return Plate(_rounded(_plate(grey)), label and _rounded(label))
 
 
-def _plate(grey: np.ndarray) -> Box:
+def _rounded(box: Crop) -> Crop:
+    return tuple(round(v, 4) for v in box)
+
+
+def _plate(grey: np.ndarray) -> Crop:
     h, w = grey.shape
     smooth = cv2.GaussianBlur(grey, (3, 3), 0)
     across = np.abs(cv2.Sobel(smooth, cv2.CV_64F, 0, 1, ksize=3))
@@ -63,14 +73,12 @@ def _edge(profile: np.ndarray, from_end: bool) -> int:
     return n - i - 1 if from_end else i + 1
 
 
-def _label(grey: np.ndarray) -> Box | None:
+def _label(grey: np.ndarray) -> Crop | None:
     h, w = grey.shape
     cw, ch = int(LABEL_CORNER[0] * w), int(LABEL_CORNER[1] * h)
     corner = grey[h - ch :, :cw]
-    template = cv2.imread(str(LABEL), cv2.IMREAD_GRAYSCALE)
     best = (LABEL_SCORE, None)
-    for scale in LABEL_SCALES:
-        t = cv2.resize(template, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
+    for t in _templates():
         if t.shape[0] >= corner.shape[0] or t.shape[1] >= corner.shape[1]:
             continue
         _, score, _, (x, y) = cv2.minMaxLoc(cv2.matchTemplate(corner, t, cv2.TM_CCOEFF_NORMED))
@@ -78,3 +86,12 @@ def _label(grey: np.ndarray) -> Box | None:
             top = h - ch + y
             best = (score, (x / w, top / h, (x + t.shape[1]) / w, (top + t.shape[0]) / h))
     return best[1]
+
+
+@functools.cache
+def _templates() -> list[np.ndarray]:
+    """The label's template, at each of LABEL_SCALES."""
+    template = cv2.imread(str(LABEL), cv2.IMREAD_GRAYSCALE)
+    return [
+        cv2.resize(template, None, fx=s, fy=s, interpolation=cv2.INTER_AREA) for s in LABEL_SCALES
+    ]

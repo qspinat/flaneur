@@ -322,6 +322,8 @@ class Walk3d {
 Promise.all([json<Scene>('scene.json'), json<Walk>('walk.json')]) // the photos' sizes with the scene
   .then(async ([scene, walk]) => {
     const maps = import('../map'); // fetched alongside the first panorama, built after it
+    const framed = new Map(walk.photos.map((p) => [p.id, p])); // an Albert-Kahn plate's frame and label
+    for (const p of scene.photos) Object.assign(p, { plate: framed.get(p.id)?.plate, label: framed.get(p.id)?.label });
     const walk3d = new Walk3d(newViewer(), scene, walk.photos);
     await walk3d.start();
     await walk3d.loadMaps(maps);

@@ -17,7 +17,7 @@ import re
 import sqlite3
 from collections.abc import Collection
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, astuple, dataclass, field
 from pathlib import Path
 
 import httpx
@@ -110,8 +110,8 @@ class WalkPhoto:
     aspect: float | None = None  # height over width, as exported (the site fits it to its frame)
     # an Albert-Kahn plate: what of its scan is the plate, and the museum's label on it (see
     # plates), shares of the image (x0, y0, x1, y1); the image itself left as it is
-    plate: list[float] | None = None
-    label: list[float] | None = None
+    plate: crop.Crop | None = None
+    label: crop.Crop | None = None
     today: Today | None = None
     links: dict[str, Link | None] = field(default_factory=dict)
     eras: list[str] = field(default_factory=list)
@@ -405,9 +405,7 @@ def _write_one(me: WalkPhoto, client: httpx.Client, cache_dir: Path, out_dir: Pa
         me.image = image_name(me.id)
         me.aspect = round(framed.height / framed.width, 4)
         if me.id.startswith(ALBERT_KAHN):
-            found = plates.albert_kahn(framed)
-            me.plate = [round(v, 4) for v in found.shown]
-            me.label = found.hidden and [round(v, 4) for v in found.hidden]
+            me.plate, me.label = astuple(plates.albert_kahn(framed))
         me.widths = {PHOTO_SIDE: _save(framed, PHOTO_SIDE, out_dir / me.image)}
         for side in SIZES:
             me.widths[side] = _save(framed, side, out_dir / sized(me.image, side))

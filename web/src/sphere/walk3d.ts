@@ -1,6 +1,6 @@
 // The 3D walk's scene (scene.json, see pipeline scene.build3d) and what is worked out of it
 // without the viewer: where photos show, the way on, the photo of the walk one faces.
-import type { Box } from '../plate';
+import type { Framed } from '../plate';
 import { shownIn, type Photo } from '../walk';
 import type { Standing, WallRow } from './standing';
 
@@ -38,15 +38,14 @@ export interface Shown {
   standing?: Standing; // the camera where the photographer stood, laid on this panorama's walls (home or copy)
 }
 
-export interface OldPhoto {
+/** An Albert-Kahn plate's frame and label (Framed) come from walk.json, set at load (main3d). */
+export interface OldPhoto extends Framed {
   id: string;
   title: string;
   years: [number | null, number | null];
   credit: string;
   image: string;
   flipped: boolean;
-  plate?: Box; // an Albert-Kahn plate: what of the scan is shown (see plate.ts)
-  label?: Box; // and the museum's label on it, never drawn
   shown: Shown[]; // its home first
   status: 'checked' | 'near' | 'automatic'; // said yes or placed by hand; near; not seen yet
   unchecked_area: boolean; // automatic: its matcher does not pass the check in its area yet
