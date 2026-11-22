@@ -57,7 +57,7 @@ const MARGIN = 0.15; // and that frame widened by this share each way: a ray bet
 // each wall given by an end and its span (ends[i]: x0, y0, x1 - x0, y1 - y0)
 const standingShader = `
 layout(location = 0) out highp vec4 weighed; // the photo times what each pixel is worth, and that
-layout(location = 1) out highp vec4 reached; // where the photo is at all (see fill.ts)
+layout(location = 1) out highp float reached; // where the photo is at all (see fill.ts)
 uniform sampler2D photo;
 uniform mat3 toWorld;
 uniform mat3 lensTurn;
@@ -70,7 +70,6 @@ uniform float tops[${MOST_WALLS}];
 uniform float spanInverse[${MOST_WALLS}]; // 1 / each wall's length
 uniform int count;
 uniform float ground;
-uniform float strength;
 uniform bool flipped;
 ${PLATE}
 varying vec3 here;
@@ -138,7 +137,7 @@ void main() {
   }
   // nothing cut: what a pixel is worth, the fill makes the rest (fill.ts)
   weighed = vec4(texture2D(photo, vec2(uv.x, 1.0 - uv.y)).rgb * kept, kept);
-  reached = vec4(1.0);
+  reached = 1.0;
 }`;
 
 /** A 3×3 matrix given row by row. */
@@ -182,18 +181,19 @@ export class PhotoLayer {
     this.fade = fade;
     viewer.renderer.setCustomRenderer((renderer) => ({
       render: (scene, camera) => {
+        const seeing = camera as THREE.PerspectiveCamera;
+        const standing = this.drawn.filter(
+          (d) => d.kind === 'standing' && d.mesh.visible && d.strength * this.fade > 0 && this.filled.inView(d.mesh, seeing),
+        );
+        standing.forEach((d, n) => this.filled.prepare(renderer, n, d.mesh, seeing)); // apart first
         renderer.render(scene, camera);
-        for (const d of this.drawn) {
-          const strength = d.strength * this.fade;
-          if (d.kind === 'standing' && d.mesh.visible && strength > 0) {
-            this.filled.draw(renderer, d.mesh, camera as THREE.PerspectiveCamera, strength);
-          }
-        }
+        standing.forEach((d, n) => this.filled.lay(renderer, n, d.mesh, seeing, d.strength * this.fade));
       },
     }));
   }
 
-  /** Stand in panorama `p`: the photos shown there, each at its strength, the last on top;
+  /** Stand in panorama `p`: the photos shown there, each at its strength, the last on top (but
+   *  standing photos are laid after the flat ones, filled: see the constructor);
    *  one whose camera stood off the panorama laid on its walls, if it has them. */
   stand(p: Panorama, photos: [OldPhoto, Shown][]): void {
     this.clear();
@@ -230,12 +230,12 @@ export class PhotoLayer {
       const material = kept[order] ?? (kept[order] = newMaterial(kind));
       Object.assign(material.uniforms, uniforms, {
         photo: { value: this.texture(photo) },
-        strength: { value: strength * this.fade },
+        ...(kind === 'flat' ? { strength: { value: strength * this.fade } } : {}),
         flipped: { value: photo.flipped },
         ...framedUniforms(photo),
       });
       const mesh = new THREE.Mesh(geometry, material);
-      mesh.renderOrder = 10 + order;
+      if (kind === 'flat') mesh.renderOrder = 10 + order;
       if (kind === 'flat') this.viewer.renderer.addObject(mesh);
       this.drawn.push({ photo, kind, mesh, material, strength, at });
     });
@@ -251,7 +251,7 @@ export class PhotoLayer {
   /** How strongly the old photos show against today (0 to 1). */
   setFade(fade: number): void {
     this.fade = fade;
-    for (const d of this.drawn) d.material.uniforms.strength.value = d.strength * fade;
+    for (const d of this.drawn) if (d.kind === 'flat') d.material.uniforms.strength.value = d.strength * fade;
     this.viewer.needsUpdate();
   }
 
@@ -303,10 +303,11 @@ function framedUniforms(photo: Framed): Record<string, { value: THREE.Vector4 }>
 }
 
 function newMaterial(kind: Kind): THREE.ShaderMaterial {
-  const shown = { photo: { value: null }, strength: { value: 1 }, flipped: { value: false }, ...framedUniforms({}) };
+  const shown = { photo: { value: null }, flipped: { value: false }, ...framedUniforms({}) };
   const standing = kind === 'standing';
   return new THREE.ShaderMaterial({
-    uniforms: standing ? shown : { ...shown, toPhoto: { value: new THREE.Matrix3() } },
+    // a flat photo's strength is its shader's; a standing one's, the fill's (fill.ts)
+    uniforms: standing ? shown : { ...shown, strength: { value: 1 }, toPhoto: { value: new THREE.Matrix3() } },
     vertexShader,
     fragmentShader: standing ? standingShader : fragmentShader,
     // a standing photo is drawn apart, written as it is (fill.ts lays it): two outputs, GLSL 3

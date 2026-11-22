@@ -1,20 +1,14 @@
 // A standing photo drawn without holes, as the pipeline draws it (pipeline/src/flaneur/fill.py,
 // drawing.py): drawn first apart, its colour weighed by what each pixel is worth (0 where the
 // photo has nothing to show: hidden from the photographer, smeared) and where it reaches at all;
-// the graphics chip halves both into levels (mipmaps, box averages); one pass reads every level
-// at each pixel and pulls them back from the coarsest: small gaps are filled from around them,
-// large ones fade to today, and the photo's edge fades across its outline. Its reach is an
-// angle: a gap looks the same filled or faded at any size of screen.
+// the graphics chip halves both into levels (mipmaps, box averages); one pass over the photo's
+// quad reads every level at each pixel and pulls them back from the coarsest: small gaps are
+// filled from around them, large ones fade to today, and the photo's edge fades across its
+// outline. Its reach is an angle: a gap looks the same filled or faded at any size of screen.
 import * as THREE from 'three';
 
 export const FILL_DEG = 2; // gaps up to about this wide are filled; wider ones fade
 export const EDGE_DEG = 1; // the photo's edge fades over about this
-
-/** 0 at `low`, 1 at `high`, smoothly between (GLSL's smoothstep). */
-export function smooth(x: number, low: number, high: number): number {
-  const t = Math.min(1, Math.max(0, (x - low) / (high - low)));
-  return t * t * (3 - 2 * t);
-}
 
 /** How many levels reach FILL_DEG, for pixels of `pixelDeg` degrees. */
 export function levels(pixelDeg: number): number {
@@ -25,8 +19,6 @@ export function levels(pixelDeg: number): number {
 export function level(degrees: number, pixelDeg: number): number {
   return Math.max(0, Math.round(Math.log2(degrees / pixelDeg)));
 }
-
-const MOST_LEVELS = 14; // a loop's bound (a screen of 16 384 pixels)
 
 // on the photo's own quad (only where it may lie), seen as the viewer sees it
 const vertexShader = `
@@ -54,8 +46,7 @@ void main() {
     laid = vec4(textureLod(layer, at, 0.0).rgb, strength);
     return;
   }
-  for (int k = ${MOST_LEVELS}; k >= 0; k--) {
-    if (k > depth - 2) continue;
+  for (int k = depth - 2; k >= 0; k--) {
     vec4 here = textureLod(layer, at, float(k));
     pulled = here + (1.0 - here.a) * pulled;
     if (k >= edgiest) {  // the reach is needed down to its level only
@@ -70,16 +61,17 @@ void main() {
   laid = vec4(pulled.rgb / max(pulled.a, 1e-6), shown * strength);
 }`;
 
-/** Draws standing photos filled: each drawn first apart (its own shader writes colour times
- *  weight, and where it reaches), then laid over what is on the screen. */
+/** Draws standing photos filled: each drawn first apart, before the viewer's scene (its own
+ *  shader writes colour times weight, and where it reaches; one target each), then laid over the
+ *  scene through its own quad. */
 export class FilledLayer {
-  private target: THREE.WebGLRenderTarget | null = null;
-  private apart = new THREE.Scene();
-  private screen = new THREE.Scene();
-  private quad: THREE.Mesh;
+  private targets: THREE.WebGLRenderTarget[] = [];
   private material: THREE.ShaderMaterial;
   private size = new THREE.Vector2();
   private clearColour = new THREE.Color();
+  private frustum = new THREE.Frustum();
+  private viewing = new THREE.Matrix4();
+  private bounds = new THREE.Sphere();
 
   constructor() {
     this.material = new THREE.ShaderMaterial({
@@ -91,7 +83,7 @@ export class FilledLayer {
         smoothest: { value: 0 },
         edgiest: { value: 0 },
         strength: { value: 1 },
-        screen: { value: new THREE.Vector2() },
+        screen: { value: this.size },
       },
       vertexShader,
       fragmentShader,
@@ -100,60 +92,68 @@ export class FilledLayer {
       depthTest: false,
       depthWrite: false,
     });
-    this.quad = new THREE.Mesh(undefined, this.material);
-    this.screen.add(this.quad);
   }
 
-  /** Lay `mesh` (a standing photo) filled over the screen, at `strength`, seen by `camera`. */
-  draw(renderer: THREE.WebGLRenderer, mesh: THREE.Mesh, camera: THREE.PerspectiveCamera, strength: number): void {
+  /** Whether `mesh` (a standing photo's quad) may be on the screen at all. */
+  inView(mesh: THREE.Mesh, camera: THREE.PerspectiveCamera): boolean {
+    const geometry = mesh.geometry;
+    if (!geometry.boundingSphere) geometry.computeBoundingSphere();
+    this.viewing.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
+    this.frustum.setFromProjectionMatrix(this.viewing);
+    return this.frustum.intersectsSphere(this.bounds.copy(geometry.boundingSphere!).applyMatrix4(mesh.matrixWorld));
+  }
+
+  /** Draw the `n`th standing photo apart (before the scene: no going back to the screen). */
+  prepare(renderer: THREE.WebGLRenderer, n: number, mesh: THREE.Mesh, camera: THREE.PerspectiveCamera): void {
     renderer.getDrawingBufferSize(this.size);
-    const target = this.targetOf(this.size.x, this.size.y);
-    const [clearAlpha, autoClear] = [renderer.getClearAlpha(), renderer.autoClear];
+    const clearAlpha = renderer.getClearAlpha();
     renderer.getClearColor(this.clearColour);
-    const parent = mesh.parent;
-    this.apart.add(mesh);
-    renderer.setRenderTarget(target);
+    renderer.setRenderTarget(this.targetOf(n, this.size.x, this.size.y));
     renderer.setClearColor(0x000000, 0);
     renderer.clear();
-    renderer.render(this.apart, camera);
+    renderer.render(mesh, camera);
     renderer.setRenderTarget(null);
-    this.apart.remove(mesh);
-    parent?.add(mesh);
+    renderer.setClearColor(this.clearColour, clearAlpha);
+  }
+
+  /** Lay the `n`th standing photo, drawn apart, over the screen at `strength`. */
+  lay(renderer: THREE.WebGLRenderer, n: number, mesh: THREE.Mesh, camera: THREE.PerspectiveCamera, strength: number): void {
+    const target = this.targets[n];
     const pixelDeg = camera.fov / this.size.y;
     const depth = levels(pixelDeg);
-    Object.assign(this.material.uniforms, {
-      layer: { value: target.textures[0] },
-      reach: { value: target.textures[1] },
-      depth: { value: Math.min(depth, MOST_LEVELS + 1) },
-      smoothest: { value: Math.max(0, depth - 2) },
-      edgiest: { value: Math.min(level(EDGE_DEG, pixelDeg), depth - 1) },
-      strength: { value: strength },
-      screen: { value: this.size },
-    });
-    this.quad.geometry = mesh.geometry; // the pass over the photo's quad only
-    this.quad.matrixWorld.copy(mesh.matrixWorld);
-    this.quad.matrixAutoUpdate = false;
-    renderer.setClearColor(this.clearColour, clearAlpha);
+    const u = this.material.uniforms;
+    u.layer.value = target.textures[0];
+    u.reach.value = target.textures[1];
+    u.depth.value = depth;
+    u.smoothest.value = Math.max(0, depth - 2);
+    u.edgiest.value = Math.min(level(EDGE_DEG, pixelDeg), depth - 1);
+    u.strength.value = strength;
+    const [own, autoClear] = [mesh.material, renderer.autoClear];
+    mesh.material = this.material; // the pass over the photo's quad only
     renderer.autoClear = false;
-    renderer.render(this.screen, camera);
+    renderer.render(mesh, camera);
     renderer.autoClear = autoClear;
+    mesh.material = own;
   }
 
   dispose(): void {
-    this.target?.dispose();
+    for (const target of this.targets) target.dispose();
     this.material.dispose();
   }
 
-  private targetOf(width: number, height: number): THREE.WebGLRenderTarget {
-    if (this.target && this.target.width === width && this.target.height === height) return this.target;
-    this.target?.dispose();
-    this.target = new THREE.WebGLRenderTarget(width, height, {
+  private targetOf(n: number, width: number, height: number): THREE.WebGLRenderTarget {
+    const found = this.targets[n];
+    if (found && found.width === width && found.height === height) return found;
+    found?.dispose();
+    const target = new THREE.WebGLRenderTarget(width, height, {
       count: 2,
       generateMipmaps: true,
       minFilter: THREE.LinearMipmapLinearFilter,
       magFilter: THREE.LinearFilter,
       depthBuffer: false,
     });
-    return this.target;
+    target.textures[1].format = THREE.RedFormat; // where the photo reaches: one channel
+    this.targets[n] = target;
+    return target;
   }
 }
