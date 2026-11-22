@@ -1,5 +1,6 @@
 // The 3D walk's scene (scene.json, see pipeline scene.build3d) and what is worked out of it
 // without the viewer: where photos show, the way on, the photo of the walk one faces.
+import type { Box } from '../plate';
 import { shownIn, type Photo } from '../walk';
 import type { Standing, WallRow } from './standing';
 
@@ -44,6 +45,8 @@ export interface OldPhoto {
   credit: string;
   image: string;
   flipped: boolean;
+  plate?: Box; // an Albert-Kahn plate: what of the scan is shown (see plate.ts)
+  label?: Box; // and the museum's label on it, never drawn
   shown: Shown[]; // its home first
   status: 'checked' | 'near' | 'automatic'; // said yes or placed by hand; near; not seen yet
   unchecked_area: boolean; // automatic: its matcher does not pass the check in its area yet

@@ -5041,6 +5041,12 @@ def _write_scene(answering: tuple) -> None:
         pictures = _lined_up(panoramas.load(conn))  # refused when tilts were measured otherwise
     site = json.loads((WEB_DATA / "walk.json").read_text())
     marked = {p["id"] for p in site["photos"] if p["in_3d"]}  # by the export, on its images
+    framed = {p["id"]: p for p in site["photos"]}  # plates and labels: found on the images
+    for me in walk:
+        me.plate, me.label = (
+            (framed.get(me.id) or {}).get("plate"),
+            (framed.get(me.id) or {}).get("label"),
+        )
     shown = {i: r for i, r in _shown_in_3d(answering).items() if i in marked}
     now = _poised(_panoramas(pictures, lambda x, y: 0.0))
     copies = _copies_drawn(shown, _carried(shown, now))

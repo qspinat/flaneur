@@ -5,6 +5,7 @@
 import type { Viewer } from '@photo-sphere-viewer/core';
 import * as THREE from 'three';
 import { HIDDEN, NEAREST_M, ROOFS_PAST_M, STREET_REACH_M, STRETCHED, lensTurn, reach, standingAt, type Standing, type WallRow } from './standing';
+import { framing, type Framed } from '../plate';
 import { cameraAxes, yawOf, type OldPhoto, type Panorama, type Shown } from './walk3d';
 
 const DISTANCE = 5; // inside the viewer's sphere (radius 10)
@@ -18,11 +19,22 @@ void main() {
   gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
 }`;
 
+// an Albert-Kahn plate: its frame (the scan's black border and number) and the museum's label
+// on it are never drawn (see plate.ts: else the whole photo, nothing left out)
+const PLATE = `
+uniform vec4 plate;
+uniform vec4 label;
+bool framedOut(vec2 uv) {
+  return uv.x < plate.x || uv.x > plate.z || uv.y < plate.y || uv.y > plate.w
+    || (uv.x >= label.x && uv.x <= label.z && uv.y >= label.y && uv.y <= label.w);
+}`;
+
 const fragmentShader = `
 uniform sampler2D photo;
 uniform mat3 toPhoto;
 uniform float strength;
 uniform bool flipped;
+${PLATE}
 varying vec3 here;
 void main() {
   vec3 q = toPhoto * here;
@@ -30,6 +42,7 @@ void main() {
   vec2 uv = q.xy / q.z;
   if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) discard;
   if (flipped) uv.x = 1.0 - uv.x;
+  if (framedOut(uv)) discard;
   gl_FragColor = vec4(texture2D(photo, vec2(uv.x, 1.0 - uv.y)).rgb, strength);
 }`;
 
@@ -56,6 +69,7 @@ uniform int count;
 uniform float ground;
 uniform float strength;
 uniform bool flipped;
+${PLATE}
 varying vec3 here;
 const float NONE = 1e30;
 
@@ -119,6 +133,7 @@ void main() {
     if (toWall(camera, normalize(away), false, far, true) < far) discard;
   }
   if (flipped) uv.x = 1.0 - uv.x;
+  if (framedOut(uv)) discard;
   gl_FragColor = vec4(texture2D(photo, vec2(uv.x, 1.0 - uv.y)).rgb, strength * kept);
 }`;
 
@@ -199,6 +214,7 @@ export class PhotoLayer {
         photo: { value: this.texture(photo) },
         strength: { value: strength * this.fade },
         flipped: { value: photo.flipped },
+        ...framedUniforms(photo),
       });
       const mesh = new THREE.Mesh(geometry, material);
       mesh.renderOrder = 10 + order;
@@ -261,8 +277,14 @@ export class PhotoLayer {
   }
 }
 
+/** A photo's plate and label as the shaders take them (see PLATE). */
+function framedUniforms(photo: Framed): Record<string, { value: THREE.Vector4 }> {
+  const { plate, label } = framing(photo);
+  return { plate: { value: new THREE.Vector4(...plate) }, label: { value: new THREE.Vector4(...label) } };
+}
+
 function newMaterial(kind: Kind): THREE.ShaderMaterial {
-  const shown = { photo: { value: null }, strength: { value: 1 }, flipped: { value: false } };
+  const shown = { photo: { value: null }, strength: { value: 1 }, flipped: { value: false }, ...framedUniforms({}) };
   return new THREE.ShaderMaterial({
     uniforms: kind === 'flat' ? { ...shown, toPhoto: { value: new THREE.Matrix3() } } : shown,
     vertexShader,

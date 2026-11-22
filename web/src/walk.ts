@@ -1,3 +1,5 @@
+import type { Box } from './plate';
+
 /** The walk's data, as written by `flaneur export`, and what the screen derives from it. */
 
 export interface Link {
@@ -34,6 +36,8 @@ export interface Photo {
   in_3d: boolean; // shown in the 3D walk (placed in its panorama)
   no_3d: boolean; // no panorama sees it: no 3D walk from it
   flipped?: boolean; // the print turned the right way round: shown mirrored (not in an older export)
+  plate?: Box; // an Albert-Kahn plate: shown cut to it (see plate.ts)
+  label?: Box; // the museum's label on it
   aspect: number | null; // height over width (null in an older export)
 }
 

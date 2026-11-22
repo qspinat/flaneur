@@ -2,7 +2,9 @@
 
 import json
 
-from flaneur import export, landmarks
+from PIL import Image
+
+from flaneur import export, landmarks, plates
 from flaneur.export import WalkPhoto
 
 NORTH_PER_M = 1 / 111_200  # degrees of latitude per metre
@@ -151,6 +153,26 @@ def test_a_place_fixed_far_from_the_proposal_is_a_different_view():
     assert not export._moved(proposed, near)
     assert export._moved(proposed, far)
     assert export._moved(proposed, turned)
+
+
+def test_an_albert_kahn_photo_says_its_plate_and_label_the_others_none(tmp_path, monkeypatch):
+    cache = tmp_path / "cache" / "archive"
+    cache.mkdir(parents=True)
+    for k in ("albert_kahn_IF1", "pm_1"):
+        Image.new("RGB", (60, 80), (90, 90, 90)).save(cache / f"{k}.jpg")
+    monkeypatch.setattr(
+        export.plates,
+        "albert_kahn",
+        lambda image: plates.Plate((0.1, 0.0, 0.9, 0.95), (0.1, 0.8, 0.3, 0.9)),
+    )
+    kahn, other = photo("albert_kahn:IF1"), photo("pm:1")
+
+    for me in (kahn, other):
+        export._write_one(me, client=None, cache_dir=tmp_path / "cache", out_dir=tmp_path)
+
+    assert kahn.for_site()["plate"] == [0.1, 0.0, 0.9, 0.95]
+    assert kahn.for_site()["label"] == [0.1, 0.8, 0.3, 0.9]
+    assert "plate" not in other.for_site() and "label" not in other.for_site()
 
 
 def test_a_broken_image_in_the_cache_leaves_the_photo_out_and_is_dropped(tmp_path):
