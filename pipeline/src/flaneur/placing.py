@@ -611,14 +611,6 @@ def _pixels_in(points: np.ndarray, sphere: match.Panorama, view: ViewOf) -> np.n
     return registration.view_pixels(rays @ sphere.axes.T, view, sphere.axes, SHOWN)
 
 
-def _mirrored(box: list[float] | None, flipped: bool) -> tuple[float, ...] | None:
-    """A box of shares of a photo (see plates), on the photo turned the right way round."""
-    if box is None:
-        return None
-    x0, y0, x1, y1 = box
-    return (1 - x1, y0, 1 - x0, y1) if flipped else (x0, y0, x1, y1)
-
-
 def _walls_in_view(scene: facades.Scene, sphere: match.Panorama, view: ViewOf) -> list[dict]:
     """Each wall's foot (on the street) and top as a view of the panorama shows them: points of
     a view SHOWN square along it (none where behind the camera)."""
@@ -967,12 +959,15 @@ def serve(sources: Sources, port: int) -> HTTPServer:
         return sources.fill(scene)
 
     @lru_cache(maxsize=KEPT_VIEWS)
-    def metres_in(scene: facades.Scene, view: ViewOf) -> np.ndarray:
-        # the same view and walls, refitted: made once (walls drawn since: another scene); beyond
-        # the walls and street, as the 3D walk draws it (facades.background)
-        return facades.in_view(
-            scene, view, SHOWN, lambda rays: facades.background(scene, rays)
-        ).astype(np.float32)
+    def depth_in(scene: facades.Scene, view: ViewOf) -> tuple[np.ndarray, np.ndarray]:
+        """How far along each pixel's ray of a view (SHOWN × SHOWN), and whether it is the sky:
+        as the 3D walk draws it (facades.background); made once (walls drawn since: another
+        scene)."""
+        rays = match.view_directions(
+            match.pixels_of((SHOWN, SHOWN)), view.heading, view.fov, SHOWN, view.pitch
+        )
+        metres, sky = facades.background(scene, rays)
+        return metres.astype(np.float32).reshape(SHOWN, SHOWN), sky.reshape(SHOWN, SHOWN)
 
     def laid_standing(
         body: dict, photo_id: str, flipped: bool, sphere: match.Panorama
@@ -980,19 +975,18 @@ def serve(sources: Sources, port: int) -> HTTPServer:
         """The view with the photo laid by its standing camera, through the walls there, as the
         3D walk draws it (an Albert-Kahn photo: its plate, never its label)."""
         view = ViewOf(**body["view"])
-        camera = registration.standing_from_json(body["standing"])
         scene = scene_of(sphere, body)
         about = sources.photos[photo_id]
-        plate, label = (_mirrored(about.get(k), flipped) for k in ("plate", "label"))
+        boxes = (tuple(about[k]) if about.get(k) else None for k in ("plate", "label"))
         return drawing.composite_standing(
             cut(sphere.id, view),
-            photo_image(photo_id, flipped),
-            camera,
+            photo_image(photo_id, False),
+            registration.standing_from_json(body["standing"]),
             scene,
             view,
-            metres_in(scene, view),
-            plate,
-            label,
+            depth_in(scene, view),
+            flipped,
+            *boxes,
         )
 
     def answered_in_parallax(body: dict, photo_id: str, sphere: match.Panorama) -> dict:
@@ -1138,7 +1132,7 @@ def serve(sources: Sources, port: int) -> HTTPServer:
                     self._json({"walls": _walls_in_view(scene, sphere, view)})
                 elif self.path == "/api/depthview":
                     sphere, view = here(sphere), ViewOf(**body["view"])
-                    metres = metres_in(scene_of(sphere, body), view)
+                    metres = depth_in(scene_of(sphere, body), view)[0]
                     self._send(200, _jpeg(_tinted(cut(sphere.id, view), metres)), "image/jpeg")
                 elif self.path == "/api/parallax":
                     sphere = here(sphere)

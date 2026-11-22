@@ -31,7 +31,6 @@ LEAST_STANDING = 4  # the fewest a camera kept is made from (its 7 unknowns, the
 STANDING_OFF = 0.01  # a pair this far (share of the photo's diagonal: 10 px of 1000) counts less
 STANDING_FOCAL = (0.2, 5.0)  # times the photo's longer side, as the flat fit's: beyond, the
 # camera slid along its axis (a longer lens traded for a farther stand)
-HIDDEN = 1.1  # a point this much farther from the camera than the nearest it sees there
 TRIPOD_M = 1.5  # a standing camera is first looked for this high above the street
 MIN_FRAME = 0.10  # share of the view the warped photo covers (Blanc, Produit, Ingensand 2018)
 MIN_MATCHED = 15  # matched automatically: as many agreeing (match.MIN_MATCHES for a view)
@@ -248,9 +247,14 @@ class Standing:
         cx, cy = _centre(self.shift, self.size)
         return np.array([[self.focal, 0.0, cx], [0.0, self.focal, cy], [0.0, 0.0, 1.0]])
 
+    def lens_turn(self) -> np.ndarray:
+        """From world directions to the photo's homogeneous pixels: its lens times its turn (the
+        3D walk's lensTurn, standing.ts)."""
+        return self._lens() @ cv2.Rodrigues(np.array(self.turn))[0]
+
     def project(self, world: np.ndarray) -> np.ndarray:
         """Where points of the world fall in the photo (pixels; behind it, NaN)."""
-        seen = (world - self.position) @ cv2.Rodrigues(np.array(self.turn))[0].T @ self._lens().T
+        seen = (world - self.position) @ self.lens_turn().T
         with np.errstate(divide="ignore", invalid="ignore"):
             return np.where(seen[:, 2:] > 0, seen[:, :2] / seen[:, 2:], np.nan)
 

@@ -1,66 +1,69 @@
-"""Filling a weighted layer: small gaps interpolated, large ones fading, the frame's edge soft."""
+"""Filling a weighted layer as a graphics chip would: small gaps interpolated, large ones
+fading, the photo's edge soft."""
 
 import numpy as np
 import pytest
 
 from flaneur import fill
 
+PIXEL_DEG = 90 / 700  # a sheet's view: 2° is 16 pixels, 1° 8
+
 
 def _layer(side=200, value=100.0):
     colour = np.full((side, side, 3), value, np.float32)
-    return colour, np.ones((side, side), np.float32)
+    return colour, np.ones((side, side), np.float32), np.ones((side, side), bool)
 
 
 def test_levels_follow_the_angle():
-    assert fill.levels(90 / 700) == 5  # a sheet's view: 2° is 16 pixels
-    assert fill.levels(90 / 1400) == 6  # twice as fine: one level more, the same angle
+    assert fill.levels(PIXEL_DEG) == 5
+    assert fill.levels(PIXEL_DEG / 2) == 6  # twice as fine: one level more, the same angle
+    assert fill.level(fill.EDGE_DEG, PIXEL_DEG) == 3  # texels of 8 pixels: about 1°
 
 
 def test_a_slit_three_pixels_wide_is_filled():
-    colour, weight = _layer()
+    colour, weight, reached = _layer()
     colour[:, :100], colour[:, 100:] = 80.0, 120.0
     weight[:, 99:102] = 0.0  # a slit
 
-    rgb, coverage = fill.push_pull(colour, weight, 5)
+    rgb, alpha = fill.laid(colour, weight, reached, PIXEL_DEG)
 
-    assert fill.alpha(coverage)[:, 99:102].min() >= 0.9
+    assert alpha[:, 99:102].min() >= 0.9
     assert 70 <= rgb[:, 99:102].min() and rgb[:, 99:102].max() <= 130
 
 
 def test_a_gap_wider_than_the_reach_fades_smoothly():
-    colour, weight = _layer(side=400)
-    weight[:, 150:250] = 0.0  # 100 pixels: far more than 16
+    colour, weight, reached = _layer(side=400)
+    weight[:, 150:250] = 0.0  # 100 pixels, 13°: far wider than 2°
 
-    _, coverage = fill.push_pull(colour, weight, 5)
-    alpha = fill.alpha(coverage)
+    _, alpha = fill.laid(colour, weight, reached, PIXEL_DEG)
 
     assert alpha[:, 195:205].max() <= 0.1
     assert np.abs(np.diff(alpha[200])).max() <= 0.2  # no step
 
 
-def test_the_frame_closes_notches_narrower_than_the_reach_and_keeps_wider_ones():
-    reached = np.ones((200, 200), bool)
-    reached[:30, 60:70] = False  # a notch 10 wide from the top edge
-    reached[:30, 120:170] = False  # one 50 wide
-    reached[90:100, 90:100] = False  # a hole inside
+def test_the_photo_s_edge_fades_across_it_and_nothing_shows_farther():
+    colour, weight, reached = _layer()
+    reached[:, :60] = False
+    weight[:, :60] = 0.0
 
-    frame = fill.frame(reached, 16)
+    _, alpha = fill.laid(colour, weight, reached, PIXEL_DEG)
 
-    assert frame[:30, 60:70].all() and frame[90:100, 90:100].all()
-    assert not frame[:20, 130:160].any()
-
-
-def test_the_edge_fades_inside_the_frame_only():
-    frame = np.zeros((100, 100), bool)
-    frame[:, 20:] = True
-
-    soft = fill.edge(frame, 8)
-
-    assert (soft[:, :20] == 0).all()
-    assert (soft[:, 21] < 0.2).all() and (soft[:, 40:] == 1).all()
-    assert np.all(np.diff(soft[50, 20:40]) >= 0)  # rising into the photo
+    assert alpha[:, :52].max() < 0.01  # nothing 1° beyond the edge
+    assert 0.3 < alpha[100, 60] < 0.7 and alpha[100, 70:].min() > 0.99  # soft across it
+    assert np.all(np.diff(alpha[100, 50:80]) >= -1e-6)  # rising into the photo
 
 
-@pytest.mark.parametrize("coverage, expected", [(0.2, 0.0), (0.5, 0.5), (0.8, 1.0)])
-def test_alpha_from_coverage(coverage, expected):
-    assert fill.alpha(np.array([coverage]))[0] == pytest.approx(expected)
+def test_a_notch_narrower_than_the_edge_is_kept_a_wide_one_is_not():
+    colour, weight, reached = _layer()
+    for cols in (slice(60, 63), slice(120, 170)):  # notches from the top edge, 3 and 50 wide
+        reached[:40, cols], weight[:40, cols] = False, 0.0
+
+    _, alpha = fill.laid(colour, weight, reached, PIXEL_DEG)
+
+    assert alpha[10:30, 60:63].min() > 0.5
+    assert alpha[:20, 135:155].max() == 0
+
+
+@pytest.mark.parametrize("x, expected", [(0.2, 0.0), (0.5, 0.5), (0.8, 1.0)])
+def test_smooth_rises_between_its_ends(x, expected):
+    assert fill.smooth(np.array([x]), 0.2, 0.8)[0] == pytest.approx(expected)

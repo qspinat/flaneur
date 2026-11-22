@@ -112,8 +112,9 @@ def test_beyond_the_walls_a_ray_going_up_meets_the_wall_under_it_as_the_walk_dra
     )
     rays /= np.linalg.norm(rays, axis=1, keepdims=True)
 
-    metres = facades.background(_scene(walls), rays)
+    metres, sky = facades.background(_scene(walls), rays)
 
+    assert sky.tolist() == [True, True, True, False, True]  # neither a wall nor the street
     assert metres[0] == pytest.approx(np.hypot(10, 10))
     assert metres[1] == pytest.approx(np.linalg.norm([6, 10, 10]))
     assert np.isinf(metres[2]) and np.isinf(metres[4])
