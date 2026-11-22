@@ -23,12 +23,16 @@ from PIL import Image
 
 from flaneur.crop import Crop
 
-LABEL = Path(__file__).with_name("albert_kahn_label.png")  # cut from IF40077's scan
+# cut from IF40077's scan (A 13 583, Département des Hauts-de-Seine, musée départemental
+# Albert-Kahn, domaine public (CC0): opendata.hauts-de-seine.fr, archives-de-la-planete-paris)
+LABEL = Path(__file__).with_name("albert_kahn_label.png")
+LABEL_SIDE = 800  # the long side of the scan it was cut from: the template scaled to the image's
 BAND = 0.06  # a side's plate edge is looked for this far in from the scan's edge, at most
 STRONG = 3.0  # a line this many times the scan's typical gradient, at least: an edge
 LABEL_CORNER = (0.35, 0.25)  # the label is looked for in this share of the width and height
 LABEL_SCALES = (0.8, 0.9, 1.0, 1.1, 1.25)
 LABEL_SCORE = 0.6  # found when the template matches this well at least
+LABEL_LEAST_PX = 16  # a template narrower than this says nothing (an image too small)
 
 
 @dataclass(frozen=True)
@@ -66,6 +70,8 @@ def _edge(profile: np.ndarray, from_end: bool) -> int:
     stands out within BAND of it)."""
     n = len(profile)
     k = int(BAND * n)
+    if not k:  # too small to have a frame
+        return n if from_end else 0
     part = profile[n - k :][::-1] if from_end else profile[:k]
     i = int(np.argmax(part))
     if part[i] < STRONG * max(float(np.median(profile)), 1.0):
@@ -78,8 +84,12 @@ def _label(grey: np.ndarray) -> Crop | None:
     cw, ch = int(LABEL_CORNER[0] * w), int(LABEL_CORNER[1] * h)
     corner = grey[h - ch :, :cw]
     best = (LABEL_SCORE, None)
-    for t in _templates():
-        if t.shape[0] >= corner.shape[0] or t.shape[1] >= corner.shape[1]:
+    for t in _templates(round(max(h, w) / LABEL_SIDE, 2)):
+        if (
+            t.shape[1] < LABEL_LEAST_PX
+            or t.shape[0] >= corner.shape[0]
+            or t.shape[1] >= corner.shape[1]
+        ):
             continue
         _, score, _, (x, y) = cv2.minMaxLoc(cv2.matchTemplate(corner, t, cv2.TM_CCOEFF_NORMED))
         if score >= best[0]:
@@ -89,9 +99,15 @@ def _label(grey: np.ndarray) -> Crop | None:
 
 
 @functools.cache
-def _templates() -> list[np.ndarray]:
-    """The label's template, at each of LABEL_SCALES."""
+def _templates(size: float) -> list[np.ndarray]:
+    """The label's template, at each of LABEL_SCALES, for a scan `size` times LABEL_SIDE."""
     template = cv2.imread(str(LABEL), cv2.IMREAD_GRAYSCALE)
+    h, w = template.shape
     return [
-        cv2.resize(template, None, fx=s, fy=s, interpolation=cv2.INTER_AREA) for s in LABEL_SCALES
+        cv2.resize(
+            template,
+            (max(1, round(w * k * size)), max(1, round(h * k * size))),
+            interpolation=cv2.INTER_AREA,
+        )
+        for k in LABEL_SCALES
     ]

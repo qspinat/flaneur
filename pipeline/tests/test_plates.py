@@ -53,3 +53,18 @@ def test_a_scan_without_the_museum_s_label_hides_nothing():
     plain = Image.fromarray(rng.integers(60, 200, (600, 800, 3), dtype=np.uint8))
 
     assert plates.albert_kahn(plain).label is None
+
+
+def test_the_label_is_found_on_a_scan_twice_as_large():
+    scan, plate, label = _scan()
+    large = scan.resize((scan.width * 2, scan.height * 2), Image.Resampling.LANCZOS)
+
+    found = plates.albert_kahn(large)
+
+    assert found.label == pytest.approx(label, abs=0.01)
+
+
+def test_an_image_too_small_to_have_a_frame_is_shown_whole():
+    tiny = Image.new("RGB", (12, 10), (90, 90, 90))
+
+    assert plates.albert_kahn(tiny) == plates.Plate((0.0, 0.0, 1.0, 1.0), None)

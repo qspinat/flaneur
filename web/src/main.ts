@@ -266,7 +266,7 @@ class Walker {
     img.src = DATA + largest(photo.images);
     img.alt = photo.title;
     img.classList.toggle('mirrored', !!photo.flipped);
-    clipToPlate(img, photo.plate); // an Albert-Kahn plate: its frame left out
+    clipToPlate(img, photo); // an Albert-Kahn plate: its frame left out
     $('print-when').textContent = whenLabel(photo.years);
     $('print-title').textContent = photo.title;
     if (reveal) {
@@ -450,7 +450,7 @@ class Walker {
     img.src = DATA + (today ? today.image : this.sizeFor(photo));
     img.alt = today ? "Le même endroit aujourd'hui" : photo.title;
     img.classList.toggle('mirrored', !today && !!photo.flipped); // a print turned the right way
-    clipToPlate(img, today ? undefined : photo.plate); // an Albert-Kahn plate: its frame left out
+    clipToPlate(img, today ? {} : photo); // an Albert-Kahn plate: its frame left out
     $('when').textContent = today ? today.taken.slice(0, 4) : whenLabel(photo.years);
     $('title').textContent = photo.title;
     $('caption').textContent = photo.caption ?? '';

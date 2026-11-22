@@ -34,26 +34,32 @@ export function clipPath(plate: Box | undefined, box: { width: number; height: n
   const [w, h] = [image.width * scale, image.height * scale];
   const [left, top] = [(box.width - w) / 2, (box.height - h) / 2];
   const [x0, y0, x1, y1] = plate;
-  const px = (v: number) => `${Math.max(0, Math.round(v))}px`;
+  const px = (v: number) => `${Math.max(0, Math.ceil(v))}px`; // outward: no line of frame left
   return `inset(${px(top + y0 * h)} ${px(box.width - left - x1 * w)} ${px(box.height - top - y1 * h)} ${px(left + x0 * w)})`;
 }
 
-const plates = new WeakMap<HTMLImageElement, Box | undefined>();
+interface Cut {
+  plate?: Box;
+  aspect?: number | null; // the image's height over width, known before it loads (else read once loaded)
+}
+
+const cuts = new WeakMap<HTMLImageElement, Cut>();
 let resized: ResizeObserver | undefined;
 
-/** Cut an image of the photo walk to a plate (none: shown whole), now and whenever the image
- *  or its element changes size. */
-export function clipToPlate(img: HTMLImageElement, plate: Box | undefined): void {
-  if (!plates.has(img)) {
+/** Cut an image of the photo walk to a plate (none: shown whole), now and whenever its element
+ *  changes size (or, its aspect unknown, once it has loaded). */
+export function clipToPlate(img: HTMLImageElement, cut: Cut): void {
+  if (!cuts.has(img)) {
     resized ??= new ResizeObserver((entries) => entries.forEach((e) => clip(e.target as HTMLImageElement)));
     resized.observe(img);
     img.addEventListener('load', () => clip(img));
   }
-  plates.set(img, plate);
+  cuts.set(img, cut);
   clip(img);
 }
 
 function clip(img: HTMLImageElement): void {
-  const box = { width: img.clientWidth, height: img.clientHeight };
-  img.style.clipPath = clipPath(plates.get(img), box, { width: img.naturalWidth, height: img.naturalHeight });
+  const { plate, aspect } = cuts.get(img) ?? {};
+  const image = aspect ? { width: 1, height: aspect } : { width: img.naturalWidth, height: img.naturalHeight };
+  img.style.clipPath = clipPath(plate, { width: img.clientWidth, height: img.clientHeight }, image);
 }
