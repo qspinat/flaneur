@@ -1,5 +1,6 @@
 """Makes what tests/visual/walk3d.mjs checks a photo laid on the walls against: a checkerboard
-taken by a camera standing 2 m off a leaning panorama of the pilot, on a wall across the street,
+taken by a camera standing 2 m off a leaning panorama of the pilot, on a wall across the street
+(a post before it hiding a strip from the photographer: filled, not cut),
 and the pipeline's own drawing of it (drawing.composite_standing) in a view; written to the
 folder given (nothing in the site's data). Run with the pipeline's environment:
     cd pipeline && uv run python ../web/tests/visual/standing_fixture.py <folder> [fov]"""
@@ -28,7 +29,12 @@ right = np.array([ahead[1], -ahead[0], 0.0])
 walls = [
     facades.Wall(
         tuple((12 * ahead - 15 * right)[:2]), tuple((12 * ahead + 15 * right)[:2]), 15.0, "fitted"
-    )
+    ),
+    # a post 10 cm wide halfway: it hides a strip of the facade from the photographer, which
+    # the drawing fills (no hole), the walk as the pipeline
+    facades.Wall(
+        tuple((6 * ahead + 0.5 * right)[:2]), tuple((6 * ahead + 0.6 * right)[:2]), 15.0, "fitted"
+    ),
 ]
 around = facades.Scene(p.id, (0.0, 0.0, 0.0), GROUND, tuple(walls), (), 8)
 # the photographer 2 m right of the panorama and 1 m back, 0.8 m lower, facing the facade a
