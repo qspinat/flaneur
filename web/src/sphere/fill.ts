@@ -43,7 +43,8 @@ void main() {
   float reached = textureLod(reach, at, top).r;
   float covered = pulled.a, edge = reached;
   if (pulled.a >= 1.0 && reached >= 1.0) {  // even the coarsest level full: nothing finer is missing
-    laid = vec4(textureLod(layer, at, 0.0).rgb, strength);
+    vec4 here = textureLod(layer, at, 0.0);
+    laid = vec4(here.rgb / max(here.a, 1e-6), strength);
     return;
   }
   for (int k = depth - 2; k >= 0; k--) {
@@ -108,9 +109,8 @@ export class FilledLayer {
     renderer.getDrawingBufferSize(this.size);
     const clearAlpha = renderer.getClearAlpha();
     renderer.getClearColor(this.clearColour);
-    renderer.setRenderTarget(this.targetOf(n, this.size.x, this.size.y));
-    renderer.setClearColor(0x000000, 0);
-    renderer.clear();
+    renderer.setRenderTarget(this.targetOf(n, this.size.x, this.size.y, renderer));
+    renderer.setClearColor(0x000000, 0); // cleared by the render (autoClear)
     renderer.render(mesh, camera);
     renderer.setRenderTarget(null);
     renderer.setClearColor(this.clearColour, clearAlpha);
@@ -136,12 +136,17 @@ export class FilledLayer {
     mesh.material = own;
   }
 
+  /** Let go of the targets beyond the first `count` (fewer standing photos in view). */
+  keep(count: number): void {
+    for (const target of this.targets.splice(count)) target?.dispose();
+  }
+
   dispose(): void {
     for (const target of this.targets) target.dispose();
     this.material.dispose();
   }
 
-  private targetOf(n: number, width: number, height: number): THREE.WebGLRenderTarget {
+  private targetOf(n: number, width: number, height: number, renderer: THREE.WebGLRenderer): THREE.WebGLRenderTarget {
     const found = this.targets[n];
     if (found && found.width === width && found.height === height) return found;
     found?.dispose();
@@ -151,6 +156,9 @@ export class FilledLayer {
       minFilter: THREE.LinearMipmapLinearFilter,
       magFilter: THREE.LinearFilter,
       depthBuffer: false,
+      // half floats where they can be drawn into: weighed colours keep their shades (fill.py
+      // works in floats), else bytes
+      type: renderer.extensions.has('EXT_color_buffer_float') ? THREE.HalfFloatType : THREE.UnsignedByteType,
     });
     target.textures[1].format = THREE.RedFormat; // where the photo reaches: one channel
     this.targets[n] = target;

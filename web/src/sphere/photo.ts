@@ -186,6 +186,7 @@ export class PhotoLayer {
           (d) => d.kind === 'standing' && d.mesh.visible && d.strength * this.fade > 0 && this.filled.inView(d.mesh, seeing),
         );
         standing.forEach((d, n) => this.filled.prepare(renderer, n, d.mesh, seeing)); // apart first
+        this.filled.keep(standing.length); // those no longer needed let go
         renderer.render(scene, camera);
         standing.forEach((d, n) => this.filled.lay(renderer, n, d.mesh, seeing, d.strength * this.fade));
       },
@@ -211,7 +212,7 @@ export class PhotoLayer {
         geometry = quad(laid.map((d) => d.clone().applyMatrix3(fromWorld)), MARGIN) ?? around();
         const across = density(laid, standing);
         uniforms = { ...standingUniforms(standing, kr, walls, ground, toWorld), density: { value: across } };
-        at = (direction) => standingAt(direction.clone().applyMatrix3(toWorld).normalize().toArray(), standing, walls, ground, across);
+        at = (direction) => standingAt(direction.clone().applyMatrix3(toWorld).normalize().toArray(), standing, walls, ground);
       } else {
         // from the photo's [0, 1]² to the viewer's frame, and back
         const fromPhoto = fromWorld.clone().multiply(rows(a.flat()).transpose()).multiply(rows(registration.m));
@@ -255,9 +256,11 @@ export class PhotoLayer {
     this.viewer.needsUpdate();
   }
 
-  /** The photo shown on top in a direction of the viewer's frame, if any. */
+  /** The photo shown on top in a direction of the viewer's frame, if any: standing photos
+   *  first (laid above the flat ones), the last first. */
   at(direction: THREE.Vector3): OldPhoto | null {
-    for (const d of [...this.drawn].reverse()) {
+    const onTop = [...this.drawn].reverse().sort((a, b) => Number(b.kind === 'standing') - Number(a.kind === 'standing'));
+    for (const d of onTop) {
       if (!d.mesh.visible || d.strength * this.fade < UNSEEN) continue;
       const uv = d.at(direction);
       if (uv && drawn(d.photo, d.photo.flipped ? 1 - uv[0] : uv[0], uv[1])) return d.photo;
