@@ -176,3 +176,37 @@ def test_the_view_keeps_its_kind(dtype):
     laid = drawing.composite_standing(view, photo, STANDING, _scene(ACROSS), NORTH)
 
     assert laid.dtype == dtype and laid.max() == 200 and laid.min() == 50
+
+
+def test_the_museum_s_label_shows_the_view_not_a_fill_of_the_plate():
+    label = (0.3, 0.4, 0.7, 0.8)  # a large label in the middle of the scan
+    laid = _laid(_scene(ACROSS), label=label)
+
+    rays = _rays()
+    at = STANDING.project(rays * facades.background(_scene(ACROSS), rays)[0][:, None])
+    h, w = SIZE
+    middle = (np.abs(at[:, 0] - 0.5 * w) < 0.05 * w) & (np.abs(at[:, 1] - 0.6 * h) < 0.05 * h)
+    assert middle.any() and laid[..., 2].ravel()[middle].max() < 0.1
+
+
+def test_the_photo_is_laid_on_the_walls_the_walk_shows_their_corners_joined():
+    gap = (
+        facades.Wall((-30.0, 20.0), (-0.5, 20.0), 40.0, "fitted"),
+        facades.Wall((0.5, 20.0), (30.0, 20.0), 40.0, "fitted"),  # 1 m short of the other
+    )
+
+    walked = drawing.as_walked(_scene(*gap))
+
+    assert walked.walls[0].b == pytest.approx(walked.walls[1].a)  # one corner, no gap
+
+
+def test_the_sky_is_never_hidden_from_the_photographer():
+    pole = facades.Wall((0.0, 6.0), (0.1, 6.0), 40.0, "fitted")
+    scene = _scene(pole)
+    rays = _rays()
+    metres = facades.background(scene, rays)[0]
+    _, ahead = drawing._seen(STANDING, scene.origin, rays, metres)
+
+    hidden = drawing._hidden(STANDING, scene, rays, metres, ahead, SIDE)
+
+    assert not hidden[~np.isfinite(metres)].any()

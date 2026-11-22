@@ -64,6 +64,7 @@ from flaneur import (
     placements,
     placing,
     placings,
+    plates,
     poses,
     proposals,
     proposing,
@@ -4825,6 +4826,17 @@ def compare_parallax(answers: Path = PLACINGS) -> None:
         )
 
 
+def _framing(photo_id: str, exported: dict) -> dict:
+    """An Albert-Kahn photo's plate and the museum's label (shares of its image): as the export
+    found them, else found now on its image (one seeded, or exported since)."""
+    if not photo_id.startswith(export.ALBERT_KAHN):
+        return {}
+    if "plate" in exported:
+        return {k: exported[k] for k in ("plate", "label") if k in exported}
+    found = plates.albert_kahn(Image.open(_exported(photo_id)))
+    return {"plate": list(found.plate), **({"label": list(found.label)} if found.label else {})}
+
+
 @app.command("placer")
 def place_photos(
     port: int = 8772, open_browser: bool = True, live: bool = True, answers: Path = PLACINGS
@@ -4849,8 +4861,7 @@ def place_photos(
             "heading": me.heading,
             "image": _exported(me.id),
             "inputs": _image(me.id),  # answers say which image they were made on
-            # an Albert-Kahn plate and the museum's label, as the export found them
-            **{k: framed[me.id][k] for k in ("plate", "label") if k in framed.get(me.id, {})},
+            **_framing(me.id, framed.get(me.id, {})),
         }
         for me in walk
         if _exported(me.id).exists()

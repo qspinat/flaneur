@@ -1,6 +1,6 @@
 // A photo laid on today's walls from where it was taken: each direction from the panorama goes
 // out to the walls around it (or the street, or past the roofs), and that point is seen by the
-// camera that took the photo (the pipeline's registration.Standing, composite_standing). The
+// camera that took the photo (the pipeline's registration.Standing, drawing.composite_standing). The
 // shader in photo.ts does the same per pixel; this one answers a click and is tested.
 
 /** The camera where the photographer stood, placed from its panorama (metres east, north,

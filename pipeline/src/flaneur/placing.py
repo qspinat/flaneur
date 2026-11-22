@@ -966,8 +966,15 @@ def serve(sources: Sources, port: int) -> HTTPServer:
         rays = match.view_directions(
             match.pixels_of((SHOWN, SHOWN)), view.heading, view.fov, SHOWN, view.pitch
         )
-        metres, sky = facades.background(scene, rays)
+        metres, sky = drawing.depth(scene, rays)
         return metres.astype(np.float32).reshape(SHOWN, SHOWN), sky.reshape(SHOWN, SHOWN)
+
+    @lru_cache(maxsize=KEPT_VIEWS)
+    def metres_in(scene: facades.Scene, view: ViewOf) -> np.ndarray:
+        # the depth a clicked pair gets: the walls, else the model (as for the pairs)
+        fill = fill_of(scene)
+        along = None if fill is None else (lambda rays: _depth(scene, rays, fill)[0])
+        return facades.in_view(scene, view, SHOWN, along).astype(np.float32)
 
     def laid_standing(
         body: dict, photo_id: str, flipped: bool, sphere: match.Panorama
@@ -1132,7 +1139,7 @@ def serve(sources: Sources, port: int) -> HTTPServer:
                     self._json({"walls": _walls_in_view(scene, sphere, view)})
                 elif self.path == "/api/depthview":
                     sphere, view = here(sphere), ViewOf(**body["view"])
-                    metres = depth_in(scene_of(sphere, body), view)[0]
+                    metres = metres_in(scene_of(sphere, body), view)
                     self._send(200, _jpeg(_tinted(cut(sphere.id, view), metres)), "image/jpeg")
                 elif self.path == "/api/parallax":
                     sphere = here(sphere)

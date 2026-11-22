@@ -114,7 +114,7 @@ void main() {
   if (metres < NONE) seen += fromCamera / metres;
   vec2 px = seen.xy / seen.z;
   // how little of the photo one pixel of the screen spans (as standing.squeezed), the way it is most squeezed, against
-  // the photo laid as a whole (registration._stretched): where the photographer saw a wall or the
+  // the photo laid as a whole (the pipeline's drawing.stretch_kept): where the photographer saw a wall or the
   // street edge on, the photo would be smeared in streaks; it fades out to today there (worked
   // out before any pixel is left out: the derivatives need all four of a block)
   vec2 dx = dFdx(px), dy = dFdy(px);

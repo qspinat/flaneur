@@ -14,6 +14,7 @@ import numpy as np
 from flaneur import facades, fill, match
 from flaneur.crop import Crop
 from flaneur.registration import Standing, ViewOf
+from flaneur.scene import walls_shown
 
 # as the walk (standing.ts, photo.ts)
 STRETCHED = 6.0  # a part of the photo laid this many times larger than the photo as a whole
@@ -42,6 +43,7 @@ def composite_standing(
     side = view_bgr.shape[0]
     if view_bgr.shape[1] != side:
         raise ValueError("une vue est carrée")
+    scene = as_walked(scene)
     rays = match.view_directions(
         match.pixels_of((side, side)), view.heading, view.fov, side, view.pitch
     )
@@ -49,15 +51,17 @@ def composite_standing(
     metres, sky = np.ravel(metres), np.ravel(sky)
     at, ahead = _seen(s, scene.origin, rays, metres)
     scan = np.column_stack([s.size[1] - at[:, 0], at[:, 1]]) if flipped else at
-    reached = ahead & _on(scan, s.size, plate or WHOLE)
-    shown = reached & ~_on(scan, s.size, label) & ~_hidden(s, scene, rays, metres, reached, side)
+    # the museum's label is out of the photo, as its frame is (the walk never draws it)
+    reached = ahead & _on(scan, s.size, plate or WHOLE) & ~_on(scan, s.size, label)
+    shown = reached & ~_hidden(s, scene, rays, metres, reached, side)
     grid = (side, side)
-    kept = stretch_kept(
-        at.reshape(*grid, 2), rays.reshape(*grid, 3), sky.reshape(grid), density(s, scene)
-    )
-    maps = np.where(reached[:, None], scan - 0.5, -1.0).astype(np.float32).reshape(*grid, 2)
+    per_radian = density(s, scene)
+    kept = stretch_kept(at.reshape(*grid, 2), rays.reshape(*grid, 3), sky.reshape(grid), per_radian)
+    photo, scale = _at_density(photo_bgr, per_radian * np.radians(view.fov / side))
+    maps = np.where(reached[:, None], scan * scale - 0.5, -1.0).astype(np.float32)
+    maps = maps.reshape(*grid, 2)
     colour = cv2.remap(
-        photo_bgr, maps[..., 0], maps[..., 1], cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE
+        photo, maps[..., 0], maps[..., 1], cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE
     )
     rgb, alpha = fill.laid(
         colour, shown.reshape(grid) * kept, reached.reshape(grid), view.fov / side
@@ -66,6 +70,32 @@ def composite_standing(
     if np.issubdtype(view_bgr.dtype, np.integer):
         laid = np.clip(np.rint(laid), 0, 255)
     return laid.astype(view_bgr.dtype)
+
+
+def as_walked(around: facades.Scene) -> facades.Scene:
+    """The scene with the walls the 3D walk lays a photo on (scene.walls_shown: the nearest,
+    their corners joined)."""
+    x, y, z = around.origin
+    walls = tuple(
+        facades.Wall((x0 + x, y0 + y), (x1 + x, y1 + y), top + z, "fitted")
+        for x0, y0, x1, y1, top in walls_shown(around)
+    )
+    return replace(around, walls=walls)
+
+
+def depth(around: facades.Scene, rays: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """How far along each ray a photo is laid, and whether it is the sky, as the walk lays it."""
+    return facades.background(as_walked(around), rays)
+
+
+def _at_density(photo: np.ndarray, per_pixel: float) -> tuple[np.ndarray, np.ndarray]:
+    """The photo shrunk to about one of its pixels per view pixel (`per_pixel`: how many there
+    are), as a texture's mipmaps would read it; and the scale its pixels were taken by."""
+    if per_pixel <= 1.5:
+        return photo, np.ones(2)
+    h, w = photo.shape[:2]
+    small = (max(1, round(w / per_pixel)), max(1, round(h / per_pixel)))
+    return cv2.resize(photo, small, interpolation=cv2.INTER_AREA), np.array(small) / [w, h]
 
 
 def _seen(
@@ -118,17 +148,16 @@ def _hidden(
     spread = np.repeat(
         np.repeat(hidden[::HIDDEN_STEP, ::HIDDEN_STEP], HIDDEN_STEP, 0), HIDDEN_STEP, 1
     )
-    return spread[:side, :side].ravel() & reached
+    return spread[:side, :side].ravel() & reached & np.isfinite(metres)  # never the sky
 
 
 def _ahead_of(s: Standing, scene: facades.Scene) -> tuple[facades.Wall, ...]:
     """The walls not wholly behind the photographer (none behind can stand in his way)."""
-    turn = cv2.Rodrigues(np.array(s.turn))[0]
+    ahead = s.lens_turn()[2]  # the camera's axis (its lens's last row is 0, 0, 1)
     kept = []
     for w in scene.walls:
-        top = w.top if w.top is not None else scene.ground + facades.DRAWN_ABOVE_M
-        corners = np.array([[*end, z] for end in (w.a, w.b) for z in (scene.ground, top)])
-        if np.any((corners - s.position) @ turn[2] > 0):
+        corners = np.array([[*end, z] for end in (w.a, w.b) for z in (scene.ground, w.top)])
+        if np.any((corners - s.position) @ ahead > 0):
             kept.append(w)
     return tuple(kept)
 
@@ -147,8 +176,8 @@ def density(s: Standing, scene: facades.Scene) -> float:
     )
     unit = laid / np.linalg.norm(laid, axis=-1, keepdims=True)
     angle = np.arccos(np.clip(np.sum(unit[:-1] * unit[1:], axis=-1), -1, 1))
-    found = (w / FRAMED) / angle[angle > 0]
-    return float(np.median(found)) if len(found) else s.focal
+    found = np.sort((w / FRAMED) / angle[angle > 0])
+    return float(found[len(found) // 2]) if len(found) else s.focal  # as photo.ts takes it
 
 
 def stretch_kept(
