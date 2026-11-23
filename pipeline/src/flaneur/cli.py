@@ -39,6 +39,7 @@ from shapely.geometry.base import BaseGeometry
 from shapely.ops import unary_union
 
 from flaneur import (
+    agreement,
     bridging,
     buildings,
     carrying,
@@ -114,6 +115,8 @@ FIXES = DATA / "pilot" / "panorama_fixes.json"  # panoramas placed with each oth
 PLACINGS = DATA / "overrides" / "placings.jsonl"  # the user's answers on the placing page
 WALLS = DATA / "overrides" / "walls.jsonl"  # today's walls drawn and removed by hand
 TILTS = DATA / "pilot" / "panorama_tilts.json"  # how each one's camera leaned (level)
+AGREED = DATA / "pilot" / "panorama_agreed.json"  # each turned to agree with its neighbours
+# (accorder)
 PANORAMAS = DATA / "raw" / "panoramas"  # their pictures
 
 SOURCES = {"paris_musees": paris_musees, "albert_kahn": albert_kahn}
@@ -229,10 +232,11 @@ def import_placements() -> None:
 
 
 def _standing_now(corrected: bool = True) -> dict[str, tuple[float, float, float]]:
-    """Where the panoramas stand (see placings.where), from their poses alone (no picture, no
-    tilt needed): answers follow them."""
+    """Where the panoramas stand (see placings.where), as the placing page has them (levelled
+    and agreed: an agreement turns their heading too; no picture needed): answers follow
+    them."""
     with closing(db.connect(DB_PATH)) as conn:
-        return _standing(_placed(panoramas.load(conn), corrected))
+        return _standing(_levelled(panoramas.load(conn), corrected))
 
 
 def _standing(pictures: list[Picture]) -> dict[str, tuple[float, float, float]]:
@@ -243,9 +247,7 @@ def _standing(pictures: list[Picture]) -> dict[str, tuple[float, float, float]]:
 def _poised(spheres: Iterable[match.Panorama]) -> dict[str, tuple[float, ...]]:
     """How these panoramas stand and lean, by id: where (see poses.at), then roll and pitch to
     the hundredth (a copy carried is made in their levelled views)."""
-    return {
-        p.id: (*poses.at(p.x, p.y, p.azimuth), round(p.roll, 2), round(p.pitch, 2)) for p in spheres
-    }
+    return {p.id: poses.poised(p.x, p.y, p.azimuth, p.roll, p.pitch) for p in spheres}
 
 
 def _placing_answers(
@@ -402,24 +404,61 @@ def _panoramas(pictures: list[Picture], heights: scene.CameraHeights) -> list[ma
     ]
 
 
-def _lined_up(pictures: list[Picture], corrected: bool = True) -> list[Picture]:
+def _lined_up(
+    pictures: list[Picture], corrected: bool = True, agreed: bool = True
+) -> list[Picture]:
     """The panoramas where they were taken, and levelled (see _levelled), when their tilts
     were measured as tilts are now."""
     if not level.current(TILTS):
         raise typer.BadParameter(
             "les inclinaisons des panoramas ont été mesurées autrement : lancer `flaneur level`"
         )
-    return _levelled(pictures, corrected)
+    return _levelled(pictures, corrected, agreed)
 
 
-def _levelled(pictures: list[Picture], corrected: bool = True) -> list[Picture]:
+def _levelled(
+    pictures: list[Picture], corrected: bool = True, agreed: bool = True
+) -> list[Picture]:
     """The panoramas where they were taken (see _placed), and levelled: those not measured
-    leaning as their run's neighbours, else taken as level (see level.borrowed)."""
+    leaning as their run's neighbours, else taken as level (see level.borrowed); then,
+    `corrected` and `agreed`, turned to agree with their neighbours as `flaneur accorder` found
+    (agreement.APPLIED of it), while that holds (see agreement.holds): computed otherwise, a
+    panorama solved with standing otherwise since, or kept unreadably, none is applied and that
+    is said once (their unturned caches are still on disk: `flaneur murs` makes a moved one's
+    pairs, then `flaneur accorder` agrees them again). accorder reads them as levelled before
+    (`agreed` False): what it wrote never feeds what it computes. A panorama turned so has
+    caches of its own (_levelled_name)."""
     placed = _placed(pictures, corrected)
     tilts = level.borrowed(level.kept(TILTS), placed)
-    return [
+    levelled = [
         replace(p, roll=tilt[0], pitch=tilt[1]) if (tilt := tilts.get(p.id)) else p for p in placed
     ]
+    if not (corrected and agreed) or agreement.APPLIED == "none":
+        return levelled
+    kept = _agreement_holding(levelled)
+    if kept is None and AGREED.exists():
+        _not_agreed()
+    return agreement.applied(levelled, kept, agreement.APPLIED)
+
+
+def _agreement_holding(levelled: list[Picture]) -> agreement.Agreement | None:
+    """The corrections accorder kept, if they hold for the panoramas so levelled (see
+    agreement.holds); none else, or if none are kept or they cannot be read."""
+    try:
+        kept = agreement.load(AGREED)
+    except ValueError:  # unreadable, or kept otherwise before
+        return None
+    return kept if kept is not None and agreement.holds(kept, levelled) else None
+
+
+@functools.cache  # said once a run
+def _not_agreed() -> None:
+    typer.echo(
+        f"{AGREED.name} ne tient plus (calculé autrement, un panorama a bougé depuis, ou "
+        "illisible) : panoramas lus sans l'accord ; lancer `flaneur murs` puis "
+        "`flaneur accorder`",
+        err=True,
+    )
 
 
 def _placed(pictures: list[Picture], corrected: bool = True) -> list[Picture]:
@@ -4631,6 +4670,70 @@ def set_on_survey() -> None:
     typer.echo("  " + ", ".join(f"{n} à {h} saut(s)" for h, n in sorted(hops.items())))
     typer.echo(f"  tournés de plus de {survey.LEAST_TURN_DEG:g}° : {len(turned)}, déplacés {moved}")
     typer.echo(f"  appliqués : {survey.APPLIED} (survey.APPLIED)")
+
+
+@app.command("accorder")
+def agree_panoramas() -> None:
+    """Accorde les panoramas des bénévoles avec leurs voisins, par les paires déjà faites (sans
+    apparieur) : chaque lien de la balade dont la paire se recale bien dit de combien tourner le
+    voisin ; une petite rotation par panorama en est tirée, pour tous à la fois, ceux du relevé
+    tenus fixes. Calculé sur les panoramas mis à niveau tels qu'avant tout accord (ce qu'il
+    écrit ne revient pas dans ce qu'il calcule) ; écrit data/pilot/panorama_agreed.json, lu
+    selon agreement.APPLIED (après la mesure E8a du plan) : appliquer l'accord donne de nouveaux
+    angles aux panoramas tournés, qui refont leurs caches (masques par `flaneur segmenter`,
+    paires et murs par `flaneur murs`), et périme les places de `match` qui les emploient (son
+    contrôle repasse). Un panorama du graphe recalé ou remis à niveau depuis (relevé, recaler,
+    level) fait lire tous les panoramas sans l'accord (dit une fois) jusqu'à relancer
+    `flaneur murs` puis `flaneur accorder` ; un panorama arrivé depuis reste non tourné, les
+    autres gardent leur rotation, jusqu'à relancer `flaneur accorder` une fois ses paires faites
+    par `flaneur murs`."""
+    with closing(db.connect(DB_PATH)) as conn:
+        area = placements.area(conn, buildings.MARGIN_M)
+        pictures = panoramas.load(conn)
+    levelled = _lined_up(pictures, agreed=False)  # what it wrote is not read back
+    before = _agreement_holding(levelled)  # in force until now
+    spheres = _panoramas(levelled, _heights(_buildings(area), area))  # pairs set right in 3D
+    scenes = _Scenes(  # the pairs on disk (listed once), read only: no matcher, no walls fitted
+        spheres,
+        set(),
+        _no_matcher,
+        threading.Lock(),
+        lambda x, y: [],
+        WALLS,
+        PAIR_MATCHES,
+        made=frozenset(p.name for p in PAIR_MATCHES.glob("*.npz")),
+    )
+    links = agreement.links(pictures, spheres, scenes._made, scenes._rays)
+    held = {p.id for p in pictures if p.producer == survey.PRODUCER}
+    found = agreement.averaged(links, held)
+    graph = {i for i, j, _ in links} | {j for i, j, _ in links}
+    kept = agreement.Agreement(
+        agreement.setup(),
+        {i: tuple(map(float, c)) for i, c in found.items()},
+        {p.id: agreement.stance(p) for p in levelled if p.id in graph},
+    )
+    agreement.save(AGREED, kept)
+    turned = [float(np.linalg.norm(c)) for c in found.values()]
+    typer.echo(
+        f"liens mesurés : {len(links)} ; panoramas accordés : {len(found)} ; correction "
+        f"médiane {np.median(turned) if turned else 0.0:.2f}°"
+    )
+    names = [
+        {s.id: _levelled_name(s) for s in _panoramas(turned, lambda x, y: 0.0)}
+        for turned in (agreement.applied(levelled, k, "all") for k in (before, kept))
+    ]
+    renamed = sum(name != names[0].get(i) for i, name in names[1].items())
+    typer.echo(f"  écrit dans {AGREED}")
+    if agreement.APPLIED == "none":
+        typer.echo("  mesurés, pas encore appliqués (agreement.APPLIED)")
+    elif renamed:
+        typer.echo(
+            f"  {renamed} panorama(s) prennent de nouveaux angles : leurs masques, paires et "
+            "murs sont à refaire (`flaneur segmenter`, `flaneur murs`), les places de `match` "
+            "qui les emploient périment"
+        )
+    else:
+        typer.echo("  aucun panorama ne prend de nouveaux angles : caches inchangés")
 
 
 @app.command("segmenter")
