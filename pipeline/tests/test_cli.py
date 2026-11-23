@@ -2904,9 +2904,11 @@ def _releve(monkeypatch, *options: str) -> int:
 
 @pytest.fixture
 def surveyed(monkeypatch) -> tuple[list[Picture], object]:
-    """The accorder's three panoramas and their pair, set right on the survey once."""
+    """The accorder's three panoramas and their pair, set right on the survey once: v by its
+    pair with s."""
     world = _accorder_world(monkeypatch)
     assert _releve(monkeypatch) == 1
+    assert survey.load(cli.SURVEYED).keys() == {"v"}
     return world
 
 
@@ -2919,11 +2921,14 @@ def test_releve_with_nothing_changed_keeps_the_file_as_it_was(monkeypatch, surve
 
 
 def test_releve_runs_again_on_a_new_pair_under_the_names_colmap_left(monkeypatch, surveyed):
-    _, pair = surveyed
-    s, _, w = (cli._levelled_name(p) for p in cli._placing_world(corrected=False)[0])
-    pair.with_name(f"{s}__{w}.npz").write_bytes(pair.read_bytes())
+    s, _, w = cli._placing_world(corrected=False)[0]
+    at_s, at_w = placing._at(s), placing._at(w)
+    street = STREET + [at_s[0], at_s[1], 0.0]
+    pair = cli.PAIR_MATCHES / f"{cli._levelled_name(s)}__{cli._levelled_name(w)}.npz"
+    np.savez(pair, a=_units(street - at_s), b=_units(street - at_w))
 
     assert _releve(monkeypatch) == 1
+    assert survey.load(cli.SURVEYED).keys() == {"v", "w"}
 
 
 def test_releve_reads_no_pair_under_another_name(monkeypatch, surveyed):
@@ -2952,7 +2957,20 @@ def test_releve_runs_again_without_what_its_file_was_made_from(monkeypatch, surv
     assert _releve(monkeypatch) == 1
 
 
-def test_releve_runs_again_after_a_lidar_patch_it_could_not_read(monkeypatch):
+def test_releve_runs_again_once_its_file_was_written_otherwise(monkeypatch, surveyed):
+    cli.SURVEYED.write_text("{}")
+
+    assert _releve(monkeypatch) == 1
+
+
+@pytest.mark.parametrize(
+    "error, again",
+    [
+        (cli.httpx.ConnectError("no network"), 1),  # the network, back next time
+        (ValueError("LiDAR HD : réponse inattendue"), 0),  # the same answer next time
+    ],
+)
+def test_releve_runs_again_after_a_lidar_patch_the_network_kept_from_it(monkeypatch, error, again):
     _accorder_world(monkeypatch)
     set_right = survey.set_right
 
@@ -2961,14 +2979,16 @@ def test_releve_runs_again_after_a_lidar_patch_it_could_not_read(monkeypatch):
         return set_right(refs, others, neighbours, seen, in_street)
 
     def broken(x, y, folder, client):
-        raise cli.httpx.ConnectError("no network")
+        raise error
 
     monkeypatch.setattr(survey, "set_right", reading)
     monkeypatch.setattr(cli.poses, "in_street", broken)
-    CliRunner().invoke(app, ["releve"])
+    first = CliRunner().invoke(app, ["releve"])
     monkeypatch.setattr(survey, "set_right", set_right)
 
-    assert _releve(monkeypatch) == 1
+    assert first.exit_code == 0, first.output
+    assert (cli.register.load(cli.SURVEYED_FROM)["made"] is None) == bool(again)
+    assert _releve(monkeypatch) == again
 
 
 def test_bd_topo_corrects_nothing_the_survey_answered(monkeypatch):
