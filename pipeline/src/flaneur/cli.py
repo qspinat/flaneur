@@ -98,6 +98,7 @@ REVIEWS = DATA / "overrides" / "reviews.jsonl"
 SIGHTS = DATA / "overrides" / "sights.jsonl"  # the landmarks marked in photos, by hand
 CORRECTIONS = DATA / "pilot" / "panorama_corrections.json"  # on the buildings (register): unused
 SURVEYED = DATA / "pilot" / "panorama_survey.json"  # volunteers' panoramas set right on the survey
+SURVEYED_FROM = DATA / "pilot" / "panorama_survey_inputs.json"  # what it was made from (releve)
 POSES = DATA / "pilot" / "panorama_poses.json"  # panoramas set right on two surveys (see poses)
 VIEW_STRUCTURE = (  # each panorama's views' pixel classes (see segment), as views are cut now
     DATA / "raw" / "view_structure" / f"{match.VIEW_SIDE}_{match.VIEW_FOV}_{match.VIEW_PITCH}"
@@ -786,7 +787,7 @@ class _Scenes:
         return fitted
 
     def _path(self, home: match.Panorama, other: match.Panorama) -> Path:
-        return self.matches / f"{_levelled_name(home)}__{_levelled_name(other)}.npz"
+        return self.matches / _pair_name(_levelled_name(home), _levelled_name(other))
 
     def _fit(
         self, home: match.Panorama, chosen: tuple | None, found: list[_Paired], neighbours: tuple
@@ -848,6 +849,20 @@ def _seeing(
 def _levelled_name(p: match.Panorama) -> str:
     """A panorama's name as levelled now (its views, and so its matches, change with it)."""
     return f"{p.id}_{p.azimuth:.1f}_{p.roll:.2f}_{p.pitch:.2f}"
+
+
+PAIR_SEPARATOR = "__"  # between a pair's two levelled names, in its file's name
+
+
+def _pair_name(home: str, other: str) -> str:
+    """The file a pair's matches are kept in, by its panoramas' levelled names (see _Scenes)."""
+    return f"{home}{PAIR_SEPARATOR}{other}.npz"
+
+
+def _pair_halves(path: Path) -> tuple[str, str] | None:
+    """The levelled names a pair's file is named by (see _pair_name); none for another file."""
+    halves = path.stem.split(PAIR_SEPARATOR)
+    return (halves[0], halves[1]) if path.suffix == ".npz" and len(halves) == 2 else None
 
 
 def _street_facades(features: list[dict]) -> Callable[[float, float], list[facades.Segment]]:
@@ -993,6 +1008,11 @@ def _hash_of(*modules: ModuleType) -> str:
     for module in modules:
         digest.update(Path(module.__file__).read_bytes())
     return digest.hexdigest()[:16]
+
+
+def _file_hash(path: Path) -> str | None:
+    """A file's content, hashed (none: not there)."""
+    return hashlib.sha1(path.read_bytes()).hexdigest() if path.exists() else None
 
 
 @functools.cache
@@ -4590,7 +4610,7 @@ def _page_closed(page: int) -> None:
 def _paired_homes(spheres: list[match.Panorama], folder: Path) -> list[match.Panorama]:
     """The panoramas with three pairs or more kept in `folder` under their name as they stand
     (see _levelled_name: a panorama turned since has others), either way round, by id."""
-    pairs = {frozenset(f.stem.split("__")) for f in folder.glob("*.npz")}
+    pairs = {frozenset(halves) for f in folder.glob("*.npz") if (halves := _pair_halves(f))}
     made = Counter(name for pair in pairs for name in pair)
     return sorted((p for p in spheres if made[_levelled_name(p)] >= 3), key=lambda p: p.id)
 
@@ -4607,22 +4627,60 @@ def _within(answers: Path, reach: float, corrected: bool = True) -> list[match.P
     return [spheres[i] for i in np.argsort(nearest) if nearest[i] <= reach]
 
 
-def _in_street_or_not(client: httpx.Client | None) -> Callable[[float, float], bool]:
+def _in_street_or_not(
+    client: httpx.Client | None,
+) -> tuple[Callable[[float, float], bool], list[tuple[float, float]]]:
     """Whether a place is in the street (see poses.in_street); a LiDAR patch that cannot be
-    read (network, an answer not understood): not, the panorama left where it stands."""
+    read (network, an answer not understood): not, the panorama left where it stands; the
+    network's failures (not an answer not understood: the same next time) added to the list
+    returned beside."""
+    unread: list[tuple[float, float]] = []
 
     def in_street(x: float, y: float) -> bool:
         try:
             return poses.in_street(x, y, LIDAR_MNS, client)
         except (httpx.HTTPError, ValueError) as error:
             typer.echo(f"LiDAR illisible en {x:.0f}, {y:.0f} : laissé en place ({error})", err=True)
+            if isinstance(error, httpx.HTTPError):  # read next time
+                unread.append((x, y))
             return False
 
-    return in_street
+    return in_street, unread
+
+
+def _surveyed_from(spheres: list[match.Panorama], producer: dict[str, str | None]) -> str:
+    """What `flaneur releve` sets panoramas right from, hashed: the panoramas as COLMAP left
+    them (whose, where each stands and leans), the pairs it can read (both halves under those
+    names: see _pair_name), each as last written, COLMAP's fixes, and the code it runs
+    through. Not the LiDAR: its patches, once fetched, are kept and do not change. releve keeps
+    the survey file while SURVEYED_FROM holds this hash and the file's own content, unless
+    forced; a run where the network kept a LiDAR patch from it holds none (done again next
+    time). A file beside the survey's: survey.save writes a bare map by panorama, and its
+    format stays."""
+    names = {_levelled_name(p) for p in spheres}
+    pairs = sorted(
+        f
+        for f in PAIR_MATCHES.glob(_pair_name("*", "*"))
+        if (halves := _pair_halves(f)) and set(halves) <= names
+    )
+    where = sorted(  # by id
+        [p.id, producer.get(p.id), round(p.z, 2)]
+        + list(poses.poised(p.x, p.y, p.azimuth, p.roll, p.pitch))
+        for p in spheres
+    )
+    made = list(zip([f.name for f in pairs], _stamp(pairs), strict=True))
+    through = (set_on_survey, _surveyed_from, _in_street_or_not, _fixed_by_colmap)
+    through += (_Scenes._rays, _Scenes._stored, _Scenes._made)
+    code = [inspect.getsource(f) for f in through] + [_hash_of(survey, depth, poses, placing)]
+    return _digest([where, made, _file_hash(FIXES), *code])
 
 
 @app.command("releve")
-def set_on_survey() -> None:
+def set_on_survey(
+    force: Annotated[
+        bool, typer.Option(help="refaire même si rien de ce qu'il lit n'a changé")
+    ] = False,
+) -> None:
     """Remet d'aplomb les panoramas des bénévoles sur ceux du relevé (Immergis pour la Ville de
     Paris), par les paires déjà faites (sans apparieur) : un bénévole vu par des panoramas du
     relevé qui s'accordent prend leur cap, et sa place où leurs directions se croisent ; remis
@@ -4630,13 +4688,24 @@ def set_on_survey() -> None:
     plus de 5 m n'est gardé que si le LiDAR met la nouvelle place dans la rue. Jugés tels que
     COLMAP les a laissés (une fois appliquées, les paires d'un panorama tourné sont rangées sous
     son nom tourné : un bénévole arrivé depuis ne passe plus par lui) ; écrit
-    data/pilot/panorama_survey.json, lu selon survey.APPLIED (après la mesure E du plan)."""
-    spheres, segments = _placing_world(corrected=False)
-    with closing(db.connect(DB_PATH)) as conn:
+    data/pilot/panorama_survey.json, lu selon survey.APPLIED (après la mesure E du plan).
+
+    Ne lit que les paires rangées sous les noms que COLMAP a laissés : un panorama de bénévole
+    ajouté depuis n'est donc remis sur le relevé que si de telles paires existent pour lui."""
+    with closing(db.connect(DB_PATH)) as conn:  # as _placing_world, the facades only if run
+        area = placements.area(conn, buildings.MARGIN_M)
         pictures = panoramas.load(conn)
+    features = _buildings(area)
+    spheres = _panoramas(_lined_up(pictures, corrected=False), _heights(features, area))
     producer = {p.id: p.producer for p in pictures}
+    made = _surveyed_from(spheres, producer)
+    if not force and register.load(SURVEYED_FROM) == {"made": made, "survey": _file_hash(SURVEYED)}:
+        typer.echo(f"rien de ce qu'il lit n'a changé : {SURVEYED} gardé tel quel")
+        return
     fixed = _fixed_by_colmap(pictures, register.load(FIXES))
-    scenes = _Scenes(spheres, fixed, _no_matcher, threading.Lock(), segments, WALLS)
+    segments = _street_facades(features)
+    lock = threading.Lock()
+    scenes = _Scenes(spheres, fixed, _no_matcher, lock, segments, WALLS, PAIR_MATCHES)
     by_id = {p.id: p for p in spheres}
 
     @functools.cache  # each pair fitted once a run, though asked each round
@@ -4661,8 +4730,13 @@ def set_on_survey() -> None:
     refs = {p.id: (p.x, p.y) for p in spheres if producer.get(p.id) == survey.PRODUCER}
     others = {p.id: (p.x, p.y) for p in spheres if p.id not in refs}
     with httpx.Client() as client:
-        found = survey.set_right(refs, others, neighbours, seen, _in_street_or_not(client))
+        in_street, unread = _in_street_or_not(client)
+        found = survey.set_right(refs, others, neighbours, seen, in_street)
     survey.save(SURVEYED, found, {p.id: poses.at(p.x, p.y, p.azimuth) for p in spheres})
+    kept = {"made": None if unread else made, "survey": _file_hash(SURVEYED)}  # None: again
+    write_json(SURVEYED_FROM, kept)
+    if unread:
+        typer.echo(f"LiDAR illisible en {len(unread)} endroit(s) : refait la fois suivante")
     turned = survey.fixes(found, "all")
     hops = Counter(f.hops for f in found.values())
     moved = sum(1 for f in turned.values() if f[:2] != (0.0, 0.0))

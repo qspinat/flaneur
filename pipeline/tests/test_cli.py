@@ -2890,6 +2890,107 @@ def test_the_night_sets_panoramas_right_on_the_survey_first_then_segments():
     assert cli.NIGHT_STEPS[:2] == (("releve",), ("segmenter",))
 
 
+def _releve(monkeypatch, *options: str) -> int:
+    """`flaneur releve` run (the LiDAR never read): how many times it set panoramas right."""
+    made = []
+    set_right = survey.set_right
+    monkeypatch.setattr(survey, "set_right", lambda *a: made.append(1) or set_right(*a))
+    monkeypatch.setattr(cli.poses, "in_street", lambda *a: pytest.fail("LiDAR read"))
+    result = CliRunner().invoke(app, ["releve", *options])
+    assert result.exit_code == 0, result.output
+    assert ("rien de ce qu'il lit n'a changé" in result.output) != bool(made)
+    return len(made)
+
+
+@pytest.fixture
+def surveyed(monkeypatch) -> tuple[list[Picture], object]:
+    """The accorder's three panoramas and their pair, set right on the survey once: v by its
+    pair with s."""
+    world = _accorder_world(monkeypatch)
+    assert _releve(monkeypatch) == 1
+    assert survey.load(cli.SURVEYED).keys() == {"v"}
+    return world
+
+
+def test_releve_with_nothing_changed_keeps_the_file_as_it_was(monkeypatch, surveyed):
+    written = cli.SURVEYED.stat().st_mtime_ns
+    monkeypatch.setattr(cli, "_street_facades", lambda features: pytest.fail("facades built"))
+
+    assert _releve(monkeypatch) == 0
+    assert cli.SURVEYED.stat().st_mtime_ns == written
+
+
+def test_releve_runs_again_on_a_new_pair_under_the_names_colmap_left(monkeypatch, surveyed):
+    s, _, w = cli._placing_world(corrected=False)[0]
+    at_s, at_w = placing._at(s), placing._at(w)
+    street = STREET + [at_s[0], at_s[1], 0.0]
+    pair = cli.PAIR_MATCHES / f"{cli._levelled_name(s)}__{cli._levelled_name(w)}.npz"
+    np.savez(pair, a=_units(street - at_s), b=_units(street - at_w))
+
+    assert _releve(monkeypatch) == 1
+    assert survey.load(cli.SURVEYED).keys() == {"v", "w"}
+
+
+def test_releve_reads_no_pair_under_another_name(monkeypatch, surveyed):
+    _, pair = surveyed
+    s = cli._levelled_name(cli._placing_world(corrected=False)[0][0])
+    pair.with_name(f"{s}__v_99.0_0.00_0.00.npz").write_bytes(pair.read_bytes())  # v turned
+
+    assert _releve(monkeypatch) == 0
+
+
+def test_releve_runs_again_once_a_panorama_moved(monkeypatch, surveyed):
+    (s, v, w), _ = surveyed
+    with closing(db.connect(cli.DB_PATH)) as conn:
+        panoramas.save(conn, [s, v, replace(w, lon=w.lon + 1e-5)])  # w 0.7 m east
+
+    assert _releve(monkeypatch) == 1
+
+
+def test_releve_forced_runs_again(monkeypatch, surveyed):
+    assert _releve(monkeypatch, "--force") == 1
+
+
+def test_releve_runs_again_without_what_its_file_was_made_from(monkeypatch, surveyed):
+    cli.SURVEYED_FROM.unlink()
+
+    assert _releve(monkeypatch) == 1
+
+
+def test_releve_runs_again_once_its_file_was_written_otherwise(monkeypatch, surveyed):
+    cli.SURVEYED.write_text("{}")
+
+    assert _releve(monkeypatch) == 1
+
+
+@pytest.mark.parametrize(
+    "error, again",
+    [
+        (cli.httpx.ConnectError("no network"), 1),  # the network, back next time
+        (ValueError("LiDAR HD : réponse inattendue"), 0),  # the same answer next time
+    ],
+)
+def test_releve_runs_again_after_a_lidar_patch_the_network_kept_from_it(monkeypatch, error, again):
+    _accorder_world(monkeypatch)
+    set_right = survey.set_right
+
+    def reading(refs, others, neighbours, seen, in_street):
+        in_street(0.0, 0.0)  # a panorama moved beyond 5 m
+        return set_right(refs, others, neighbours, seen, in_street)
+
+    def broken(x, y, folder, client):
+        raise error
+
+    monkeypatch.setattr(survey, "set_right", reading)
+    monkeypatch.setattr(cli.poses, "in_street", broken)
+    first = CliRunner().invoke(app, ["releve"])
+    monkeypatch.setattr(survey, "set_right", set_right)
+
+    assert first.exit_code == 0, first.output
+    assert (cli.register.load(cli.SURVEYED_FROM)["made"] is None) == bool(again)
+    assert _releve(monkeypatch) == again
+
+
 def test_bd_topo_corrects_nothing_the_survey_answered(monkeypatch):
     from flaneur import survey
 
@@ -2911,8 +3012,10 @@ def test_a_lidar_patch_that_cannot_be_read_keeps_the_panorama_where_it_stands(mo
         raise cli.httpx.ConnectError("no network")
 
     monkeypatch.setattr(cli.poses, "in_street", broken)
+    in_street, unread = cli._in_street_or_not(None)
 
-    assert cli._in_street_or_not(None)(1.0, 2.0) is False
+    assert in_street(1.0, 2.0) is False
+    assert unread == [(1.0, 2.0)]
 
 
 def test_a_photo_matched_again_has_its_features_extracted_when_not_kept(monkeypatch):
