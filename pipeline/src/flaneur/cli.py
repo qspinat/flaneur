@@ -39,6 +39,7 @@ from shapely.geometry.base import BaseGeometry
 from shapely.ops import unary_union
 
 from flaneur import (
+    agreement,
     bridging,
     buildings,
     carrying,
@@ -114,6 +115,8 @@ FIXES = DATA / "pilot" / "panorama_fixes.json"  # panoramas placed with each oth
 PLACINGS = DATA / "overrides" / "placings.jsonl"  # the user's answers on the placing page
 WALLS = DATA / "overrides" / "walls.jsonl"  # today's walls drawn and removed by hand
 TILTS = DATA / "pilot" / "panorama_tilts.json"  # how each one's camera leaned (level)
+AGREED = DATA / "pilot" / "panorama_agreed.json"  # each turned to agree with its neighbours
+# (accorder)
 PANORAMAS = DATA / "raw" / "panoramas"  # their pictures
 
 SOURCES = {"paris_musees": paris_musees, "albert_kahn": albert_kahn}
@@ -402,24 +405,35 @@ def _panoramas(pictures: list[Picture], heights: scene.CameraHeights) -> list[ma
     ]
 
 
-def _lined_up(pictures: list[Picture], corrected: bool = True) -> list[Picture]:
+def _lined_up(
+    pictures: list[Picture], corrected: bool = True, agreed: bool = True
+) -> list[Picture]:
     """The panoramas where they were taken, and levelled (see _levelled), when their tilts
     were measured as tilts are now."""
     if not level.current(TILTS):
         raise typer.BadParameter(
             "les inclinaisons des panoramas ont été mesurées autrement : lancer `flaneur level`"
         )
-    return _levelled(pictures, corrected)
+    return _levelled(pictures, corrected, agreed)
 
 
-def _levelled(pictures: list[Picture], corrected: bool = True) -> list[Picture]:
+def _levelled(
+    pictures: list[Picture], corrected: bool = True, agreed: bool = True
+) -> list[Picture]:
     """The panoramas where they were taken (see _placed), and levelled: those not measured
-    leaning as their run's neighbours, else taken as level (see level.borrowed)."""
+    leaning as their run's neighbours, else taken as level (see level.borrowed); then,
+    `corrected` and `agreed`, turned to agree with their neighbours as `flaneur accorder` found
+    (agreement.APPLIED of it), each while it faces and leans as it was found against. accorder
+    reads them as levelled before (`agreed` False): what it wrote never feeds what it computes.
+    A panorama turned so has caches of its own (_levelled_name)."""
     placed = _placed(pictures, corrected)
     tilts = level.borrowed(level.kept(TILTS), placed)
-    return [
+    levelled = [
         replace(p, roll=tilt[0], pitch=tilt[1]) if (tilt := tilts.get(p.id)) else p for p in placed
     ]
+    if not (corrected and agreed) or agreement.APPLIED == "none":
+        return levelled
+    return agreement.applied(levelled, agreement.load(AGREED))
 
 
 def _placed(pictures: list[Picture], corrected: bool = True) -> list[Picture]:
@@ -826,14 +840,14 @@ def _street_facades(features: list[dict]) -> Callable[[float, float], list[facad
 
 
 def _placing_world(
-    corrected: bool = True,
+    corrected: bool = True, agreed: bool = True
 ) -> tuple[list[match.Panorama], Callable[[float, float], list]]:
-    """The panoramas where they were taken, levelled, at their camera's height over the street
-    (parallax needs it on a slope), and BD TOPO's street facades near a spot."""
+    """The panoramas where they were taken, levelled (see _levelled), at their camera's height
+    over the street (parallax needs it on a slope), and BD TOPO's street facades near a spot."""
     with closing(db.connect(DB_PATH)) as conn:
         area = placements.area(conn, buildings.MARGIN_M)
         features = _buildings(area)
-        pictures = _lined_up(panoramas.load(conn), corrected)
+        pictures = _lined_up(panoramas.load(conn), corrected, agreed)
     return _panoramas(pictures, _heights(features, area)), _street_facades(features)
 
 
@@ -4631,6 +4645,44 @@ def set_on_survey() -> None:
     typer.echo("  " + ", ".join(f"{n} à {h} saut(s)" for h, n in sorted(hops.items())))
     typer.echo(f"  tournés de plus de {survey.LEAST_TURN_DEG:g}° : {len(turned)}, déplacés {moved}")
     typer.echo(f"  appliqués : {survey.APPLIED} (survey.APPLIED)")
+
+
+@app.command("accorder")
+def agree_panoramas() -> None:
+    """Accorde les panoramas des bénévoles avec leurs voisins, par les paires déjà faites (sans
+    apparieur) : chaque lien de la balade dont la paire se recale bien dit de combien tourner le
+    voisin ; une petite rotation par panorama en est tirée, pour tous à la fois, ceux du relevé
+    tenus fixes. Calculé sur les panoramas mis à niveau tels qu'avant tout accord (ce qu'il
+    écrit ne revient pas dans ce qu'il calcule) ; écrit data/pilot/panorama_agreed.json, lu
+    selon agreement.APPLIED (après la mesure E8a du plan)."""
+    spheres, _ = _placing_world(agreed=False)
+    with closing(db.connect(DB_PATH)) as conn:
+        pictures = panoramas.load(conn)
+    by_id = {p.id: p for p in spheres}
+    scenes = _wall_scenes(spheres, _colmap_fixed())
+    links, seen = [], set()
+    for home, near in panoramas.links(pictures).items():
+        for other, _, _ in near:
+            both = frozenset((home, other))
+            if home not in by_id or other not in by_id or both in seen:
+                continue
+            seen.add(both)
+            h, o = by_id[home], by_id[other]
+            if scenes._stored(h, o) is None:  # pairs on disk only: none made
+                continue
+            turn = agreement.measured(placing._at(h), placing._at(o), *scenes._rays(h, o))
+            if turn is not None:
+                links.append((home, other, turn))
+    held = {p.id for p in pictures if p.producer == survey.PRODUCER}
+    found = agreement.averaged(links, held)
+    against = {i: (by_id[i].azimuth, by_id[i].pitch, by_id[i].roll) for i in found}
+    agreement.save(AGREED, found, against)
+    turned = [float(np.linalg.norm(c)) for c in found.values()]
+    typer.echo(
+        f"liens mesurés : {len(links)} ; panoramas accordés : {len(found)} ; correction "
+        f"médiane {np.median(turned) if turned else 0.0:.2f}°"
+    )
+    typer.echo(f"  appliqués : {agreement.APPLIED} (agreement.APPLIED) ; écrit dans {AGREED}")
 
 
 @app.command("segmenter")

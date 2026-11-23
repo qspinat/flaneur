@@ -1,6 +1,7 @@
 import json
 import subprocess
 import threading
+from contextlib import closing
 from dataclasses import replace
 from types import SimpleNamespace
 
@@ -9,22 +10,27 @@ import numpy as np
 import pytest
 import typer
 from PIL import Image
+from scipy.spatial.transform import Rotation
 from shapely.geometry import Point
 from typer.testing import CliRunner
 
 from flaneur import (
+    agreement,
     bridging,
     chain,
     cli,
     confirming,
+    db,
     depth,
     facades,
     match,
+    panoramas,
     placed,
     placing,
     poses,
     registration,
     segment,
+    survey,
 )
 from flaneur.cli import app
 
@@ -231,6 +237,33 @@ def test_nothing_applied_reads_no_verdict(tmp_path, monkeypatch):
     monkeypatch.setattr(poses, "APPLIED", "none")
 
     assert cli._placed([here]) == [here]
+
+
+def test_panoramas_stand_agreed_except_for_accorder_and_recaler(monkeypatch):
+    from flaneur.panoramax import Picture
+
+    here = Picture("p1", 2.3466, 48.852, 40.0, True, "2024-01-01", "", "")
+    rotation = np.array([0.0, 0.5, 0.0])
+    agreement.save(cli.AGREED, {"p1": rotation}, {"p1": (40.0, 0.0, 0.0)})
+    monkeypatch.setattr(agreement, "APPLIED", "all")
+
+    (agreed,) = cli._levelled([here])
+    (before,) = cli._levelled([here], agreed=False)  # as accorder reads them
+    (as_colmap,) = cli._levelled([here], corrected=False)
+
+    assert agreed == agreement.corrected(here, rotation)
+    assert before == here and as_colmap == here
+
+
+def test_nothing_agreed_applied_reads_no_correction(monkeypatch):
+    from flaneur.panoramax import Picture
+
+    here = Picture("p1", 2.3466, 48.852, 40.0, True, "2024-01-01", "", "")
+    cli.AGREED.parent.mkdir(parents=True, exist_ok=True)
+    cli.AGREED.write_text("not json")
+    monkeypatch.setattr(agreement, "APPLIED", "none")
+
+    assert cli._levelled([here]) == [here]
 
 
 def test_homes_with_pairs_are_counted_under_their_own_names(tmp_path):
@@ -545,6 +578,59 @@ def test_a_pair_matched_one_way_serves_the_other_panorama(monkeypatch, tmp_path)
     assert asked == [("home", "beside")]
     assert scenes._made(beside, home) and len(seen_back.walls) == len(own.walls) == 2
     assert len(scenes.details(beside, [home], made_only=True)) > 0
+
+
+def test_accorder_turns_the_volunteers_by_the_pairs_on_disk_alone(monkeypatch, tmp_path):
+    from flaneur.gazetteer import to_degrees
+    from flaneur.panoramax import Picture
+
+    def picture(id: str, x: float, y: float, producer: str | None = None) -> Picture:
+        where = to_degrees(Point(652000.0 + x, 6862000.0 + y))
+        return Picture(id, where.x, where.y, 30.0, True, "2024-01-01", "", "", producer=producer)
+
+    pictures = [
+        picture("s", 0.0, 0.0, survey.PRODUCER),
+        picture("v", 0.0, 5.0),  # its pair with s on disk
+        picture("w", 5.0, 0.0),  # linked to both, never matched
+    ]
+    with closing(db.connect(cli.DB_PATH)) as conn:
+        panoramas.save(conn, pictures)
+    spheres = [
+        match.Panorama(p.id, p.point.x, p.point.y, 2.5, p.azimuth, tmp_path / f"{p.id}.jpg")
+        for p in pictures
+    ]
+    asked = []
+
+    def world(corrected: bool = True, agreed: bool = True):
+        asked.append(agreed)
+        return spheres, lambda x, y: []
+
+    def scenes(near_by, fixed):  # as _wall_scenes, the pairs in the test's folder
+        segments, walls = lambda x, y: [], tmp_path / "walls.jsonl"
+        return cli._Scenes(
+            near_by, fixed, cli._no_matcher, threading.Lock(), segments, walls, cli.PAIR_MATCHES
+        )
+
+    monkeypatch.setattr(cli, "_placing_world", world)
+    monkeypatch.setattr(cli, "_colmap_fixed", set)
+    monkeypatch.setattr(cli, "_wall_scenes", scenes)
+    s, v = (placing._at(p) for p in spheres[:2])
+    street = STREET + [s[0], s[1], 0.0]
+    turn = Rotation.from_rotvec(np.radians([0.3, -0.6, 1.0])).as_matrix()  # v's off by this
+    names = [cli._levelled_name(p) for p in spheres[:2]]
+    pair = cli.PAIR_MATCHES / f"{names[0]}__{names[1]}.npz"
+    pair.parent.mkdir(parents=True)
+    np.savez(pair, a=_units(street - s), b=_units(street - v) @ turn)
+
+    result = CliRunner().invoke(app, ["accorder"])
+
+    assert result.exit_code == 0, result.output
+    assert asked == [False]  # as levelled before any agreement: what it wrote is not read back
+    assert list(cli.PAIR_MATCHES.iterdir()) == [pair]  # no pair made
+    found = agreement.load(cli.AGREED)
+    assert found.keys() == {"v"} and found["v"].against == (30.0, 0.0, 0.0)
+    np.testing.assert_allclose(found["v"].rotation, [0.3, -0.6, 1.0], atol=0.01)
+    assert "liens mesurés : 1 ;" in result.output
 
 
 def _kept(**more) -> dict:
