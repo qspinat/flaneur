@@ -195,13 +195,22 @@ def test_a_panorama_no_longer_known_is_not_judged():
     assert agreement.holds(_kept(p, s), [p])
 
 
-def test_corrections_go_stale_once_walk_links_are_drawn_otherwise(monkeypatch):
+@pytest.mark.parametrize(
+    "module, term, value",
+    [(panoramas, "LINK_M", (2, 20)), (agreement, "PULL", 0.02), (depth, "WIDEST_DEG", 0.3)],
+)
+def test_corrections_go_stale_once_computed_otherwise(monkeypatch, module, term, value):
+    monkeypatch.setattr(agreement, "setup", agreement.setup.__wrapped__)  # read afresh
     p = _picture()
     kept = _kept(p)
 
-    monkeypatch.setattr(panoramas, "LINK_M", (2, 20))
+    monkeypatch.setattr(module, term, value)
 
     assert not agreement.holds(kept, [p])
+
+
+def test_how_corrections_are_computed_is_read_once_a_run():
+    assert agreement.setup.cache_info().maxsize is None  # functools.cache
 
 
 def test_corrections_are_read_as_they_were_kept(tmp_path):
@@ -215,6 +224,22 @@ def test_corrections_are_read_as_they_were_kept(tmp_path):
 
 def test_no_corrections_kept_reads_none(tmp_path):
     assert agreement.load(tmp_path / "none.json") is None
+
+
+def test_corrections_kept_otherwise_are_not_taken_for_an_agreement(tmp_path):
+    path = tmp_path / "agreed.json"
+    path.write_text('{"setup": "1", "panoramas": {"v": {"rotation": [0, 0, 1]}}}')
+
+    with pytest.raises(ValueError):
+        agreement.load(path)
+
+
+def test_corrections_applied_otherwise_than_all_or_none_are_refused_on_import():
+    source = Path(agreement.__file__).read_text()
+    mistyped = source.replace('APPLIED: poses.Applied = "all"', 'APPLIED: poses.Applied = "turns"')
+
+    with pytest.raises(ValueError, match="turns"):
+        exec(compile(mistyped, agreement.__file__, "exec"), {"__name__": "mistyped"})
 
 
 def test_each_walk_link_with_a_pair_made_is_measured_once():

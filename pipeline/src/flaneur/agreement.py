@@ -8,7 +8,9 @@ are set right as the walls' are (depth.set_right): a neighbour standing under 2 
 out, which E8a's refit kept (measured: 4 of its 5,361 links; their turns are the same
 otherwise)."""
 
+import functools
 import hashlib
+import inspect
 from collections.abc import Callable, Set
 from dataclasses import replace
 from pathlib import Path
@@ -24,10 +26,12 @@ from flaneur.panoramax import Picture
 from flaneur.sources import write_json
 
 APPLIED: poses.Applied = "all"  # what cli._levelled takes of these: "all" or "none" (a turn is
-# all there is: "turns" takes all). "all" chosen 23/11 (E8a, held out by 10-fold
-# cross-validation over the links: each volunteer panorama's disagreement with its neighbours
-# 1.91° → 0.76° in median, 733 better, 315 worse; the neighbour's picture brought through the
-# walls matched better, +0.0086 NCC, 52 better, 19 worse)
+# all there is: no "turns"). "all" chosen 23/11 (E8a, held out by 10-fold cross-validation over
+# the links: each volunteer panorama's disagreement with its neighbours 1.91° → 0.76° in
+# median, 733 better, 315 worse; the neighbour's picture brought through the walls matched
+# better, +0.0086 NCC, 52 better, 19 worse)
+if APPLIED not in ("all", "none"):  # a slip refused before anything reads the panoramas
+    raise ValueError(f"agreement.APPLIED: all or none, not {APPLIED!r}")
 MOST_TURNED_DEG = 10.0  # a pair set right by more (its rays or its baseline) says nothing
 PULL = 0.01  # each free panorama's turn pulled to none this much (where no survey panorama
 # reaches, they stay as they are on the whole)
@@ -146,14 +150,12 @@ def camera_angles(axes: np.ndarray) -> tuple[float, float, float]:
     return azimuth, pitch, roll
 
 
-def applied(
-    pictures: list[Picture], kept: Agreement | None, applied: poses.Applied
-) -> list[Picture]:
+def applied(pictures: list[Picture], kept: Agreement | None, taken: poses.Applied) -> list[Picture]:
     """The panoramas, each turned by its correction `kept` (see holds: whether they still
-    stand), `applied` "all"; "none": as they are."""
-    if applied not in ("all", "none"):
-        raise ValueError(f"applied: all or none, not {applied!r}")
-    if applied == "none" or kept is None:
+    stand), `taken` "all"; "none": as they are."""
+    if taken not in ("all", "none"):
+        raise ValueError(f"applied: all or none, not {taken!r}")
+    if taken == "none" or kept is None:
         return list(pictures)
     return [corrected(p, np.array(kept.turns[p.id])) if p.id in kept.turns else p for p in pictures]
 
@@ -162,21 +164,25 @@ def holds(kept: Agreement, pictures: list[Picture]) -> bool:
     """Whether corrections `kept` still hold: computed as they are now (see setup), and every
     panorama of the graph they were solved with standing as it stood (see stance; a survey fix,
     recaler or another tilt makes it other: its pairs, and its neighbours' turns, are other).
-    A panorama no longer known, or one come since, is not judged, as the pairs on disk are not:
-    `flaneur accorder` computes again from what is there."""
+    A panorama no longer known, or one come since, is not judged, nor are the pairs on disk: a
+    panorama come since stands unturned, the others keep their turns, until `flaneur accorder`
+    runs again (after `flaneur murs` has made its pairs)."""
     now = {p.id: stance(p) for p in pictures if p.id in kept.stood}
     return kept.setup == setup() and all(
         poses.stands(kept.stood[i], stood) for i, stood in now.items()
     )
 
 
+@functools.cache  # the code does not change while a command runs
 def setup() -> str:
-    """How corrections are now computed: this code, how pairs are set right (depth) and how the
-    walk's links are drawn (panoramas.links' terms); corrections computed otherwise no longer
-    hold (see holds)."""
-    links_drawn = repr((panoramas.LINK_M, panoramas.SECTOR_DEG)).encode()
-    made = Path(__file__).read_bytes() + Path(depth.__file__).read_bytes() + links_drawn
-    return hashlib.sha1(made).hexdigest()[:8]
+    """How corrections are now computed: the code they come from (how a pair is set right, a
+    link measured, the walk's links gathered and averaged), its terms, and those the walk's
+    links are drawn by (panoramas.links); corrections computed otherwise no longer hold (see
+    holds). Which pairs are on disk is not: `flaneur accorder` reads them again when run."""
+    code = [inspect.getsource(f) for f in (depth.set_right, measured, links, averaged)]
+    terms = (PULL, SCALE_DEG, MOST_TURNED_DEG, depth.LEAST_MATCHES, depth.WIDEST_DEG)
+    terms += (depth.ROBUST_DEG, depth.NEAR_M, panoramas.LINK_M, panoramas.SECTOR_DEG)
+    return hashlib.sha1(repr((code, terms)).encode()).hexdigest()[:8]
 
 
 def save(path: Path, kept: Agreement) -> None:
@@ -186,9 +192,13 @@ def save(path: Path, kept: Agreement) -> None:
 
 
 def load(path: Path) -> Agreement | None:
-    """What `save` kept; none if nothing is."""
+    """What `save` kept; none if nothing is. ValueError for what is not corrections kept so
+    (unreadable, or kept otherwise before)."""
     kept = register.load(path)
     if not kept:
         return None
-    turns, stood = ({i: tuple(v) for i, v in kept[f].items()} for f in ("turns", "stood"))
-    return Agreement(kept["setup"], turns, stood)
+    try:
+        turns, stood = ({i: tuple(v) for i, v in kept[f].items()} for f in ("turns", "stood"))
+        return Agreement(str(kept["setup"]), turns, stood)
+    except (KeyError, TypeError, AttributeError) as error:
+        raise ValueError(f"{path}: not corrections kept as now ({error!r})") from error

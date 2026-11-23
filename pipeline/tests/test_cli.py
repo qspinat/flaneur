@@ -1,3 +1,4 @@
+import functools
 import json
 import subprocess
 import threading
@@ -268,14 +269,31 @@ def _agreed(here: Picture, rotation: tuple[float, float, float], heading: float 
     agreement.save(cli.AGREED, agreement.Agreement(agreement.setup(), {here.id: rotation}, stood))
 
 
-def test_panoramas_agreed_otherwise_are_refused_but_to_accorder(monkeypatch):
+def _said_once(monkeypatch) -> None:
+    """What is said once a run, said afresh in this test."""
+    monkeypatch.setattr(cli, "_not_agreed", functools.cache(cli._not_agreed.__wrapped__))
+
+
+def test_panoramas_agreed_otherwise_stand_unagreed_and_it_is_said_once(monkeypatch, capsys):
+    _said_once(monkeypatch)
     here = Picture("p1", 2.3466, 48.852, 40.0, True, "2024-01-01", "", "")
     _agreed(here, (0.0, 0.5, 0.0), heading=41.0)  # it was solved facing otherwise
     monkeypatch.setattr(agreement, "APPLIED", "all")
 
-    with pytest.raises(typer.BadParameter, match="flaneur accorder"):
-        cli._lined_up([here])
-    assert cli._lined_up([here], agreed=False) == [here]
+    assert cli._levelled([here]) == [here] and cli._lined_up([here]) == [here]
+    assert capsys.readouterr().err.count("flaneur accorder") == 1
+
+
+def test_an_agreement_kept_otherwise_leaves_the_panoramas_unagreed(monkeypatch, capsys):
+    _said_once(monkeypatch)
+    here = Picture("p1", 2.3466, 48.852, 40.0, True, "2024-01-01", "", "")
+    older = {"setup": "1", "panoramas": {"p1": {"rotation": [0.0, 0.0, 1.0], "against": [40.0]}}}
+    cli.AGREED.parent.mkdir(parents=True, exist_ok=True)
+    cli.AGREED.write_text(json.dumps(older))
+    monkeypatch.setattr(agreement, "APPLIED", "all")
+
+    assert cli._levelled([here]) == [here]
+    assert "flaneur accorder" in capsys.readouterr().err
 
 
 def test_corrections_applied_neither_all_nor_none_are_refused(monkeypatch):
@@ -621,16 +639,16 @@ def test_a_pair_matched_one_way_serves_the_other_panorama(monkeypatch, tmp_path)
     assert len(scenes.details(beside, [home], made_only=True)) > 0
 
 
-def test_accorder_turns_the_volunteers_by_the_pairs_on_disk_alone(monkeypatch):
+def _accorder_world(monkeypatch) -> tuple[list[Picture], object]:
+    """Three panoramas (s of the survey; v 5 m north of it, its pair with s on disk, v off by a
+    known turn; w 5 m east, linked to both, never matched), and the pair's file."""
+
     def picture(id: str, x: float, y: float, producer: str | None = None) -> Picture:
         where = to_degrees(Point(652000.0 + x, 6862000.0 + y))
         return Picture(id, where.x, where.y, 30.0, True, "2024-01-01", "", "", producer=producer)
 
-    pictures = [
-        picture("s", 0.0, 0.0, survey.PRODUCER),
-        picture("v", 0.0, 5.0),  # its pair with s on disk
-        picture("w", 5.0, 0.0),  # linked to both, never matched
-    ]
+    pictures = [picture("s", 0.0, 0.0, survey.PRODUCER), picture("v", 0.0, 5.0)]
+    pictures.append(picture("w", 5.0, 0.0))
     with closing(db.connect(cli.DB_PATH)) as conn:
         panoramas.save(conn, pictures)
     cli.PANORAMAS.mkdir(parents=True)
@@ -646,6 +664,11 @@ def test_accorder_turns_the_volunteers_by_the_pairs_on_disk_alone(monkeypatch):
     pair = cli.PAIR_MATCHES / f"{names[0]}__{names[1]}.npz"
     pair.parent.mkdir(parents=True)
     np.savez(pair, a=_units(street - s), b=_units(street - v) @ turn)
+    return pictures, pair
+
+
+def test_accorder_turns_the_volunteers_by_the_pairs_on_disk_alone(monkeypatch):
+    pictures, pair = _accorder_world(monkeypatch)
     # a correction already kept: read back, v would be turned off its pair's name
     stood = {p.id: agreement.stance(p) for p in pictures}
     agreement.save(cli.AGREED, agreement.Agreement("old", {"v": (0.0, 0.0, 5.0)}, stood))
@@ -659,6 +682,17 @@ def test_accorder_turns_the_volunteers_by_the_pairs_on_disk_alone(monkeypatch):
     np.testing.assert_allclose(found.turns["v"], [0.3, -0.6, 1.0], atol=0.01)
     assert "liens mesurés : 1 ;" in result.output
     assert "1 panorama(s) prennent de nouveaux angles" in result.output  # v: 0.6° of tilt
+
+
+def test_accorder_run_again_on_the_same_pairs_turns_no_panorama_anew(monkeypatch):
+    _accorder_world(monkeypatch)
+    CliRunner().invoke(app, ["accorder"])
+
+    again = CliRunner().invoke(app, ["accorder"])
+
+    assert again.exit_code == 0, again.output
+    assert "aucun panorama ne prend de nouveaux angles" in again.output
+    assert "segmenter" not in again.output
 
 
 def _kept(**more) -> dict:
