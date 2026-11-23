@@ -491,6 +491,12 @@ def at(x: float, y: float, heading: float) -> tuple[float, float, float]:
     return round(x, 2), round(y, 2), round(heading, 2)
 
 
+def poised(x: float, y: float, heading: float, roll: float, pitch: float) -> tuple[float, ...]:
+    """How a panorama stands and leans: where (see at), then its roll and pitch to the
+    hundredth (what is made in its levelled views holds while these do)."""
+    return (*at(x, y, heading), round(roll, 2), round(pitch, 2))
+
+
 def to_apply(
     verdicts: dict[str, Verdict], placed: dict[str, tuple[float, float, float]], applied: Applied
 ) -> dict[str, tuple[float, float, float]]:

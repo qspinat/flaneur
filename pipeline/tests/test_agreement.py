@@ -4,10 +4,11 @@ from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
+import pytest
 from scipy.spatial.transform import Rotation
 from shapely.geometry import Point
 
-from flaneur import agreement, depth, match
+from flaneur import agreement, depth, match, panoramas
 from flaneur.gazetteer import to_degrees
 from flaneur.panoramax import Picture
 
@@ -133,59 +134,87 @@ def test_a_panorama_turned_faces_and_leans_as_its_axes_turned():
 TURN = (0.0, 0.0, 1.0)
 
 
-def _kept(p: Picture) -> dict[str, agreement.Agreed]:
-    return {p.id: agreement.Agreed(TURN, agreement.stance(p))}
+def _kept(p: Picture, *held: Picture) -> agreement.Agreement:
+    """`p`'s correction, solved with `held` (the survey's) in the graph, as they stand."""
+    stood = {q.id: agreement.stance(q) for q in (p, *held)}
+    return agreement.Agreement(agreement.setup(), {p.id: TURN}, stood)
 
 
-def test_a_correction_turns_the_panorama_standing_as_it_was_computed_against():
+def test_a_correction_turns_its_panorama():
     p = _picture()
 
-    assert agreement.applied([p], _kept(p)) == [agreement.corrected(p, np.array(TURN))]
-
-
-def test_a_correction_is_left_once_its_panorama_is_levelled_otherwise():
-    p = _picture()
-    levelled = replace(p, roll=p.roll - 0.05)
-
-    assert agreement.applied([levelled], _kept(p)) == [levelled]
-
-
-def test_a_correction_is_left_once_its_panorama_has_moved():
-    p = _picture()
-    moved = _picture(east=0.5)  # a survey fix or COLMAP moving it: its pairs are other
-
-    assert agreement.applied([moved], _kept(p)) == [moved]
+    assert agreement.applied([p], _kept(p), "all") == [agreement.corrected(p, np.array(TURN))]
 
 
 def test_a_correction_turns_no_other_panorama():
     p, other = _picture(), _picture(id="w")
 
-    assert agreement.applied([other], _kept(p)) == [other]
+    assert agreement.applied([other], _kept(p), "all") == [other]
+
+
+def test_corrections_not_applied_turn_nothing():
+    p = _picture()
+
+    assert agreement.applied([p], _kept(p), "none") == [p]
+
+
+def test_corrections_applied_otherwise_than_all_or_none_are_refused():
+    p = _picture()
+
+    with pytest.raises(ValueError, match="turns"):
+        agreement.applied([p], _kept(p), "turns")
+
+
+def test_corrections_hold_while_every_panorama_solved_with_stands_as_it_did():
+    p, s = _picture(), _picture("s", east=5.0)
+
+    assert agreement.holds(_kept(p, s), [p, s])
+
+
+def test_corrections_go_stale_once_a_panorama_is_levelled_otherwise():
+    p = _picture()
+
+    assert not agreement.holds(_kept(p), [replace(p, roll=p.roll - 0.05)])
+
+
+def test_corrections_go_stale_once_a_panorama_has_moved():
+    p = _picture()
+
+    assert not agreement.holds(_kept(p), [_picture(east=0.5)])  # its pairs are other
+
+
+def test_corrections_go_stale_once_a_neighbour_solved_with_has_moved():
+    p, s = _picture(), _picture("s", east=5.0)  # s held, its own turn none
+
+    assert not agreement.holds(_kept(p, s), [p, _picture("s", east=5.5)])
+
+
+def test_a_panorama_no_longer_known_is_not_judged():
+    p, s = _picture(), _picture("s", east=5.0)
+
+    assert agreement.holds(_kept(p, s), [p])
+
+
+def test_corrections_go_stale_once_walk_links_are_drawn_otherwise(monkeypatch):
+    p = _picture()
+    kept = _kept(p)
+
+    monkeypatch.setattr(panoramas, "LINK_M", (2, 20))
+
+    assert not agreement.holds(kept, [p])
 
 
 def test_corrections_are_read_as_they_were_kept(tmp_path):
     path = tmp_path / "agreed.json"
-    kept = {
-        "v": agreement.Agreed((0.1, -0.2, 0.3), agreement.stance(_picture())),
-        "w": agreement.Agreed((1.0, 0.0, -1.5), agreement.stance(_picture("w", east=5.0))),
-    }
+    kept = _kept(_picture(), _picture("s", east=5.0))
 
     agreement.save(path, kept)
 
     assert agreement.load(path) == kept
 
 
-def test_corrections_computed_otherwise_are_not_read(tmp_path, monkeypatch):
-    path = tmp_path / "agreed.json"
-    agreement.save(path, {"v": agreement.Agreed(TURN, agreement.stance(_picture()))})
-
-    monkeypatch.setattr(agreement, "PULL", 0.02)
-
-    assert agreement.load(path) == {}
-
-
 def test_no_corrections_kept_reads_none(tmp_path):
-    assert agreement.load(tmp_path / "none.json") == {}
+    assert agreement.load(tmp_path / "none.json") is None
 
 
 def test_each_walk_link_with_a_pair_made_is_measured_once():

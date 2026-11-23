@@ -27,6 +27,7 @@ from flaneur import (
     panoramas,
     placed,
     placing,
+    placings,
     poses,
     registration,
     segment,
@@ -253,12 +254,57 @@ def test_nothing_applied_reads_no_verdict(tmp_path, monkeypatch):
 def test_panoramas_stand_agreed_unless_asked_otherwise(monkeypatch, applied, asked, agreed):
     here = Picture("p1", 2.3466, 48.852, 40.0, True, "2024-01-01", "", "")
     rotation = (0.0, 0.5, 0.0)
-    agreement.save(cli.AGREED, {"p1": agreement.Agreed(rotation, agreement.stance(here))})
+    _agreed(here, rotation)
     monkeypatch.setattr(agreement, "APPLIED", applied)
 
     (found,) = cli._levelled([here], **asked)
 
     assert found == (agreement.corrected(here, np.array(rotation)) if agreed else here)
+
+
+def _agreed(here: Picture, rotation: tuple[float, float, float], heading: float = 40.0) -> None:
+    """`here` corrected by `rotation`, as accorder keeps it, solved with `here` facing so."""
+    stood = {here.id: agreement.stance(replace(here, azimuth=heading))}
+    agreement.save(cli.AGREED, agreement.Agreement(agreement.setup(), {here.id: rotation}, stood))
+
+
+def test_panoramas_agreed_otherwise_are_refused_but_to_accorder(monkeypatch):
+    here = Picture("p1", 2.3466, 48.852, 40.0, True, "2024-01-01", "", "")
+    _agreed(here, (0.0, 0.5, 0.0), heading=41.0)  # it was solved facing otherwise
+    monkeypatch.setattr(agreement, "APPLIED", "all")
+
+    with pytest.raises(typer.BadParameter, match="flaneur accorder"):
+        cli._lined_up([here])
+    assert cli._lined_up([here], agreed=False) == [here]
+
+
+def test_corrections_applied_neither_all_nor_none_are_refused(monkeypatch):
+    here = Picture("p1", 2.3466, 48.852, 40.0, True, "2024-01-01", "", "")
+    monkeypatch.setattr(agreement, "APPLIED", "turns")
+
+    with pytest.raises(ValueError, match="turns"):
+        cli._levelled([here])
+
+
+def test_answers_follow_their_panorama_turned_by_the_agreement_once(monkeypatch):
+    here = Picture("p1", 2.3466, 48.852, 40.0, True, "2024-01-01", "", "")
+    with closing(db.connect(cli.DB_PATH)) as conn:
+        panoramas.save(conn, [here])
+    rotation = (0.0, 0.0, -3.0)  # about the vertical: the heading 3° to the right
+    _agreed(here, rotation)
+    monkeypatch.setattr(agreement, "APPLIED", "all")
+    turned = agreement.corrected(here, np.array(rotation))
+    reg = registration.Registration("p1", (1.0, 0, 0, 0, 1.0, 0, 0, 0, 1.0), registration.ViewOf(0))
+    for photo, stood in [("pm:1", here), ("pm:2", turned)]:  # answered before, after
+        at = poses.at(stood.point.x, stood.point.y, stood.azimuth)
+        spot = {"lon": here.lon, "lat": here.lat + 1e-4, "heading": 10.0}
+        placings.record(cli.PLACINGS, photo, "fits", 5.0, **spot, registration=reg, panorama_at=at)
+
+    places, _, _ = cli._placing_answers()
+
+    assert turned.azimuth == pytest.approx(43.0)
+    assert places["pm:1"]["heading"] == pytest.approx(13.0, abs=0.01)  # followed it
+    assert places["pm:2"]["heading"] == pytest.approx(10.0)  # left where it was put
 
 
 def test_homes_with_pairs_are_counted_under_their_own_names(tmp_path):
@@ -601,18 +647,18 @@ def test_accorder_turns_the_volunteers_by_the_pairs_on_disk_alone(monkeypatch):
     pair.parent.mkdir(parents=True)
     np.savez(pair, a=_units(street - s), b=_units(street - v) @ turn)
     # a correction already kept: read back, v would be turned off its pair's name
-    agreement.save(
-        cli.AGREED, {"v": agreement.Agreed((0.0, 0.0, 5.0), agreement.stance(pictures[1]))}
-    )
+    stood = {p.id: agreement.stance(p) for p in pictures}
+    agreement.save(cli.AGREED, agreement.Agreement("old", {"v": (0.0, 0.0, 5.0)}, stood))
 
     result = CliRunner().invoke(app, ["accorder"])
 
     assert result.exit_code == 0, result.output
     assert list(cli.PAIR_MATCHES.iterdir()) == [pair]  # no pair made
     found = agreement.load(cli.AGREED)
-    assert found.keys() == {"v"} and found["v"].against == agreement.stance(pictures[1])
-    np.testing.assert_allclose(found["v"].rotation, [0.3, -0.6, 1.0], atol=0.01)
+    assert found.turns.keys() == {"v"} and found.stood == {i: stood[i] for i in ("s", "v")}
+    np.testing.assert_allclose(found.turns["v"], [0.3, -0.6, 1.0], atol=0.01)
     assert "liens mesurés : 1 ;" in result.output
+    assert "1 panorama(s) prennent de nouveaux angles" in result.output  # v: 0.6° of tilt
 
 
 def _kept(**more) -> dict:

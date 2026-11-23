@@ -2,10 +2,11 @@
 and levelled, they still disagree with the panoramas beside them by a degree or two, mostly in
 tilt. Each walk link (panoramas.links) whose pair on disk sets right well says how far the
 neighbour turns to agree with the panorama (measured); one small turn per panorama is averaged
-from them all, the survey's held where they stand (averaged), and applied to the panorama as
-levelled when it was computed (applied, by cli._levelled). The pairs are set right as the walls'
-are (depth.set_right): a neighbour standing under 2 m away is left out, which E8a's refit kept
-(measured: 4 of its 5,361 links; their turns are the same otherwise)."""
+from them all, the survey's held where they stand (averaged), and applied to the panoramas (applied,
+by cli._levelled) while every panorama they were solved with stands as it did (holds). The pairs
+are set right as the walls' are (depth.set_right): a neighbour standing under 2 m away is left
+out, which E8a's refit kept (measured: 4 of its 5,361 links; their turns are the same
+otherwise)."""
 
 import hashlib
 from collections.abc import Callable, Set
@@ -33,19 +34,21 @@ PULL = 0.01  # each free panorama's turn pulled to none this much (where no surv
 SCALE_DEG = 0.5  # a link disagreeing by more than this with the others counts less (soft L1)
 
 
-class Agreed(NamedTuple):
-    """A panorama's correction (rotation vector, degrees, as `measured`), and how the panorama
-    stood when it was computed (see stance)."""
+class Agreement(NamedTuple):
+    """The corrections solved together: how they were computed (see setup), each free
+    panorama's turn (a rotation vector, degrees, as `measured`), and how every panorama of the
+    graph stood then, the survey's among them (see stance)."""
 
-    rotation: tuple[float, float, float]
-    against: tuple[float, ...]
+    setup: str
+    turns: dict[str, tuple[float, float, float]]
+    stood: dict[str, tuple[float, ...]]
 
 
 def stance(picture: Picture) -> tuple[float, ...]:
-    """Where a panorama stands, facing (see poses.at), then its roll and pitch to the
-    hundredth: its pairs, and so its correction, hold while these do."""
-    where = poses.at(picture.point.x, picture.point.y, picture.azimuth or 0.0)
-    return (*where, round(picture.roll, 2), round(picture.pitch, 2))
+    """How a panorama stands and leans (see poses.poised): its pairs, and so the corrections
+    solved with it, hold while this does."""
+    x, y = picture.point.x, picture.point.y
+    return poses.poised(x, y, picture.azimuth or 0.0, picture.roll, picture.pitch)
 
 
 def links(
@@ -91,26 +94,27 @@ def measured(
     return None if turned > MOST_TURNED_DEG else np.degrees(turn.as_rotvec())
 
 
-def averaged(links: list[tuple[str, str, np.ndarray]], held: Set[str]) -> dict[str, np.ndarray]:
-    """One turn per panorama (a rotation vector, degrees, as `measured`) from the `links`
-    (i, j, r_ij: j's turn with i held), c_j − c_i as near r_ij as they all allow: those `held`
-    (the survey's) at none, every other pulled to none by PULL, a link far from the others
-    counting less (soft L1 beyond SCALE_DEG); the turns of all but those held."""
-    free = sorted({p for i, j, _ in links for p in (i, j)} - set(held))
+def averaged(edges: list[tuple[str, str, np.ndarray]], held: Set[str]) -> dict[str, np.ndarray]:
+    """One turn per panorama (a rotation vector, degrees, as `measured`) from the links
+    measured (`edges`: i, j, r_ij, j's turn with i held; see links), c_j − c_i as near r_ij as
+    they all allow: those `held` (the survey's) at none, every other pulled to none by PULL, a
+    link far from the others counting less (soft L1 beyond SCALE_DEG); the turns of all but
+    those held."""
+    free = sorted({p for i, j, _ in edges for p in (i, j)} - set(held))
     if not free:
         return {}
     column = {p: k for k, p in enumerate(free)}
     rows, columns, values = [], [], []
-    for n, (i, j, _) in enumerate(links):
+    for n, (i, j, _) in enumerate(edges):
         for p, v in ((j, 1.0), (i, -1.0)):
             if p in column:
                 rows.append(n)
                 columns.append(column[p])
                 values.append(v)
-    incidence = sparse.csr_matrix((values, (rows, columns)), shape=(len(links), len(free)))
+    incidence = sparse.csr_matrix((values, (rows, columns)), shape=(len(edges), len(free)))
     pulled = PULL * sparse.identity(3 * len(free), format="csr")
     A = sparse.vstack([sparse.kron(incidence, sparse.identity(3), format="csr"), pulled]).tocsr()
-    b = np.r_[np.ravel([r for _, _, r in links]), np.zeros(3 * len(free))]
+    b = np.r_[np.ravel([r for _, _, r in edges]), np.zeros(3 * len(free))]
     x = least_squares(
         lambda x: A @ x - b,
         np.zeros(A.shape[1]),
@@ -142,36 +146,49 @@ def camera_angles(axes: np.ndarray) -> tuple[float, float, float]:
     return azimuth, pitch, roll
 
 
-def applied(pictures: list[Picture], kept: dict[str, Agreed]) -> list[Picture]:
-    """The panoramas, each turned by its correction `kept` while it stands as when the
-    correction was computed (see stance, poses.stands); one moved or levelled otherwise since is
-    left as it is."""
-    return [
-        corrected(p, np.array(k.rotation))
-        if (k := kept.get(p.id)) and poses.stands(k.against, stance(p))
-        else p
-        for p in pictures
-    ]
+def applied(
+    pictures: list[Picture], kept: Agreement | None, applied: poses.Applied
+) -> list[Picture]:
+    """The panoramas, each turned by its correction `kept` (see holds: whether they still
+    stand), `applied` "all"; "none": as they are."""
+    if applied not in ("all", "none"):
+        raise ValueError(f"applied: all or none, not {applied!r}")
+    if applied == "none" or kept is None:
+        return list(pictures)
+    return [corrected(p, np.array(kept.turns[p.id])) if p.id in kept.turns else p for p in pictures]
+
+
+def holds(kept: Agreement, pictures: list[Picture]) -> bool:
+    """Whether corrections `kept` still hold: computed as they are now (see setup), and every
+    panorama of the graph they were solved with standing as it stood (see stance; a survey fix,
+    recaler or another tilt makes it other: its pairs, and its neighbours' turns, are other).
+    A panorama no longer known, or one come since, is not judged, as the pairs on disk are not:
+    `flaneur accorder` computes again from what is there."""
+    now = {p.id: stance(p) for p in pictures if p.id in kept.stood}
+    return kept.setup == setup() and all(
+        poses.stands(kept.stood[i], stood) for i, stood in now.items()
+    )
 
 
 def setup() -> str:
-    """How corrections are now computed (this code, and the terms pairs are set right by):
-    those computed otherwise are not read (see load)."""
-    terms = (PULL, SCALE_DEG, MOST_TURNED_DEG, depth.LEAST_MATCHES, depth.WIDEST_DEG)
-    terms += (depth.ROBUST_DEG, depth.NEAR_M)
-    made = Path(__file__).read_bytes() + repr(terms).encode()
+    """How corrections are now computed: this code, how pairs are set right (depth) and how the
+    walk's links are drawn (panoramas.links' terms); corrections computed otherwise no longer
+    hold (see holds)."""
+    links_drawn = repr((panoramas.LINK_M, panoramas.SECTOR_DEG)).encode()
+    made = Path(__file__).read_bytes() + Path(depth.__file__).read_bytes() + links_drawn
     return hashlib.sha1(made).hexdigest()[:8]
 
 
-def save(path: Path, kept: dict[str, Agreed]) -> None:
-    """The corrections (by panorama), and how they were computed (see setup)."""
-    rows = {i: a._asdict() for i, a in sorted(kept.items())}
-    write_json(path, {"setup": setup(), "panoramas": rows})
+def save(path: Path, kept: Agreement) -> None:
+    """The corrections solved together (see Agreement)."""
+    turns, stood = (dict(sorted(d.items())) for d in (kept.turns, kept.stood))
+    write_json(path, kept._replace(turns=turns, stood=stood)._asdict())
 
 
-def load(path: Path) -> dict[str, Agreed]:
-    """What `save` kept, if computed as corrections are now (see setup); none else."""
+def load(path: Path) -> Agreement | None:
+    """What `save` kept; none if nothing is."""
     kept = register.load(path)
-    if kept.get("setup") != setup():
-        return {}
-    return {i: Agreed(*(tuple(r[f]) for f in Agreed._fields)) for i, r in kept["panoramas"].items()}
+    if not kept:
+        return None
+    turns, stood = ({i: tuple(v) for i, v in kept[f].items()} for f in ("turns", "stood"))
+    return Agreement(kept["setup"], turns, stood)
