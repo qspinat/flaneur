@@ -2912,6 +2912,7 @@ def surveyed(monkeypatch) -> tuple[list[Picture], object]:
 
 def test_releve_with_nothing_changed_keeps_the_file_as_it_was(monkeypatch, surveyed):
     written = cli.SURVEYED.stat().st_mtime_ns
+    monkeypatch.setattr(cli, "_street_facades", lambda features: pytest.fail("facades built"))
 
     assert _releve(monkeypatch) == 0
     assert cli.SURVEYED.stat().st_mtime_ns == written
@@ -2991,8 +2992,10 @@ def test_a_lidar_patch_that_cannot_be_read_keeps_the_panorama_where_it_stands(mo
         raise cli.httpx.ConnectError("no network")
 
     monkeypatch.setattr(cli.poses, "in_street", broken)
+    in_street, unread = cli._in_street_or_not(None)
 
-    assert cli._in_street_or_not(None)(1.0, 2.0) is False
+    assert in_street(1.0, 2.0) is False
+    assert unread == [(1.0, 2.0)]
 
 
 def test_a_photo_matched_again_has_its_features_extracted_when_not_kept(monkeypatch):
