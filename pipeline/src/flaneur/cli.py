@@ -98,6 +98,7 @@ REVIEWS = DATA / "overrides" / "reviews.jsonl"
 SIGHTS = DATA / "overrides" / "sights.jsonl"  # the landmarks marked in photos, by hand
 CORRECTIONS = DATA / "pilot" / "panorama_corrections.json"  # on the buildings (register): unused
 SURVEYED = DATA / "pilot" / "panorama_survey.json"  # volunteers' panoramas set right on the survey
+SURVEYED_FROM = DATA / "pilot" / "panorama_survey_inputs.json"  # what it was made from (releve)
 POSES = DATA / "pilot" / "panorama_poses.json"  # panoramas set right on two surveys (see poses)
 VIEW_STRUCTURE = (  # each panorama's views' pixel classes (see segment), as views are cut now
     DATA / "raw" / "view_structure" / f"{match.VIEW_SIDE}_{match.VIEW_FOV}_{match.VIEW_PITCH}"
@@ -4607,22 +4608,61 @@ def _within(answers: Path, reach: float, corrected: bool = True) -> list[match.P
     return [spheres[i] for i in np.argsort(nearest) if nearest[i] <= reach]
 
 
-def _in_street_or_not(client: httpx.Client | None) -> Callable[[float, float], bool]:
+def _in_street_or_not(
+    client: httpx.Client | None, unread: list[tuple[float, float]] | None = None
+) -> Callable[[float, float], bool]:
     """Whether a place is in the street (see poses.in_street); a LiDAR patch that cannot be
-    read (network, an answer not understood): not, the panorama left where it stands."""
+    read (network, an answer not understood): not, the panorama left where it stands, and the
+    place added to `unread`."""
 
     def in_street(x: float, y: float) -> bool:
         try:
             return poses.in_street(x, y, LIDAR_MNS, client)
         except (httpx.HTTPError, ValueError) as error:
             typer.echo(f"LiDAR illisible en {x:.0f}, {y:.0f} : laissé en place ({error})", err=True)
+            if unread is not None:
+                unread.append((x, y))
             return False
 
     return in_street
 
 
+@functools.cache  # the code does not change while a command runs
+def _surveying_code() -> str:
+    """The code panoramas are set right on the survey by (survey whole), and its terms."""
+    code = [inspect.getsource(f) for f in (set_on_survey, depth.set_right, depth.candidates)]
+    terms = (depth.LEAST_MATCHES, depth.NEAR_M, depth.ROBUST_DEG, depth.WIDEST_DEG)
+    return _digest([*code, repr((*terms, depth.MOST_CANDIDATES)), _hash_of(survey)])
+
+
+def _surveyed_from(spheres: list[match.Panorama], producer: dict[str, str | None]) -> str:
+    """What `flaneur releve` sets panoramas right from, hashed: the panoramas as COLMAP left
+    them (whose, where each stands and leans), the pairs it can read (both halves under those
+    names: see _Scenes._path), each as last written, COLMAP's fixes, and the code. Not the
+    LiDAR: its patches, once fetched, are kept and do not change (one not read: see
+    set_on_survey)."""
+    names = {_levelled_name(p) for p in spheres}
+    pairs = sorted(
+        f
+        for f in PAIR_MATCHES.glob("*.npz")
+        if len(halves := f.stem.split("__")) == 2 and set(halves) <= names
+    )
+    where = sorted(  # by id
+        [p.id, producer.get(p.id), round(p.z, 2)]
+        + list(poses.poised(p.x, p.y, p.azimuth, p.roll, p.pitch))
+        for p in spheres
+    )
+    fixes = hashlib.sha1(FIXES.read_bytes()).hexdigest() if FIXES.exists() else None
+    made = list(zip([f.name for f in pairs], _stamp(pairs), strict=True))
+    return _digest([where, made, fixes, _surveying_code()])
+
+
 @app.command("releve")
-def set_on_survey() -> None:
+def set_on_survey(
+    force: Annotated[
+        bool, typer.Option(help="refaire même si rien de ce qu'il lit n'a changé")
+    ] = False,
+) -> None:
     """Remet d'aplomb les panoramas des bénévoles sur ceux du relevé (Immergis pour la Ville de
     Paris), par les paires déjà faites (sans apparieur) : un bénévole vu par des panoramas du
     relevé qui s'accordent prend leur cap, et sa place où leurs directions se croisent ; remis
@@ -4630,11 +4670,23 @@ def set_on_survey() -> None:
     plus de 5 m n'est gardé que si le LiDAR met la nouvelle place dans la rue. Jugés tels que
     COLMAP les a laissés (une fois appliquées, les paires d'un panorama tourné sont rangées sous
     son nom tourné : un bénévole arrivé depuis ne passe plus par lui) ; écrit
-    data/pilot/panorama_survey.json, lu selon survey.APPLIED (après la mesure E du plan)."""
+    data/pilot/panorama_survey.json, lu selon survey.APPLIED (après la mesure E du plan).
+
+    Ne lit que les paires rangées sous les noms que COLMAP a laissés : un panorama de bénévole
+    ajouté depuis n'est donc remis sur le relevé que si de telles paires existent pour lui.
+
+    Ne refait rien si rien de ce qu'il lit n'a changé depuis l'écriture du fichier (les
+    panoramas, ces paires, les corrections de COLMAP, le code : gardés dans
+    data/pilot/panorama_survey_inputs.json) ; un LiDAR illisible le fait refaire la fois
+    suivante."""
     spheres, segments = _placing_world(corrected=False)
     with closing(db.connect(DB_PATH)) as conn:
         pictures = panoramas.load(conn)
     producer = {p.id: p.producer for p in pictures}
+    made = _surveyed_from(spheres, producer)
+    if not force and SURVEYED.exists() and register.load(SURVEYED_FROM).get("made") == made:
+        typer.echo(f"rien de ce qu'il lit n'a changé : {SURVEYED} gardé tel quel")
+        return
     fixed = _fixed_by_colmap(pictures, register.load(FIXES))
     scenes = _Scenes(spheres, fixed, _no_matcher, threading.Lock(), segments, WALLS)
     by_id = {p.id: p for p in spheres}
@@ -4660,9 +4712,16 @@ def set_on_survey() -> None:
 
     refs = {p.id: (p.x, p.y) for p in spheres if producer.get(p.id) == survey.PRODUCER}
     others = {p.id: (p.x, p.y) for p in spheres if p.id not in refs}
+    unread: list[tuple[float, float]] = []
     with httpx.Client() as client:
-        found = survey.set_right(refs, others, neighbours, seen, _in_street_or_not(client))
+        in_street = _in_street_or_not(client, unread)
+        found = survey.set_right(refs, others, neighbours, seen, in_street)
     survey.save(SURVEYED, found, {p.id: poses.at(p.x, p.y, p.azimuth) for p in spheres})
+    if unread:  # judged without the LiDAR there: done again next time
+        SURVEYED_FROM.unlink(missing_ok=True)
+        typer.echo(f"LiDAR illisible en {len(unread)} endroit(s) : refait la fois suivante")
+    else:
+        write_json(SURVEYED_FROM, {"made": made})
     turned = survey.fixes(found, "all")
     hops = Counter(f.hops for f in found.values())
     moved = sum(1 for f in turned.values() if f[:2] != (0.0, 0.0))
