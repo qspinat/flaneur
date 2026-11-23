@@ -1,11 +1,14 @@
 """Volunteers' panoramas turned to agree with their neighbours, on built scenes."""
 
 from dataclasses import replace
+from pathlib import Path
 
 import numpy as np
 from scipy.spatial.transform import Rotation
+from shapely.geometry import Point
 
 from flaneur import agreement, depth, match
+from flaneur.gazetteer import to_degrees
 from flaneur.panoramax import Picture
 
 
@@ -105,8 +108,12 @@ def test_a_camera_s_angles_are_read_back_from_its_axes():
     np.testing.assert_allclose(found, angles, atol=1e-9)
 
 
-def _picture(azimuth=40.0, pitch=2.0, roll=-3.0) -> Picture:
-    return Picture("v", 2.3466, 48.852, azimuth, True, "2024-01-01", "", "", roll=roll, pitch=pitch)
+def _picture(id="v", east=0.0, azimuth=40.0, pitch=2.0, roll=-3.0) -> Picture:
+    """A panorama `east` metres from a spot in Paris, facing and leaning so."""
+    where = to_degrees(Point(652000.0 + east, 6862000.0))
+    return Picture(
+        id, where.x, where.y, azimuth, True, "2024-01-01", "", "", roll=roll, pitch=pitch
+    )
 
 
 def test_a_panorama_turned_faces_and_leans_as_its_axes_turned():
@@ -123,35 +130,82 @@ def test_a_panorama_turned_faces_and_leans_as_its_axes_turned():
     assert (turned.lon, turned.lat) == (p.lon, p.lat)
 
 
-def test_a_correction_is_applied_only_to_the_panorama_it_was_computed_against():
+TURN = (0.0, 0.0, 1.0)
+
+
+def _kept(p: Picture) -> dict[str, agreement.Agreed]:
+    return {p.id: agreement.Agreed(TURN, agreement.stance(p))}
+
+
+def test_a_correction_turns_the_panorama_standing_as_it_was_computed_against():
     p = _picture()
-    kept = {"v": agreement.Agreed((0.0, 0.0, 1.0), (40.0, 2.0, -3.0))}
 
-    (now,) = agreement.applied([p], kept)
-    (moved,) = agreement.applied([replace(p, roll=-3.05)], kept)  # levelled otherwise since
-    (other,) = agreement.applied([replace(p, id="w")], kept)
+    assert agreement.applied([p], _kept(p)) == [agreement.corrected(p, np.array(TURN))]
 
-    assert now == agreement.corrected(p, np.array([0.0, 0.0, 1.0]))
-    assert moved == replace(p, roll=-3.05) and other == replace(p, id="w")
+
+def test_a_correction_is_left_once_its_panorama_is_levelled_otherwise():
+    p = _picture()
+    levelled = replace(p, roll=p.roll - 0.05)
+
+    assert agreement.applied([levelled], _kept(p)) == [levelled]
+
+
+def test_a_correction_is_left_once_its_panorama_has_moved():
+    p = _picture()
+    moved = _picture(east=0.5)  # a survey fix or COLMAP moving it: its pairs are other
+
+    assert agreement.applied([moved], _kept(p)) == [moved]
+
+
+def test_a_correction_turns_no_other_panorama():
+    p, other = _picture(), _picture(id="w")
+
+    assert agreement.applied([other], _kept(p)) == [other]
 
 
 def test_corrections_are_read_as_they_were_kept(tmp_path):
     path = tmp_path / "agreed.json"
-    found = {"v": np.array([0.1, -0.2, 0.3]), "w": np.array([1.0, 0.0, -1.5])}
-    against = {"v": (40.0, 2.0, -3.0), "w": (350.5, -1.0, 0.25)}
-
-    agreement.save(path, found, against)
-
-    assert agreement.load(path) == {
-        "v": agreement.Agreed((0.1, -0.2, 0.3), (40.0, 2.0, -3.0)),
-        "w": agreement.Agreed((1.0, 0.0, -1.5), (350.5, -1.0, 0.25)),
+    kept = {
+        "v": agreement.Agreed((0.1, -0.2, 0.3), agreement.stance(_picture())),
+        "w": agreement.Agreed((1.0, 0.0, -1.5), agreement.stance(_picture("w", east=5.0))),
     }
+
+    agreement.save(path, kept)
+
+    assert agreement.load(path) == kept
 
 
 def test_corrections_computed_otherwise_are_not_read(tmp_path, monkeypatch):
     path = tmp_path / "agreed.json"
-    agreement.save(path, {"v": np.array([0.1, -0.2, 0.3])}, {"v": (40.0, 2.0, -3.0)})
+    agreement.save(path, {"v": agreement.Agreed(TURN, agreement.stance(_picture()))})
 
     monkeypatch.setattr(agreement, "PULL", 0.02)
 
-    assert agreement.load(path) == {} and agreement.load(tmp_path / "none.json") == {}
+    assert agreement.load(path) == {}
+
+
+def test_no_corrections_kept_reads_none(tmp_path):
+    assert agreement.load(tmp_path / "none.json") == {}
+
+
+def test_each_walk_link_with_a_pair_made_is_measured_once():
+    pictures = [_picture("s"), _picture("v", east=5.0), _picture("w", east=-5.0)]
+    spheres = [
+        match.Panorama(p.id, p.point.x, p.point.y, 0.0, p.azimuth, Path(f"{p.id}.jpg"))
+        for p in pictures
+    ]
+    read = []
+
+    def made(home: match.Panorama, other: match.Panorama) -> bool:
+        return {home.id, other.id} == {"s", "v"}  # s and w linked too, never matched
+
+    def rays(home: match.Panorama, other: match.Panorama) -> tuple[np.ndarray, np.ndarray]:
+        read.append((home.id, other.id))
+        return _pair(np.array([other.x - home.x, other.y - home.y, 0.0]), (0.2, 0.4, -0.6))
+
+    found = agreement.links(pictures, spheres, made, rays)
+
+    assert read == [("s", "v")]
+    [(i, j, r)] = found
+    assert (i, j) == ("s", "v")
+    np.testing.assert_allclose(r, (0.2, 0.4, -0.6), atol=0.01)

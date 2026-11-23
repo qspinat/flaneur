@@ -5,11 +5,10 @@ neighbour turns to agree with the panorama (measured); one small turn per panora
 from them all, the survey's held where they stand (averaged), and applied to the panorama as
 levelled when it was computed (applied, by cli._levelled). The pairs are set right as the walls'
 are (depth.set_right): a neighbour standing under 2 m away is left out, which E8a's refit kept
-(its turn is the same otherwise)."""
+(measured: 4 of its 5,361 links; their turns are the same otherwise)."""
 
 import hashlib
-import json
-from collections.abc import Set
+from collections.abc import Callable, Set
 from dataclasses import replace
 from pathlib import Path
 from typing import NamedTuple
@@ -19,8 +18,7 @@ from scipy import sparse
 from scipy.optimize import least_squares
 from scipy.spatial.transform import Rotation
 
-from flaneur import depth, match, poses
-from flaneur.gazetteer import angle
+from flaneur import depth, match, panoramas, placing, poses, register
 from flaneur.panoramax import Picture
 from flaneur.sources import write_json
 
@@ -33,15 +31,47 @@ MOST_TURNED_DEG = 10.0  # a pair set right by more (its rays or its baseline) sa
 PULL = 0.01  # each free panorama's turn pulled to none this much (where no survey panorama
 # reaches, they stay as they are on the whole)
 SCALE_DEG = 0.5  # a link disagreeing by more than this with the others counts less (soft L1)
-SAME_DEG = 0.01  # a correction holds while its panorama faces and leans this near as it did
 
 
 class Agreed(NamedTuple):
-    """A panorama's correction (rotation vector, degrees, as `measured`), and the azimuth,
-    pitch and roll it was computed against."""
+    """A panorama's correction (rotation vector, degrees, as `measured`), and how the panorama
+    stood when it was computed (see stance)."""
 
     rotation: tuple[float, float, float]
-    against: tuple[float, float, float]
+    against: tuple[float, ...]
+
+
+def stance(picture: Picture) -> tuple[float, ...]:
+    """Where a panorama stands, facing (see poses.at), then its roll and pitch to the
+    hundredth: its pairs, and so its correction, hold while these do."""
+    where = poses.at(picture.point.x, picture.point.y, picture.azimuth or 0.0)
+    return (*where, round(picture.roll, 2), round(picture.pitch, 2))
+
+
+def links(
+    pictures: list[Picture],
+    spheres: list[match.Panorama],
+    made: Callable[[match.Panorama, match.Panorama], bool],
+    rays: Callable[[match.Panorama, match.Panorama], tuple[np.ndarray, np.ndarray]],
+) -> list[tuple[str, str, np.ndarray]]:
+    """Each walk link between the panoramas (panoramas.links, as recorded) once, whose pair is
+    `made` already (on disk: none made here) and says how far the second turns against the
+    first (`rays`: the pair's, read; see measured): (i, j, r_ij), for `averaged`."""
+    by_id = {p.id: p for p in spheres}
+    found, seen = [], set()
+    for home, near in panoramas.links(pictures).items():
+        for other, _, _ in near:
+            both = frozenset((home, other))
+            if home not in by_id or other not in by_id or both in seen:
+                continue
+            seen.add(both)
+            h, o = by_id[home], by_id[other]
+            if not made(h, o):
+                continue
+            turn = measured(placing._at(h), placing._at(o), *rays(h, o))
+            if turn is not None:
+                found.append((home, other, turn))
+    return found
 
 
 def measured(
@@ -113,53 +143,35 @@ def camera_angles(axes: np.ndarray) -> tuple[float, float, float]:
 
 
 def applied(pictures: list[Picture], kept: dict[str, Agreed]) -> list[Picture]:
-    """The panoramas, each turned by its correction `kept` while it faces and leans as when
-    the correction was computed (within SAME_DEG); one levelled otherwise since is left."""
+    """The panoramas, each turned by its correction `kept` while it stands as when the
+    correction was computed (see stance, poses.stands); one moved or levelled otherwise since is
+    left as it is."""
     return [
-        corrected(p, np.array(k.rotation)) if (k := kept.get(p.id)) and _same(p, k.against) else p
+        corrected(p, np.array(k.rotation))
+        if (k := kept.get(p.id)) and poses.stands(k.against, stance(p))
+        else p
         for p in pictures
     ]
 
 
-def _same(picture: Picture, against: tuple[float, float, float]) -> bool:
-    azimuth, pitch, roll = against
-    return (
-        abs(angle(azimuth, picture.azimuth or 0.0)) <= SAME_DEG
-        and abs(picture.pitch - pitch) <= SAME_DEG
-        and abs(picture.roll - roll) <= SAME_DEG
-    )
-
-
 def setup() -> str:
-    """How corrections are now computed: those computed otherwise are not read (see load)."""
-    terms = (
-        PULL,
-        SCALE_DEG,
-        MOST_TURNED_DEG,
-        depth.LEAST_MATCHES,
-        depth.WIDEST_DEG,
-        depth.ROBUST_DEG,
-    )
-    return hashlib.sha1(repr(terms).encode()).hexdigest()[:8]
+    """How corrections are now computed (this code, and the terms pairs are set right by):
+    those computed otherwise are not read (see load)."""
+    terms = (PULL, SCALE_DEG, MOST_TURNED_DEG, depth.LEAST_MATCHES, depth.WIDEST_DEG)
+    terms += (depth.ROBUST_DEG, depth.NEAR_M)
+    made = Path(__file__).read_bytes() + repr(terms).encode()
+    return hashlib.sha1(made).hexdigest()[:8]
 
 
-def save(
-    path: Path, found: dict[str, np.ndarray], against: dict[str, tuple[float, float, float]]
-) -> None:
-    """The corrections (by panorama), each with the azimuth, pitch and roll it was computed
-    against, and how they were computed (see setup)."""
-    rows = {
-        i: {"rotation": [float(v) for v in c], "from": [float(v) for v in against[i]]}
-        for i, c in sorted(found.items())
-    }
+def save(path: Path, kept: dict[str, Agreed]) -> None:
+    """The corrections (by panorama), and how they were computed (see setup)."""
+    rows = {i: a._asdict() for i, a in sorted(kept.items())}
     write_json(path, {"setup": setup(), "panoramas": rows})
 
 
 def load(path: Path) -> dict[str, Agreed]:
     """What `save` kept, if computed as corrections are now (see setup); none else."""
-    if not path.exists():
-        return {}
-    kept = json.loads(path.read_text())
+    kept = register.load(path)
     if kept.get("setup") != setup():
         return {}
-    return {i: Agreed(tuple(r["rotation"]), tuple(r["from"])) for i, r in kept["panoramas"].items()}
+    return {i: Agreed(*(tuple(r[f]) for f in Agreed._fields)) for i, r in kept["panoramas"].items()}

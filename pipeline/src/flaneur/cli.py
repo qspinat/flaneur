@@ -840,14 +840,14 @@ def _street_facades(features: list[dict]) -> Callable[[float, float], list[facad
 
 
 def _placing_world(
-    corrected: bool = True, agreed: bool = True
+    corrected: bool = True,
 ) -> tuple[list[match.Panorama], Callable[[float, float], list]]:
-    """The panoramas where they were taken, levelled (see _levelled), at their camera's height
-    over the street (parallax needs it on a slope), and BD TOPO's street facades near a spot."""
+    """The panoramas where they were taken, levelled, at their camera's height over the street
+    (parallax needs it on a slope), and BD TOPO's street facades near a spot."""
     with closing(db.connect(DB_PATH)) as conn:
         area = placements.area(conn, buildings.MARGIN_M)
         features = _buildings(area)
-        pictures = _lined_up(panoramas.load(conn), corrected, agreed)
+        pictures = _lined_up(panoramas.load(conn), corrected)
     return _panoramas(pictures, _heights(features, area)), _street_facades(features)
 
 
@@ -4655,28 +4655,20 @@ def agree_panoramas() -> None:
     tenus fixes. Calculé sur les panoramas mis à niveau tels qu'avant tout accord (ce qu'il
     écrit ne revient pas dans ce qu'il calcule) ; écrit data/pilot/panorama_agreed.json, lu
     selon agreement.APPLIED (après la mesure E8a du plan)."""
-    spheres, _ = _placing_world(agreed=False)
     with closing(db.connect(DB_PATH)) as conn:
+        area = placements.area(conn, buildings.MARGIN_M)
         pictures = panoramas.load(conn)
-    by_id = {p.id: p for p in spheres}
-    scenes = _wall_scenes(spheres, _colmap_fixed())
-    links, seen = [], set()
-    for home, near in panoramas.links(pictures).items():
-        for other, _, _ in near:
-            both = frozenset((home, other))
-            if home not in by_id or other not in by_id or both in seen:
-                continue
-            seen.add(both)
-            h, o = by_id[home], by_id[other]
-            if scenes._stored(h, o) is None:  # pairs on disk only: none made
-                continue
-            turn = agreement.measured(placing._at(h), placing._at(o), *scenes._rays(h, o))
-            if turn is not None:
-                links.append((home, other, turn))
+    levelled = _lined_up(pictures, agreed=False)  # what it wrote is not read back
+    spheres = _panoramas(levelled, _heights(_buildings(area), area))  # pairs set right in 3D
+    scenes = _Scenes(  # the pairs on disk, read only: no matcher, no walls fitted
+        spheres, set(), _no_matcher, threading.Lock(), lambda x, y: [], WALLS, PAIR_MATCHES
+    )
+    links = agreement.links(pictures, spheres, scenes._made, scenes._rays)
     held = {p.id for p in pictures if p.producer == survey.PRODUCER}
     found = agreement.averaged(links, held)
-    against = {i: (by_id[i].azimuth, by_id[i].pitch, by_id[i].roll) for i in found}
-    agreement.save(AGREED, found, against)
+    stood = {p.id: agreement.stance(p) for p in levelled}
+    kept = {i: agreement.Agreed(tuple(map(float, c)), stood[i]) for i, c in found.items()}
+    agreement.save(AGREED, kept)
     turned = [float(np.linalg.norm(c)) for c in found.values()]
     typer.echo(
         f"liens mesurés : {len(links)} ; panoramas accordés : {len(found)} ; correction "
